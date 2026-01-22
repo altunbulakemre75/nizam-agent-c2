@@ -1,74 +1,36 @@
-﻿<!doctype html>
-<html>
+﻿<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
   <title>NIZAM COP</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet CSS -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    crossorigin=""
   />
+
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; }
-    .layout { display: grid; grid-template-columns: 1fr 420px; height: 100vh; }
-    #map { width: 100%; height: 100%; }
-    .side { border-left: 1px solid #ddd; padding: 12px; overflow: auto; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
-    .h { font-weight: 700; margin: 0 0 8px 0; }
-    .small { color: #555; font-size: 12px; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ccc; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .mono { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
-    .th-high { border-color: #e11d48; }
-    .th-med  { border-color: #f59e0b; }
-    .th-low  { border-color: #22c55e; }
-    .btn { padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; cursor: pointer; background: #fff; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+    }
+    #map {
+      width: 100%;
+      height: 100vh;
+    }
   </style>
 </head>
 <body>
-  <div class="layout">
-    <div id="map"></div>
 
-    <div class="side">
-      <div class="card">
-        <div class="row" style="justify-content: space-between;">
-          <div>
-            <div class="h">NIZAM COP</div>
-            <div class="small" id="wsStatus">WS: connecting...</div>
-          </div>
-          <button class="btn" id="clearBtn">Clear</button>
-        </div>
-      </div>
+  <div id="map"></div>
 
-      <div class="card">
-        <div class="h">Threat Alerts</div>
-        <div id="threats"></div>
-      </div>
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-      <div class="card">
-        <div class="h">Tracks</div>
-        <div id="tracks"></div>
-      </div>
-
-      <div class="card">
-        <div class="h">Agent Health</div>
-        <div id="agents"></div>
-      </div>
-
-      <div class="card">
-        <div class="h">Event Tail (debug)</div>
-        <div class="mono" id="tail"></div>
-      </div>
-    </div>
-  </div>
-
-  <script
-    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    crossorigin=""
-  ></script>
+  <!-- NIZAM COP UI -->
   <script src="/static/app.js"></script>
+
 </body>
 </html>
