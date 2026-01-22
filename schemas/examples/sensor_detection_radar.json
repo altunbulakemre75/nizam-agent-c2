@@ -1,0 +1,24 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "5f8d7bb9-73a7-4c9b-9c1d-2d5b7f55b0c2",
+  "event_type": "sensor.detection.radar",
+  "timestamp": "2026-01-22T00:00:01.050Z",
+  "source": { "agent_id": "radar-agent", "instance_id": "radar-01", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "sensor": { "sensor_id": "radar-01", "sensor_type": "RADAR" },
+    "scan_id": "radar-01:1737504001050",
+    "detections": [
+      {
+        "local_track_id": "r-102",
+        "range_m": 820.4,
+        "az_deg": 12.6,
+        "el_deg": 1.2,
+        "radial_velocity_mps": -25.3,
+        "snr_db": 18.4,
+        "conf": 0.77,
+        "covariance": { "range_var": 16.0, "az_var": 4.0, "el_var": 1.0, "vr_var": 4.0 }
+      }
+    ]
+  }
+}

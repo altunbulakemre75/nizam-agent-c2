@@ -1,0 +1,13 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "1f0f3d5c-3a58-4c42-8c59-0cc34d36d6d0",
+  "event_type": "agent.heartbeat",
+  "timestamp": "2026-01-22T00:00:00.000Z",
+  "source": { "agent_id": "orchestrator", "instance_id": "local-1", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "status": "OK",
+    "uptime_s": 120,
+    "metrics": { "events_out_per_s": 0.5, "events_in_per_s": 2.3, "cpu_pct": 12.1, "mem_mb": 220 }
+  }
+}

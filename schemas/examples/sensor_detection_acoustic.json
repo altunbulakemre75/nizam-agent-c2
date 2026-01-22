@@ -1,0 +1,15 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "5e6c4f25-662a-4d0a-9b8c-7a9e8c25f6df",
+  "event_type": "sensor.detection.acoustic",
+  "timestamp": "2026-01-22T00:00:01.150Z",
+  "source": { "agent_id": "acoustic-agent", "instance_id": "ac-01", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "sensor": { "sensor_id": "ac-01", "sensor_type": "ACOUSTIC" },
+    "window_ms": 1000,
+    "detections": [
+      { "class_probs": { "drone": 0.71, "vehicle": 0.18, "person": 0.11 }, "bearing_deg": null, "conf": 0.71 }
+    ]
+  }
+}

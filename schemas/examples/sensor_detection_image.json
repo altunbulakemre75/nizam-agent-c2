@@ -1,0 +1,24 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "8a6d2b2b-8a2a-4c1f-ae46-0b7bbdf2b7fa",
+  "event_type": "sensor.detection.image",
+  "timestamp": "2026-01-22T00:00:01.000Z",
+  "source": { "agent_id": "camera-agent", "instance_id": "cam-01", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "sensor": { "sensor_id": "cam-01", "sensor_type": "EO_CAMERA" },
+    "frame_id": "cam-01:1737504001000",
+    "fps": 15,
+    "resolution": { "w": 1920, "h": 1080 },
+    "detections": [
+      {
+        "local_track_id": "37",
+        "class_label": "drone",
+        "class_id": 0,
+        "conf": 0.84,
+        "bbox_xyxy": [640, 210, 820, 360],
+        "centroid_px": [730, 285]
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "2a3e6f6a-3d7c-4f2d-9fd3-7db4e7c2a17f",
+  "event_type": "track.update",
+  "timestamp": "2026-01-22T00:00:01.200Z",
+  "source": { "agent_id": "orchestrator", "instance_id": "local-1", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "global_track_id": "T-00017",
+    "status": "CONFIRMED",
+    "kinematics": { "range_m": 805.0, "az_deg": 12.8, "el_deg": 1.1, "speed_mps": 26.0, "radial_velocity_mps": -24.5 },
+    "classification": { "label": "drone", "conf": 0.83 },
+    "supporting_sensors": ["RADAR", "EO_CAMERA", "RF"],
+    "evidence": [
+      "RADAR: approaching target with stable radial velocity",
+      "EO_CAMERA: drone class detected with conf>=0.8",
+      "RF: drone_control_suspected present"
+    ],
+    "last_update_sources": ["RADAR"]
+  }
+}

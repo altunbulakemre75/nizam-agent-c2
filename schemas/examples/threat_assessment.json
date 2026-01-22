@@ -1,0 +1,22 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "3bdbce7f-49d4-4a0f-9c84-7f72c3e4b9f1",
+  "event_type": "threat.assessment",
+  "timestamp": "2026-01-22T00:00:01.250Z",
+  "source": { "agent_id": "orchestrator", "instance_id": "local-1", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "global_track_id": "T-00017",
+    "threat_level": "HIGH",
+    "score": 82,
+    "tti_s": 33,
+    "rules_fired": ["DRONE_RANGE_LT_500_AND_SPEED_GT_20", "MULTI_SENSOR_CONFIRMED_2PLUS"],
+    "reasons": [
+      "Classified as drone (0.83)",
+      "Approaching: radial_velocity=-24.5 m/s",
+      "Estimated TTI=33s",
+      "Confirmed by 3 sensors (RADAR+EO_CAMERA+RF)"
+    ],
+    "recommended_action": "ALERT"
+  }
+}

@@ -1,0 +1,15 @@
+﻿{
+  "schema_version": "1.1",
+  "event_id": "a0b8c2d2-6b66-4b35-84c6-5a4a48b6c2b1",
+  "event_type": "sensor.detection.rf",
+  "timestamp": "2026-01-22T00:00:01.100Z",
+  "source": { "agent_id": "rf-agent", "instance_id": "rf-01", "host": "dev" },
+  "correlation_id": "demo-run-0001",
+  "payload": {
+    "sensor": { "sensor_id": "rf-01", "sensor_type": "RF" },
+    "window_ms": 1000,
+    "detections": [
+      { "signal_type": "drone_control_suspected", "band_hz": [2400000000, 2483500000], "bearing_deg": 14.0, "conf": 0.62 }
+    ]
+  }
+}
