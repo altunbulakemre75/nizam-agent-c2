@@ -1,340 +1,164 @@
-\# NIZAM – Distributed Autonomous C2 Platform (Prototype)
+NIZAM – Real-Time COP (Common Operational Picture)
 
+NIZAM is a real-time Common Operational Picture (COP) prototype designed for C2 / ISR / security-oriented systems.
+It demonstrates live track ingestion, WebSocket-based state synchronization, and an operator-focused map UI.
 
+The project is intentionally lightweight but architected in a way that mirrors military-grade COP systems.
 
-NIZAM is an agent-based, event-driven Command \& Control (C2) platform prototype
+✨ Key Capabilities
 
-inspired by modern autonomous defense systems (Anduril-like architectures).
+Real-time WebSocket backend
 
+Live track ingestion and rendering
 
+Threat-based visualization (color-coded)
 
-The system is designed to ingest real sensor data, generate operational events,
+Restricted / exclusion zone support
 
-perform decision support, and coordinate multiple autonomous agents
+Operator-controlled UI layers
 
-in a human-in-the-loop manner.
+Deterministic frontend rendering
 
+Pause / buffer–ready backend architecture
 
+🧱 System Architecture
++-------------------+        WebSocket        +--------------------+
+|                   | <--------------------> |                    |
+|   Frontend (UI)   |                        |   Backend (API)    |
+|   Leaflet + JS    |                        |   FastAPI          |
+|                   |   HTTP (REST)          |                    |
++-------------------+ <--------------------> +--------------------+
 
-This project is a decision-support and simulation-oriented platform.
+Backend
 
-It does NOT perform lethal actions or autonomous engagement.
+FastAPI
 
+WebSocket endpoint for live COP updates
 
+In-memory operational state (tracks, zones, threats)
 
----
+Event-driven architecture (cop.track, cop.snapshot, cop.zone)
 
+Frontend
 
+Leaflet.js map engine
 
-\## Project Goal
+Operator control panel
 
+Layer toggles (zone on/off)
 
+Threat legend and filtering
 
-The goal of NIZAM is to demonstrate a distributed autonomous architecture capable of:
+Real-time marker updates via WebSocket
 
-
-
-\- Real-time sensor ingestion
-
-\- Event-based situation awareness
-
-\- Threat-related decision support
-
-\- Coordinated multi-agent responses
-
-\- Centralized command \& control (C2)
-
-
-
-Initial focus:
-
-Low-altitude UAV (drone) threat detection around fixed facilities.
-
-
-
----
-
-
-
-\## System Architecture
-
-
-
-Sensor Agents  
-
-→ Events  
-
-→ Orchestrator / C2 Core  
-
-→ Recommendations  
-
-→ Countermeasure Agents (simulated)
-
-
-
----
-
-
-
-\## Core Components
-
-
-
-\### Orchestrator (C2 Core)
-
-\- Central event ingestion
-
-\- Agent registry and health tracking
-
-\- Rule-based decision support
-
-\- System state aggregation
-
-
-
-Port: 8000
-
-
-
-\### Camera Agent (Real Sensor – Prototype)
-
-\- Uses real camera input (laptop or USB camera)
-
-\- Performs basic motion detection
-
-\- Converts sensor output into operational events
-
-\- Sends events to Orchestrator
-
-
-
-Port: 8001
-
-
-
-\### Machine / Countermeasure Agent (Placeholder)
-
-\- Represents response systems (jammer, interceptor, alarm, etc.)
-
-\- Currently simulated
-
-\- Designed for future hardware integration
-
-
-
-Port: 8002
-
-
-
----
-
-
-
-\## Event Model (Initial)
-
-
-
-Example event produced by a sensor agent:
-
-
-
-```json
-
+📡 Event Model (Core)
+Track Event
 {
-
-&nbsp; "type": "motion\_detected",
-
-&nbsp; "source": "camera-1",
-
-&nbsp; "ts": "2026-01-22T12:00:00Z",
-
-&nbsp; "data": {
-
-&nbsp;   "motion\_pixels": 24500
-
-&nbsp; }
-
+  "event_type": "cop.track",
+  "payload": {
+    "id": "T1",
+    "lat": 41.015,
+    "lon": 28.979,
+    "threat_score": 80
+  }
 }
 
-```
+Snapshot Event (WS)
+{
+  "event_type": "cop.snapshot",
+  "tracks": {
+    "T1": {
+      "lat": 41.015,
+      "lon": 28.979
+    }
+  },
+  "paused": false
+}
 
+🚀 Running the Project
+1️⃣ Backend
+cd nizam-backend
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
 
 
-Events are lightweight, timestamped and centrally logged.
+Health check:
 
+http://127.0.0.1:8000/api/state
 
 
----
+WebSocket:
 
+ws://127.0.0.1:8000/ws
 
+2️⃣ Frontend
+cd nizam-frontend
+python -m http.server 5173
 
-\## Getting Started (Local Demo)
 
+Open in browser:
 
+http://127.0.0.1:5173
 
-Requirements:
+🧪 Quick Test (Track Injection)
+$t='{"event_type":"cop.track","payload":{"id":"T1","lat":41.015,"lon":28.979,"threat_score":80}}'
+Invoke-WebRequest -Uri http://127.0.0.1:8000/api/ingest `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body $t
 
-\- Python 3.10+
 
-\- Webcam (built-in or USB)
+Expected result:
 
+Track appears on the map
 
+Marker color reflects threat level
 
-Setup:
+Track count increases in UI
 
-```bash
+🎯 Project Scope & Intent
 
-python -m venv .venv
+This project is not a toy demo.
+It is a foundation-level COP system designed to demonstrate:
 
-source .venv/bin/activate
+Real-time operational awareness
 
-pip install fastapi uvicorn requests opencv-python
+Event-driven state propagation
 
-```
+Operator-centric UI concepts
 
+Expandability toward:
 
+Sensor fusion
 
-Run services:
+Track correlation
 
+Threat scoring engines
 
+Replay / forensic analysis
 
-Orchestrator:
+🔜 Planned Extensions
 
-```bash
+Track detail side panel
 
-uvicorn orchestrator.app:app --reload --port 8000
+Pause / resume with buffered playback
 
-```
+Multi-sensor fusion (radar, RF, EO)
 
+Persistent storage (Redis / PostgreSQL)
 
+Role-based operator views
 
-Camera Agent:
+🛡️ Disclaimer
 
-```bash
+This project is a technical prototype for educational and demonstrative purposes.
+It does not represent a deployed military or security system.
 
-uvicorn agents.camera\_agent:app --reload --port 8001
+👤 Author
 
-```
+Emre Altunbulak
+Mechanical Engineer | Real-Time Systems | C2 / COP Architectures
 
+📌 Keywords
 
-
-Start camera loop:
-
-```bash
-
-POST http://127.0.0.1:8001/start?cam\_index=0
-
-```
-
-
-
-Check system state:
-
-```bash
-
-GET http://127.0.0.1:8000/state
-
-```
-
-
-
----
-
-
-
-\## Safety and Ethics
-
-
-
-\- No autonomous lethal decisions
-
-\- No weapon control
-
-\- All outputs are recommendations
-
-\- Human-in-the-loop operation
-
-
-
----
-
-
-
-\## Roadmap
-
-
-
-Phase 1 – Sensor and Event Foundation
-
-\- Agent-based architecture
-
-\- Real camera input
-
-\- Event ingestion
-
-
-
-Phase 2 – Threat and Track Modeling
-
-\- Object tracking
-
-\- Threat scoring
-
-\- Time-to-target estimation
-
-
-
-Phase 3 – Decision Support
-
-\- Policy engine
-
-\- Confidence and explanation output
-
-\- Operator approval flow
-
-
-
-Phase 4 – Simulation and Visualization
-
-\- Scenario simulator
-
-\- Timeline and replay
-
-\- Common Operating Picture (COP) UI
-
-
-
----
-
-
-
-\## Intended Use Cases
-
-
-
-\- Counter-UAS decision support
-
-\- Fixed facility protection
-
-\- Sensor fusion experimentation
-
-\- Defense-oriented autonomous system research
-
-\- C2 / C4ISR software prototyping
-
-
-
----
-
-
-
-\## Disclaimer
-
-
-
-This software is a technical prototype.
-
-It is not intended for direct operational deployment.
-
-
-
+COP · C2 · ISR · FastAPI · WebSocket · Leaflet · Real-Time Systems · Defense Software
