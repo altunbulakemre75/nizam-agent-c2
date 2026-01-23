@@ -1,207 +1,438 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="tr">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>NIZAM COP</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-  <!-- Leaflet CSS -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
   />
 
   <style>
-    html, body {
-      height: 100%;
-      margin: 0;
+    html, body { height: 100%; margin: 0; }
+    body { background:#0b0c10; color:#fff; font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #map { height:100vh; width:100vw; position:relative; }
+
+    #ui-panel{
+      position:absolute; top:12px; left:12px; z-index:1200;
+      width:330px; background:rgba(10,10,12,.72);
+      border:1px solid rgba(255,255,255,.16);
+      border-radius:14px; padding:12px; backdrop-filter: blur(6px);
+      box-shadow:0 8px 30px rgba(0,0,0,.35);
     }
-    #map {
-      width: 100%;
-      height: 100%;
+    #ui-panel .title{ font-weight:800; margin:0 0 10px 0; font-size:13px; opacity:.95; letter-spacing:.2px; }
+    .row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 0; border-top:1px solid rgba(255,255,255,.08); }
+    .row:first-of-type{ border-top:none; padding-top:0; }
+    .label{ display:flex; flex-direction:column; gap:2px; min-width:150px; }
+    .label .k{ font-weight:700; font-size:12px; opacity:.95; }
+    .label .v{ font-size:12px; opacity:.70; overflow:hidden; text-overflow:ellipsis; }
+    .badge{ font-size:11px; padding:4px 9px; border-radius:999px; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.06); white-space:nowrap; }
+    .ok{ color:#a6ffcb; border-color:rgba(39,194,108,.40); background:rgba(39,194,108,.10); }
+    .warn{ color:#ffd7a6; border-color:rgba(255,159,26,.40); background:rgba(255,159,26,.10); }
+    .bad{ color:#ffb3ad; border-color:rgba(255,59,48,.40); background:rgba(255,59,48,.10); }
+
+    .toggle{ display:inline-flex; align-items:center; gap:8px; user-select:none; }
+    .toggle input{ transform:scale(1.1); }
+
+    .slider-wrap{ display:flex; align-items:center; gap:10px; width:185px; }
+    .slider-wrap input[type="range"]{ width:125px; }
+
+    #threat-legend{
+      position:absolute; right:12px; bottom:12px; z-index:1200; pointer-events:none;
+      background:rgba(10,10,12,.70); border:1px solid rgba(255,255,255,.18);
+      border-radius:12px; padding:10px 12px; min-width:200px; backdrop-filter: blur(6px);
+      box-shadow:0 8px 30px rgba(0,0,0,.30);
     }
+    #threat-legend .title{ font-weight:800; font-size:12px; margin:0 0 8px 0; opacity:.95; }
+    #threat-legend .r{ display:flex; align-items:center; gap:8px; margin:6px 0; }
+    #threat-legend .dot{ width:10px; height:10px; border-radius:999px; box-shadow:0 0 0 1px rgba(255,255,255,.25) inset; flex:0 0 10px; }
+    #threat-legend .txt{ display:flex; justify-content:space-between; width:100%; gap:10px; opacity:.92; font-size:12px; }
+    #threat-legend .rng{ opacity:.70; white-space:nowrap; }
+
+    .leaflet-control-attribution{ opacity:.7; }
   </style>
 </head>
+
 <body>
+  <div id="map">
+    <div id="ui-panel">
+      <div class="title">NIZAM COP</div>
 
-  <div id="map"></div>
+      <div class="row">
+        <div class="label">
+          <div class="k">WS</div>
+          <div class="v" id="ws-url">ws://127.0.0.1:8000/ws</div>
+        </div>
+        <div class="badge bad" id="ws-badge">disconnected</div>
+      </div>
 
-  <!-- Leaflet JS -->
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <div class="row">
+        <div class="label">
+          <div class="k">State</div>
+          <div class="v" id="state-url">http://127.0.0.1:8000/api/state</div>
+        </div>
+        <div class="badge warn" id="state-badge">waiting</div>
+      </div>
 
-  <!-- =========================
-       NIZAM COP FRONTEND
-       ========================= -->
+      <div class="row">
+        <div class="label">
+          <div class="k">Restricted Zone</div>
+          <div class="v">Layer Control (UI only)</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="zone-toggle" />
+          <span class="badge" id="zone-badge">OFF</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <div class="k">Min Threat</div>
+          <div class="v">Show ≥ <span id="minth-val">0</span></div>
+        </div>
+        <div class="slider-wrap">
+          <input id="minth-slider" type="range" min="0" max="100" step="1" value="0">
+          <span class="badge" id="minth-badge">0</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <div class="k">Tracks (shown/total)</div>
+          <div class="v">Marker + trail</div>
+        </div>
+        <div class="badge" id="track-count">0/0</div>
+      </div>
+    </div>
+
+    <div id="threat-legend">
+      <div class="title">Threat Legend</div>
+      <div class="r"><span class="dot" style="background:#27c26c"></span><div class="txt"><span>Low</span><span class="rng">0–29</span></div></div>
+      <div class="r"><span class="dot" style="background:#ff9f1a"></span><div class="txt"><span>Medium</span><span class="rng">30–69</span></div></div>
+      <div class="r"><span class="dot" style="background:#ff3b30"></span><div class="txt"><span>High</span><span class="rng">70+</span></div></div>
+    </div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
   <script>
-    // =========================
-    // 1) HARİTA
-    // =========================
-    const map = L.map('map').setView([41.02, 29.11], 10);
+    // ================================
+    // CONFIG
+    // ================================
+    const BACKEND_HTTP = "http://127.0.0.1:8000";
+    const WS_URL = "ws://127.0.0.1:8000/ws";
+    const STATE_URL = `${BACKEND_HTTP}/api/state`;
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    // ================================
+    // GLOBAL STATE (define early)
+    // ================================
+    const tracks = new Map(); // id -> {marker, trail, points, score, visible}
+    let zoneCircle = null;
+    let lastZone = null;
+    let ws = null;
+
+    // ================================
+    // UI elements
+    // ================================
+    const wsBadge = document.getElementById("ws-badge");
+    const stateBadge = document.getElementById("state-badge");
+    const zoneToggle = document.getElementById("zone-toggle");
+    const zoneBadge = document.getElementById("zone-badge");
+    const trackCountEl = document.getElementById("track-count");
+    const minThSlider = document.getElementById("minth-slider");
+    const minThValEl = document.getElementById("minth-val");
+    const minThBadge = document.getElementById("minth-badge");
+
+    document.getElementById("ws-url").textContent = WS_URL;
+    document.getElementById("state-url").textContent = STATE_URL;
+
+    // ================================
+    // Map
+    // ================================
+    const map = L.map("map", { zoomControl: true }).setView([41.015, 28.979], 12);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
-      attribution: '&copy; OpenStreetMap'
+      attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
 
-    console.log("Map initialized");
-
-    // =========================
-    // 2) STATE (MARKER + TRAIL + SPEED)
-    // =========================
-    const TRACK_MARKERS = new Map(); // id -> Leaflet CircleMarker
-    const TRACK_TRAILS  = new Map(); // id -> { points: [[lat,lon],...], polyline }
-    const TRACK_LAST    = new Map(); // id -> { lat, lon, ts }
-
-    const TRAIL_MAX_POINTS = 50;
-
-    function haversineMeters(lat1, lon1, lat2, lon2) {
-      const R = 6371000;
-      const toRad = (d) => d * Math.PI / 180;
-
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return R * c;
+    // ================================
+    // Badges
+    // ================================
+    function setWsBadge(state){
+      if (state === "connected") { wsBadge.textContent="connected"; wsBadge.className="badge ok"; return; }
+      if (state === "connecting") { wsBadge.textContent="connecting"; wsBadge.className="badge warn"; return; }
+      wsBadge.textContent="disconnected"; wsBadge.className="badge bad";
     }
 
-    function removeTrack(id) {
-      const m = TRACK_MARKERS.get(id);
-      if (m) {
-        map.removeLayer(m);
-        TRACK_MARKERS.delete(id);
-      }
-
-      const t = TRACK_TRAILS.get(id);
-      if (t && t.polyline) {
-        map.removeLayer(t.polyline);
-      }
-      TRACK_TRAILS.delete(id);
-      TRACK_LAST.delete(id);
+    // ================================
+    // Threat
+    // ================================
+    function threatColor(score){
+      const s = Number(score ?? 0);
+      if (s >= 70) return "#ff3b30";
+      if (s >= 30) return "#ff9f1a";
+      return "#27c26c";
     }
 
-    function styleTrack(marker, track) {
-      const status = (track.status || "LIVE").toUpperCase();
-
-      if (status === "STALE") {
-        marker.setStyle({ opacity: 0.35, fillOpacity: 0.15 });
-      } else {
-        marker.setStyle({ opacity: 1.0, fillOpacity: 0.7 });
-      }
-
-      const trail = TRACK_TRAILS.get(track.id);
-      if (trail && trail.polyline) {
-        trail.polyline.setStyle({
-          opacity: status === "STALE" ? 0.25 : 0.9
-        });
-      }
-
-      const age = track.age_sec != null ? `${track.age_sec}s` : "";
-      const sp  = track._speed_ms != null ? `• ${track._speed_ms.toFixed(1)} m/s` : "";
-      marker.bindTooltip(`${track.id} • ${status} ${age} ${sp}`);
+    // ================================
+    // Zone toggle
+    // ================================
+    function getZoneToggleState(){
+      const v = localStorage.getItem("nizam.zone.enabled");
+      return v === null ? true : v === "1";
     }
+    function setZoneToggleUI(on){
+      zoneToggle.checked = !!on;
+      zoneBadge.textContent = on ? "ON" : "OFF";
+      zoneBadge.className = "badge " + (on ? "ok" : "");
+    }
+    function setZoneToggleState(on){
+      localStorage.setItem("nizam.zone.enabled", on ? "1" : "0");
+      setZoneToggleUI(on);
+      renderZone(lastZone);
+    }
+    zoneToggle.addEventListener("change", () => setZoneToggleState(zoneToggle.checked));
 
-    function upsertTrack(track) {
-      const id = track.id;
-      if (!id) return;
+    function renderZone(zone){
+      lastZone = zone || null;
 
-      const status = (track.status || "LIVE").toUpperCase();
-      if (status === "DEAD") {
-        removeTrack(id);
+      if (!getZoneToggleState()){
+        if (zoneCircle){ map.removeLayer(zoneCircle); zoneCircle = null; }
+        return;
+      }
+      if (!zone || zone.lat == null || zone.lon == null || zone.r_m == null){
+        if (zoneCircle){ map.removeLayer(zoneCircle); zoneCircle = null; }
         return;
       }
 
-      if (typeof track.lat !== "number" || typeof track.lon !== "number") return;
+      const latlng = [Number(zone.lat), Number(zone.lon)];
+      const r = Number(zone.r_m);
 
-      // SPEED (m/s)
-      let speedMs = null;
-      const nowTs = typeof track.last_update_ts === "number"
-        ? track.last_update_ts
-        : Date.now() / 1000;
+      if (!zoneCircle){
+        zoneCircle = L.circle(latlng, {
+          radius: r,
+          color: "#ff3b30",
+          weight: 2,
+          fillColor: "#ff3b30",
+          fillOpacity: 0.12
+        }).addTo(map);
+      } else {
+        zoneCircle.setLatLng(latlng);
+        zoneCircle.setRadius(r);
+      }
+    }
 
-      const prev = TRACK_LAST.get(id);
-      if (prev && prev.ts) {
-        const dt = nowTs - prev.ts;
-        if (dt > 0.05) {
-          const dist = haversineMeters(prev.lat, prev.lon, track.lat, track.lon);
-          speedMs = dist / dt;
+    // ================================
+    // Min threat
+    // ================================
+    function getMinThreat(){
+      const v = localStorage.getItem("nizam.minthreat");
+      return v === null ? 0 : Math.max(0, Math.min(100, Number(v)));
+    }
+    function setMinThreat(v){
+      const n = Math.max(0, Math.min(100, Number(v)));
+      localStorage.setItem("nizam.minthreat", String(n));
+      minThSlider.value = String(n);
+      minThValEl.textContent = String(n);
+      minThBadge.textContent = String(n);
+      applyMinThreatFilter();
+    }
+    function shouldShowScore(score){
+      return Number(score ?? 0) >= getMinThreat();
+    }
+
+    // ================================
+    // Tracks
+    // ================================
+    function refreshTrackCounter(){
+      let shown = 0;
+      for (const [,t] of tracks.entries()) if (t.visible) shown++;
+      trackCountEl.textContent = `${shown}/${tracks.size}`;
+    }
+
+    function setTrackVisible(t, visible){
+      t.visible = !!visible;
+      const markerOnMap = map.hasLayer(t.marker);
+      const trailOnMap = map.hasLayer(t.trail);
+
+      if (t.visible){
+        if (!markerOnMap) t.marker.addTo(map);
+        if (!trailOnMap) t.trail.addTo(map);
+      } else {
+        if (markerOnMap) map.removeLayer(t.marker);
+        if (trailOnMap) map.removeLayer(t.trail);
+      }
+    }
+
+    function applyMinThreatFilter(){
+      for (const [,t] of tracks.entries()){
+        setTrackVisible(t, shouldShowScore(t.score));
+      }
+      refreshTrackCounter();
+    }
+
+    function upsertTrack(id, lat, lon, score){
+      if (id == null || lat == null || lon == null) return;
+
+      const key = String(id);
+      const latlng = [Number(lat), Number(lon)];
+      const s = Number(score ?? 0);
+      const color = threatColor(s);
+
+      let t = tracks.get(key);
+      if (!t){
+        const marker = L.circleMarker(latlng, {
+          radius: 7,
+          color,
+          weight: 2,
+          fillColor: color,
+          fillOpacity: 0.85
+        });
+
+        const trail = L.polyline([latlng], { color, weight: 2, opacity: 0.75 });
+
+        t = { marker, trail, points: [latlng], score: s, visible: false };
+        tracks.set(key, t);
+      } else {
+        t.points.push(latlng);
+        if (t.points.length > 60) t.points.shift();
+
+        t.marker.setLatLng(latlng);
+        t.marker.setStyle({ color, fillColor: color });
+
+        t.trail.setLatLngs(t.points);
+        t.trail.setStyle({ color });
+
+        t.score = s;
+      }
+
+      setTrackVisible(t, shouldShowScore(t.score));
+      refreshTrackCounter();
+    }
+
+    // ================================
+    // Message parsing (robust)
+    // ================================
+    function parseTrackFromMessage(msg){
+      // supports:
+      // 1) {event_type:"cop.track", payload:{id,lat,lon,threat_score}}
+      // 2) {event_type:"cop.track", id,lat,lon, threat:{score}}
+      const p = (msg && typeof msg === "object" && msg.payload && typeof msg.payload === "object")
+        ? msg.payload
+        : msg;
+
+      const id = p?.id;
+      const lat = p?.lat;
+      const lon = p?.lon;
+
+      const score = p?.threat_score ?? p?.score ?? p?.threat?.score ?? 0;
+      return { id, lat, lon, score };
+    }
+
+    function handleSnapshot(msg){
+      // zone_circle (senin /api/state formatın)
+      if (msg.zone_circle && msg.zone_circle.lat != null && msg.zone_circle.lon != null){
+        renderZone({ lat: msg.zone_circle.lat, lon: msg.zone_circle.lon, r_m: msg.zone_circle.r_m });
+      }
+      // zone (alternatif format)
+      if (msg.zone && msg.zone.lat != null && msg.zone.lon != null){
+        renderZone({ lat: msg.zone.lat, lon: msg.zone.lon, r_m: msg.zone.r_m });
+      }
+      // tracks
+      if (msg.tracks && typeof msg.tracks === "object"){
+        for (const [id, t] of Object.entries(msg.tracks)){
+          const score = t?.threat?.score ?? t?.threat_score ?? t?.score ?? 0;
+          upsertTrack(id, t?.lat, t?.lon, score);
         }
       }
-      TRACK_LAST.set(id, { lat: track.lat, lon: track.lon, ts: nowTs });
-      track._speed_ms = speedMs;
-
-      // Marker
-      let marker = TRACK_MARKERS.get(id);
-      if (!marker) {
-        marker = L.circleMarker([track.lat, track.lon], { radius: 7 });
-        marker.addTo(map);
-        TRACK_MARKERS.set(id, marker);
-      } else {
-        marker.setLatLng([track.lat, track.lon]);
-      }
-
-      // Trail
-      let trail = TRACK_TRAILS.get(id);
-      if (!trail) {
-        trail = { points: [], polyline: null };
-        TRACK_TRAILS.set(id, trail);
-      }
-      trail.points.push([track.lat, track.lon]);
-      if (trail.points.length > TRAIL_MAX_POINTS) trail.points.shift();
-
-      if (!trail.polyline) {
-        trail.polyline = L.polyline(trail.points).addTo(map);
-      } else {
-        trail.polyline.setLatLngs(trail.points);
-      }
-
-      styleTrack(marker, track);
     }
 
-    function applySnapshot(snap) {
-      TRACK_MARKERS.forEach(m => map.removeLayer(m));
-      TRACK_TRAILS.forEach(t => t.polyline && map.removeLayer(t.polyline));
-      TRACK_MARKERS.clear();
-      TRACK_TRAILS.clear();
-      TRACK_LAST.clear();
+    // ================================
+    // WebSocket
+    // ================================
+    function connectWS(){
+      try{
+        setWsBadge("connecting");
+        ws = new WebSocket(WS_URL);
 
-      const tracks = snap.tracks || {};
-      Object.values(tracks).forEach(t => upsertTrack(t));
+        ws.onopen = () => setWsBadge("connected");
 
-      console.log("Snapshot applied:", Object.keys(tracks).length);
-    }
+        ws.onclose = () => {
+          setWsBadge("disconnected");
+          setTimeout(connectWS, 1200);
+        };
 
-    // =========================
-    // 3) EVENT ROUTER
-    // =========================
-    function handleCopEvent(evt) {
-      if (evt.event_type === "cop.snapshot") {
-        applySnapshot(evt.payload || {});
-      }
-      if (evt.event_type === "cop.track") {
-        upsertTrack(evt.payload || {});
+        ws.onerror = () => {
+          setWsBadge("disconnected");
+        };
+
+        ws.onmessage = (ev) => {
+          try{
+            const msg = JSON.parse(ev.data);
+            const type = msg?.event_type ?? msg?.type;
+
+            if (type === "cop.snapshot"){ handleSnapshot(msg); return; }
+
+            if (type === "cop.track"){
+              const t = parseTrackFromMessage(msg);
+              upsertTrack(t.id, t.lat, t.lon, t.score);
+              return;
+            }
+
+            if (type === "cop.zone"){
+              const z = msg.payload || msg;
+              renderZone({ lat: z.lat, lon: z.lon, r_m: z.r_m });
+              return;
+            }
+          } catch(_){}
+        };
+      } catch(_){
+        setWsBadge("disconnected");
+        setTimeout(connectWS, 1500);
       }
     }
 
-    // =========================
-    // 4) WEBSOCKET
-    // =========================
-    const ws = new WebSocket("ws://localhost:8000/ws");
+    // ================================
+    // State polling (health only)
+    // ================================
+    let lastStateOkAt = 0;
 
-    ws.onopen = () => console.log("WS CONNECTED");
-    ws.onclose = () => console.log("WS CLOSED");
-    ws.onerror = (e) => console.log("WS ERROR", e);
+    async function pollState(){
+      try{
+        const res = await fetch(STATE_URL, { cache:"no-store" });
+        if (!res.ok) throw new Error("state http " + res.status);
+        await res.json();
+        lastStateOkAt = Date.now();
+        stateBadge.textContent = "ok";
+        stateBadge.className = "badge ok";
+      } catch(_){
+        const age = Date.now() - lastStateOkAt;
+        stateBadge.textContent = age < 5000 ? "stale" : "down";
+        stateBadge.className = "badge " + (age < 5000 ? "warn" : "bad");
+      } finally {
+        setTimeout(pollState, 900);
+      }
+    }
 
-    ws.onmessage = (msg) => {
-      const evt = JSON.parse(msg.data);
-      handleCopEvent(evt);
-    };
+    // ================================
+    // INIT (order matters)
+    // ================================
+    setZoneToggleUI(getZoneToggleState());
+
+    minThSlider.addEventListener("input", () => setMinThreat(minThSlider.value));
+    setMinThreat(getMinThreat());     // init slider + filter
+    applyMinThreatFilter();           // safe, tracks exists
+
+    connectWS();
+    pollState();
   </script>
-
 </body>
 </html>
