@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>NIZAM COP</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="map"></div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- =========================
+       NIZAM COP FRONTEND
+       ========================= -->
+  <script>
+    // =========================
+    // 1) HARİTA
+    // =========================
+    const map = L.map('map').setView([41.02, 29.11], 10);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    console.log("Map initialized");
+
+    // =========================
+    // 2) STATE (MARKER + TRAIL + SPEED)
+    // =========================
+    const TRACK_MARKERS = new Map(); // id -> Leaflet CircleMarker
+    const TRACK_TRAILS  = new Map(); // id -> { points: [[lat,lon],...], polyline }
+    const TRACK_LAST    = new Map(); // id -> { lat, lon, ts }
+
+    const TRAIL_MAX_POINTS = 50;
+
+    function haversineMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toRad = (d) => d * Math.PI / 180;
+
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function removeTrack(id) {
+      const m = TRACK_MARKERS.get(id);
+      if (m) {
+        map.removeLayer(m);
+        TRACK_MARKERS.delete(id);
+      }
+
+      const t = TRACK_TRAILS.get(id);
+      if (t && t.polyline) {
+        map.removeLayer(t.polyline);
+      }
+      TRACK_TRAILS.delete(id);
+      TRACK_LAST.delete(id);
+    }
+
+    function styleTrack(marker, track) {
+      const status = (track.status || "LIVE").toUpperCase();
+
+      if (status === "STALE") {
+        marker.setStyle({ opacity: 0.35, fillOpacity: 0.15 });
+      } else {
+        marker.setStyle({ opacity: 1.0, fillOpacity: 0.7 });
+      }
+
+      const trail = TRACK_TRAILS.get(track.id);
+      if (trail && trail.polyline) {
+        trail.polyline.setStyle({
+          opacity: status === "STALE" ? 0.25 : 0.9
+        });
+      }
+
+      const age = track.age_sec != null ? `${track.age_sec}s` : "";
+      const sp  = track._speed_ms != null ? `• ${track._speed_ms.toFixed(1)} m/s` : "";
+      marker.bindTooltip(`${track.id} • ${status} ${age} ${sp}`);
+    }
+
+    function upsertTrack(track) {
+      const id = track.id;
+      if (!id) return;
+
+      const status = (track.status || "LIVE").toUpperCase();
+      if (status === "DEAD") {
+        removeTrack(id);
+        return;
+      }
+
+      if (typeof track.lat !== "number" || typeof track.lon !== "number") return;
+
+      // SPEED (m/s)
+      let speedMs = null;
+      const nowTs = typeof track.last_update_ts === "number"
+        ? track.last_update_ts
+        : Date.now() / 1000;
+
+      const prev = TRACK_LAST.get(id);
+      if (prev && prev.ts) {
+        const dt = nowTs - prev.ts;
+        if (dt > 0.05) {
+          const dist = haversineMeters(prev.lat, prev.lon, track.lat, track.lon);
+          speedMs = dist / dt;
+        }
+      }
+      TRACK_LAST.set(id, { lat: track.lat, lon: track.lon, ts: nowTs });
+      track._speed_ms = speedMs;
+
+      // Marker
+      let marker = TRACK_MARKERS.get(id);
+      if (!marker) {
+        marker = L.circleMarker([track.lat, track.lon], { radius: 7 });
+        marker.addTo(map);
+        TRACK_MARKERS.set(id, marker);
+      } else {
+        marker.setLatLng([track.lat, track.lon]);
+      }
+
+      // Trail
+      let trail = TRACK_TRAILS.get(id);
+      if (!trail) {
+        trail = { points: [], polyline: null };
+        TRACK_TRAILS.set(id, trail);
+      }
+      trail.points.push([track.lat, track.lon]);
+      if (trail.points.length > TRAIL_MAX_POINTS) trail.points.shift();
+
+      if (!trail.polyline) {
+        trail.polyline = L.polyline(trail.points).addTo(map);
+      } else {
+        trail.polyline.setLatLngs(trail.points);
+      }
+
+      styleTrack(marker, track);
+    }
+
+    function applySnapshot(snap) {
+      TRACK_MARKERS.forEach(m => map.removeLayer(m));
+      TRACK_TRAILS.forEach(t => t.polyline && map.removeLayer(t.polyline));
+      TRACK_MARKERS.clear();
+      TRACK_TRAILS.clear();
+      TRACK_LAST.clear();
+
+      const tracks = snap.tracks || {};
+      Object.values(tracks).forEach(t => upsertTrack(t));
+
+      console.log("Snapshot applied:", Object.keys(tracks).length);
+    }
+
+    // =========================
+    // 3) EVENT ROUTER
+    // =========================
+    function handleCopEvent(evt) {
+      if (evt.event_type === "cop.snapshot") {
+        applySnapshot(evt.payload || {});
+      }
+      if (evt.event_type === "cop.track") {
+        upsertTrack(evt.payload || {});
+      }
+    }
+
+    // =========================
+    // 4) WEBSOCKET
+    // =========================
+    const ws = new WebSocket("ws://localhost:8000/ws");
+
+    ws.onopen = () => console.log("WS CONNECTED");
+    ws.onclose = () => console.log("WS CLOSED");
+    ws.onerror = (e) => console.log("WS ERROR", e);
+
+    ws.onmessage = (msg) => {
+      const evt = JSON.parse(msg.data);
+      handleCopEvent(evt);
+    };
+  </script>
+
+</body>
+</html>
