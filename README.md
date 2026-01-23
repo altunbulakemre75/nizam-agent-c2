@@ -1,58 +1,109 @@
-NIZAM – Real-Time COP (Common Operational Picture)
+NIZAM
+Real-Time Common Operational Picture (COP) System
 
-NIZAM is a real-time Common Operational Picture (COP) prototype designed for C2 / ISR / security-oriented systems.
-It demonstrates live track ingestion, WebSocket-based state synchronization, and an operator-focused map UI.
+NIZAM is a real-time Common Operational Picture (COP) system prototype developed to demonstrate core concepts used in Command & Control (C2), ISR, and security-oriented operational systems.
 
-The project is intentionally lightweight but architected in a way that mirrors military-grade COP systems.
+The system focuses on live situational awareness, event-driven data flow, and operator-centric visualization, aligned with principles commonly applied in defense and security software architectures.
 
-✨ Key Capabilities
+1. Operational Purpose
 
-Real-time WebSocket backend
+The primary objective of NIZAMIZAM is to provide a single, consistent operational picture by:
 
-Live track ingestion and rendering
+Collecting real-time track data
 
-Threat-based visualization (color-coded)
+Maintaining a unified operational state
 
-Restricted / exclusion zone support
+Broadcasting updates deterministically to all connected operators
 
-Operator-controlled UI layers
+Visualizing threats and restricted areas on a geospatial interface
 
-Deterministic frontend rendering
+The system architecture reflects Phase-1 Operational COP UI capabilities.
 
-Pause / buffer–ready backend architecture
+2. Core Capabilities
 
-🧱 System Architecture
-+-------------------+        WebSocket        +--------------------+
-|                   | <--------------------> |                    |
-|   Frontend (UI)   |                        |   Backend (API)    |
-|   Leaflet + JS    |                        |   FastAPI          |
-|                   |   HTTP (REST)          |                    |
-+-------------------+ <--------------------> +--------------------+
+Real-time WebSocket-based C2 data distribution
 
-Backend
+Live track ingestion and state synchronization
+
+Threat-level–based visualization (Low / Medium / High)
+
+Restricted / exclusion zone definition and rendering
+
+Operator-controlled UI layers (no backend coupling)
+
+Deterministic and predictable frontend rendering
+
+Pause- and buffer-ready backend design for future replay support
+
+3. System Architecture Overview
++---------------------------------------------------+
+|                   Operator UI                     |
+|             (Leaflet-based COP View)              |
++-------------------------▲-------------------------+
+                          │ WebSocket (Live State)
+                          │
++-------------------------▼-------------------------+
+|                Backend / C2 Core                  |
+|              FastAPI + WebSocket                  |
+|                                                   |
+|  - Track State Management                          |
+|  - Threat Context                                  |
+|  - Zone Definitions                                |
+|  - Event Broadcasting                              |
++-------------------------▲-------------------------+
+                          │ REST (Control / Ingest)
+                          │
++-------------------------▼-------------------------+
+|             External Data Sources                  |
+|     (Sensors, Simulators, External Systems)        |
++---------------------------------------------------+
+
+4. Backend Design
+Technology Stack
 
 FastAPI
 
-WebSocket endpoint for live COP updates
+Python
 
-In-memory operational state (tracks, zones, threats)
+WebSocket-based event dissemination
 
-Event-driven architecture (cop.track, cop.snapshot, cop.zone)
+Stateless REST endpoints for ingestion and control
 
-Frontend
+Responsibilities
 
-Leaflet.js map engine
+Maintain authoritative operational state
 
-Operator control panel
+Accept external track events
 
-Layer toggles (zone on/off)
+Broadcast COP updates to all connected clients
 
-Threat legend and filtering
+Provide snapshot synchronization on client connect
 
-Real-time marker updates via WebSocket
+5. Frontend Design
+Technology Stack
 
-📡 Event Model (Core)
-Track Event
+Leaflet.js
+
+Vanilla JavaScript (deterministic rendering)
+
+No framework dependency
+
+Operator Interface Features
+
+Real-time track visualization
+
+Threat-based color coding
+
+Restricted zone layer toggle
+
+Minimum threat-level filtering
+
+Operational legend for threat interpretation
+
+The UI design prioritizes clarity, low cognitive load, and operational usability.
+
+6. Event Model
+Track Event (Ingest)
 {
   "event_type": "cop.track",
   "payload": {
@@ -63,7 +114,7 @@ Track Event
   }
 }
 
-Snapshot Event (WS)
+Snapshot Event (WebSocket)
 {
   "event_type": "cop.snapshot",
   "tracks": {
@@ -75,32 +126,32 @@ Snapshot Event (WS)
   "paused": false
 }
 
-🚀 Running the Project
-1️⃣ Backend
+7. Execution Instructions
+Backend
 cd nizam-backend
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 
 
-Health check:
+Health endpoint:
 
 http://127.0.0.1:8000/api/state
 
 
-WebSocket:
+WebSocket endpoint:
 
 ws://127.0.0.1:8000/ws
 
-2️⃣ Frontend
+Frontend
 cd nizam-frontend
 python -m http.server 5173
 
 
-Open in browser:
+Access:
 
 http://127.0.0.1:5173
 
-🧪 Quick Test (Track Injection)
+8. Operational Test (Track Injection)
 $t='{"event_type":"cop.track","payload":{"id":"T1","lat":41.015,"lon":28.979,"threat_score":80}}'
 Invoke-WebRequest -Uri http://127.0.0.1:8000/api/ingest `
   -Method POST `
@@ -108,57 +159,62 @@ Invoke-WebRequest -Uri http://127.0.0.1:8000/api/ingest `
   -Body $t
 
 
-Expected result:
+Expected outcome:
 
-Track appears on the map
+Track appears immediately on COP UI
 
 Marker color reflects threat level
 
-Track count increases in UI
+Track count updates in real time
 
-🎯 Project Scope & Intent
+9. Scope and Limitations
 
-This project is not a toy demo.
-It is a foundation-level COP system designed to demonstrate:
+This project represents a foundational COP capability, not a complete operational system.
 
-Real-time operational awareness
+Excluded by design:
 
-Event-driven state propagation
+Authentication / authorization
 
-Operator-centric UI concepts
+Persistent storage
 
-Expandability toward:
+Encrypted communications
 
-Sensor fusion
+Classified data handling
 
-Track correlation
+These elements are intentionally omitted to keep the prototype architecture-focused.
 
-Threat scoring engines
+10. Planned Extensions
 
-Replay / forensic analysis
-
-🔜 Planned Extensions
-
-Track detail side panel
+Track detail and analysis panels
 
 Pause / resume with buffered playback
 
-Multi-sensor fusion (radar, RF, EO)
+Multi-sensor fusion (EO, radar, RF)
 
-Persistent storage (Redis / PostgreSQL)
+Threat scoring engines
+
+Persistent state and replay
 
 Role-based operator views
 
-🛡️ Disclaimer
+11. Disclaimer
 
-This project is a technical prototype for educational and demonstrative purposes.
-It does not represent a deployed military or security system.
+This software is a technical prototype developed for demonstration and educational purposes only.
+It does not represent an active or deployed military system.
 
-👤 Author
+12. Author
 
 Emre Altunbulak
-Mechanical Engineer | Real-Time Systems | C2 / COP Architectures
+Mechanical Engineer
+Focus Areas:
 
-📌 Keywords
+Command & Control Systems
 
-COP · C2 · ISR · FastAPI · WebSocket · Leaflet · Real-Time Systems · Defense Software
+Real-Time Operational Software
+
+COP / ISR Architectures
+
+13. Keywords
+
+Common Operational Picture · C2 · ISR · Defense Software ·
+Real-Time Systems · WebSocket · Operational UI
