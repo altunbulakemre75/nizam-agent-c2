@@ -54,6 +54,72 @@
     #threat-legend .rng{ opacity:.70; white-space:nowrap; }
 
     .leaflet-control-attribution{ opacity:.7; }
+
+    /* =========================
+       TRACK DETAIL PANEL (RIGHT)
+       ========================= */
+    #trackPanel{
+      position:absolute;
+      top:12px;
+      right:12px;
+      z-index:1300;
+      width:340px;
+      max-width: calc(100vw - 24px);
+      background:rgba(10,10,12,.76);
+      border:1px solid rgba(255,255,255,.16);
+      border-radius:14px;
+      padding:12px;
+      backdrop-filter: blur(6px);
+      box-shadow:0 8px 30px rgba(0,0,0,.35);
+      display:none;
+    }
+    #trackPanelHeader{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:10px;
+    }
+    #trackPanelTitle{
+      margin:0;
+      font-weight:800;
+      font-size:13px;
+      letter-spacing:.2px;
+      opacity:.95;
+    }
+    #trackPanelClose{
+      cursor:pointer;
+      border:1px solid rgba(255,255,255,.16);
+      background:rgba(255,255,255,.06);
+      color:#fff;
+      border-radius:999px;
+      padding:4px 10px;
+      font-size:11px;
+      font-weight:700;
+    }
+    #trackPanelBody{ font-size:12px; line-height:1.45; }
+    .kv{
+      display:grid;
+      grid-template-columns: 110px 1fr;
+      gap:6px 10px;
+      padding:8px 0;
+      border-top:1px solid rgba(255,255,255,.08);
+    }
+    .kv:first-child{ border-top:none; padding-top:0; }
+    .kv .k{ opacity:.72; font-weight:700; }
+    .kv .v{ font-weight:700; word-break:break-word; }
+    .muted{ opacity:.72; font-weight:600; }
+    .reason{
+      display:inline-block;
+      margin:0 6px 6px 0;
+      padding:3px 8px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.16);
+      background:rgba(255,255,255,.06);
+      font-size:11px;
+      font-weight:800;
+      white-space:nowrap;
+    }
   </style>
 </head>
 
@@ -107,6 +173,43 @@
         </div>
         <div class="badge" id="track-count">0/0</div>
       </div>
+
+      <!-- =========================
+           D: Pause / Resume Control
+           ========================= -->
+      <div class="row">
+        <div class="label">
+          <div class="k">Stream</div>
+          <div class="v">Pause / Resume</div>
+        </div>
+        <button id="pause-btn" class="badge warn" type="button">PAUSE</button>
+      </div>
+    </div>
+
+    <!-- =========================
+         TRACK DETAIL PANEL (RIGHT)
+         ========================= -->
+    <div id="trackPanel">
+      <div id="trackPanelHeader">
+        <h3 id="trackPanelTitle">Track Detail</h3>
+        <button id="trackPanelClose" type="button">Close</button>
+      </div>
+      <div id="trackPanelBody"></div>
+    </div>
+
+    <!-- =========================
+         D: PAUSED OVERLAY
+         ========================= -->
+    <div id="paused-overlay"
+         style="display:none; position:absolute; inset:0; z-index:1100;
+                background:rgba(0,0,0,.35); backdrop-filter: blur(2px);
+                color:#fff; font-weight:800; letter-spacing:1px;
+                align-items:center; justify-content:center;">
+      <div style="padding:14px 22px; border-radius:12px;
+                  background:rgba(10,10,12,.85);
+                  border:1px solid rgba(255,255,255,.18);">
+        PAUSED
+      </div>
     </div>
 
     <div id="threat-legend">
@@ -134,7 +237,7 @@
     // ================================
     // GLOBAL STATE (define early)
     // ================================
-    const tracks = new Map(); // id -> {marker, trail, points, score, visible}
+    const tracks = new Map(); // id -> {marker, trail, points, score, visible, meta}
     let zoneCircle = null;
     let lastZone = null;
     let ws = null;
@@ -153,6 +256,107 @@
 
     document.getElementById("ws-url").textContent = WS_URL;
     document.getElementById("state-url").textContent = STATE_URL;
+
+    // ================================
+    // D: Pause / Resume (UI)
+    // ================================
+    let UI_PAUSED = false;
+    const pauseBtn = document.getElementById("pause-btn");
+    const pausedOverlay = document.getElementById("paused-overlay");
+
+    function setPausedUI(on){
+      UI_PAUSED = !!on;
+      pauseBtn.textContent = on ? "RESUME" : "PAUSE";
+      pauseBtn.className = "badge " + (on ? "ok" : "warn");
+      pausedOverlay.style.display = on ? "flex" : "none";
+    }
+
+    // ================================
+    // Track Detail Panel
+    // ================================
+    const trackPanelEl = document.getElementById("trackPanel");
+    const trackPanelTitleEl = document.getElementById("trackPanelTitle");
+    const trackPanelBodyEl = document.getElementById("trackPanelBody");
+    const trackPanelCloseBtn = document.getElementById("trackPanelClose");
+
+    let selectedTrackId = null;
+
+    function setTrackPanelVisible(on){
+      trackPanelEl.style.display = on ? "block" : "none";
+      if (!on) selectedTrackId = null;
+    }
+
+    function threatBucket(score){
+      const s = Number(score ?? 0);
+      if (s >= 70) return "HIGH";
+      if (s >= 30) return "MED";
+      return "LOW";
+    }
+
+    function formatTs(ts){
+      if (!ts) return "(unknown)";
+      try{
+        const d = new Date(ts);
+        if (!isNaN(d.getTime())) return d.toLocaleString();
+      } catch(_){}
+      return String(ts);
+    }
+
+    function renderReasons(reasons){
+      if (!reasons || (Array.isArray(reasons) && reasons.length === 0)){
+        return '<span class="muted">(none)</span>';
+      }
+      if (Array.isArray(reasons)){
+        return reasons.map(r => `<span class="reason">${String(r)}</span>`).join("");
+      }
+      return `<span class="reason">${String(reasons)}</span>`;
+    }
+
+    function openTrackPanel(trackId){
+      const key = String(trackId);
+      const t = tracks.get(key);
+      if (!t) return;
+
+      selectedTrackId = key;
+
+      const m = t.meta || {};
+      const id = m.id ?? key;
+      const lat = Number(m.lat);
+      const lon = Number(m.lon);
+      const score = Number(m.threat_score ?? t.score ?? 0);
+      const bucket = threatBucket(score);
+
+      trackPanelTitleEl.textContent = `Track: ${id}`;
+
+      trackPanelBodyEl.innerHTML = `
+        <div class="kv">
+          <div class="k">Threat</div>
+          <div class="v">${score} <span class="muted">(${bucket})</span></div>
+        </div>
+        <div class="kv">
+          <div class="k">Lat / Lon</div>
+          <div class="v">${isFinite(lat) ? lat.toFixed(6) : "(n/a)"} , ${isFinite(lon) ? lon.toFixed(6) : "(n/a)"}</div>
+        </div>
+        <div class="kv">
+          <div class="k">Last Update</div>
+          <div class="v">${formatTs(m.last_update)}</div>
+        </div>
+        <div class="kv">
+          <div class="k">Reasons</div>
+          <div class="v">${renderReasons(m.reasons)}</div>
+        </div>
+      `;
+
+      setTrackPanelVisible(true);
+    }
+
+    function refreshSelectedPanelIfNeeded(trackId){
+      if (!selectedTrackId) return;
+      if (String(trackId) !== selectedTrackId) return;
+      openTrackPanel(trackId);
+    }
+
+    trackPanelCloseBtn.addEventListener("click", () => setTrackPanelVisible(false));
 
     // ================================
     // Map
@@ -279,7 +483,7 @@
       refreshTrackCounter();
     }
 
-    function upsertTrack(id, lat, lon, score){
+    function upsertTrack(id, lat, lon, score, meta){
       if (id == null || lat == null || lon == null) return;
 
       const key = String(id);
@@ -297,9 +501,23 @@
           fillOpacity: 0.85
         });
 
+        // click -> open panel
+        marker.on("click", () => openTrackPanel(key));
+
         const trail = L.polyline([latlng], { color, weight: 2, opacity: 0.75 });
 
-        t = { marker, trail, points: [latlng], score: s, visible: false };
+        t = { marker, trail, points: [latlng], score: s, visible: false, meta: {} };
+
+        // store meta (best-effort)
+        t.meta = {
+          id: key,
+          lat: Number(lat),
+          lon: Number(lon),
+          threat_score: s,
+          last_update: meta?.last_update ?? meta?.ts ?? meta?.timestamp ?? new Date().toISOString(),
+          reasons: meta?.reasons ?? null
+        };
+
         tracks.set(key, t);
       } else {
         t.points.push(latlng);
@@ -312,10 +530,24 @@
         t.trail.setStyle({ color });
 
         t.score = s;
+
+        // update meta (best-effort)
+        t.meta = {
+          ...(t.meta || {}),
+          id: key,
+          lat: Number(lat),
+          lon: Number(lon),
+          threat_score: s,
+          last_update: meta?.last_update ?? meta?.ts ?? meta?.timestamp ?? t.meta?.last_update ?? new Date().toISOString(),
+          reasons: meta?.reasons ?? t.meta?.reasons ?? null
+        };
       }
 
       setTrackVisible(t, shouldShowScore(t.score));
       refreshTrackCounter();
+
+      // keep panel live if selected
+      refreshSelectedPanelIfNeeded(key);
     }
 
     // ================================
@@ -323,7 +555,7 @@
     // ================================
     function parseTrackFromMessage(msg){
       // supports:
-      // 1) {event_type:"cop.track", payload:{id,lat,lon,threat_score}}
+      // 1) {event_type:"cop.track", payload:{id,lat,lon,threat_score,reasons,last_update}}
       // 2) {event_type:"cop.track", id,lat,lon, threat:{score}}
       const p = (msg && typeof msg === "object" && msg.payload && typeof msg.payload === "object")
         ? msg.payload
@@ -334,7 +566,7 @@
       const lon = p?.lon;
 
       const score = p?.threat_score ?? p?.score ?? p?.threat?.score ?? 0;
-      return { id, lat, lon, score };
+      return { id, lat, lon, score, meta: p };
     }
 
     function handleSnapshot(msg){
@@ -350,7 +582,8 @@
       if (msg.tracks && typeof msg.tracks === "object"){
         for (const [id, t] of Object.entries(msg.tracks)){
           const score = t?.threat?.score ?? t?.threat_score ?? t?.score ?? 0;
-          upsertTrack(id, t?.lat, t?.lon, score);
+          // snapshot formatında reasons/last_update yoksa da sorun değil
+          upsertTrack(id, t?.lat, t?.lon, score, t);
         }
       }
     }
@@ -382,8 +615,11 @@
             if (type === "cop.snapshot"){ handleSnapshot(msg); return; }
 
             if (type === "cop.track"){
+              // D: UI paused -> ignore track updates
+              if (UI_PAUSED) return;
+
               const t = parseTrackFromMessage(msg);
-              upsertTrack(t.id, t.lat, t.lon, t.score);
+              upsertTrack(t.id, t.lat, t.lon, t.score, t.meta);
               return;
             }
 
@@ -399,6 +635,25 @@
         setTimeout(connectWS, 1500);
       }
     }
+
+    // ================================
+    // D: Pause/Resume button -> backend
+    // ================================
+    pauseBtn.addEventListener("click", async () => {
+      try{
+        if (!UI_PAUSED){
+          const res = await fetch(`${BACKEND_HTTP}/api/pause`, { method:"POST" });
+          if (!res.ok) throw new Error("pause http " + res.status);
+          setPausedUI(true);
+        } else {
+          const res = await fetch(`${BACKEND_HTTP}/api/resume`, { method:"POST" });
+          if (!res.ok) throw new Error("resume http " + res.status);
+          setPausedUI(false);
+        }
+      } catch(e){
+        console.error("pause/resume failed", e);
+      }
+    });
 
     // ================================
     // State polling (health only)
@@ -430,6 +685,9 @@
     minThSlider.addEventListener("input", () => setMinThreat(minThSlider.value));
     setMinThreat(getMinThreat());     // init slider + filter
     applyMinThreatFilter();           // safe, tracks exists
+
+    // default UI paused off
+    setPausedUI(false);
 
     connectWS();
     pollState();
