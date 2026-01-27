@@ -1,35 +1,38 @@
 NIZAM
-Real-Time Common Operational Picture (COP) System
 
-NIZAM is a real-time Common Operational Picture (COP) system prototype developed to demonstrate core concepts used in Command & Control (C2), ISR, and security-oriented operational systems.
+Real-Time, Event-Driven Common Operational Picture (COP) System
 
-The system focuses on live situational awareness, event-driven data flow, and operator-centric visualization, aligned with principles commonly applied in defense and security software architectures.
+Overview
+
+NIZAM is a real-time Common Operational Picture (COP) system prototype designed to demonstrate foundational architectural concepts used in modern Command & Control (C2), ISR, and aerospace ground systems.
+
+The system emphasizes event-driven data flow, deterministic state distribution, and operator-centric situational awareness, aligned with principles commonly applied in defense, security, and space ground segment software architectures.
 
 1. Operational Purpose
 
-The primary objective of NIZAMIZAM is to provide a single, consistent operational picture by:
+The primary objective of NIZAM is to provide a single, consistent operational picture by:
 
-Collecting real-time track data
+Collecting real-time track and event data
 
-Maintaining a unified operational state
+Maintaining an authoritative operational state
 
-Broadcasting updates deterministically to all connected operators
+Broadcasting deterministic updates to all connected operators
 
-Visualizing threats and restricted areas on a geospatial interface
+Visualizing threats and restricted areas on a geospatial COP interface
 
-The system architecture reflects Phase-1 Operational COP UI capabilities.
+The current implementation reflects Phase-1 Operational COP UI capabilities, focusing on correctness, clarity, and real-time behavior.
 
 2. Core Capabilities
 
-Real-time WebSocket-based C2 data distribution
+Real-time WebSocket-based C2 state distribution
 
-Live track ingestion and state synchronization
+Live track ingestion and synchronized operational state
 
 Threat-level–based visualization (Low / Medium / High)
 
-Restricted / exclusion zone definition and rendering
+Restricted and exclusion zone definition and rendering
 
-Operator-controlled UI layers (no backend coupling)
+Operator-controlled UI layers with no backend coupling
 
 Deterministic and predictable frontend rendering
 
@@ -57,13 +60,14 @@ Pause- and buffer-ready backend design for future replay support
 |             External Data Sources                  |
 |     (Sensors, Simulators, External Systems)        |
 +---------------------------------------------------+
+The architecture is sensor-agnostic and extensible, enabling integration of heterogeneous data sources without modifying the core COP logic.
 
 4. Backend Design
 Technology Stack
 
-FastAPI
-
 Python
+
+FastAPI
 
 WebSocket-based event dissemination
 
@@ -71,13 +75,13 @@ Stateless REST endpoints for ingestion and control
 
 Responsibilities
 
-Maintain authoritative operational state
+Maintain the authoritative operational state
 
-Accept external track events
+Accept external track and control events
 
 Broadcast COP updates to all connected clients
 
-Provide snapshot synchronization on client connect
+Provide snapshot synchronization on client connection
 
 5. Frontend Design
 Technology Stack
@@ -94,7 +98,7 @@ Real-time track visualization
 
 Threat-based color coding
 
-Restricted zone layer toggle
+Restricted zone layer toggling
 
 Minimum threat-level filtering
 
@@ -103,6 +107,7 @@ Operational legend for threat interpretation
 The UI design prioritizes clarity, low cognitive load, and operational usability.
 
 6. Event Model
+Track Event (Ingest)
 Track Event (Ingest)
 {
   "event_type": "cop.track",
@@ -165,15 +170,15 @@ Track appears immediately on COP UI
 
 Marker color reflects threat level
 
-Track count updates in real time
+Track state updates in real time
 
 9. Scope and Limitations
 
-This project represents a foundational COP capability, not a complete operational system.
+This project represents a foundational COP architecture prototype, not a complete operational system.
 
-Excluded by design:
+Intentionally excluded:
 
-Authentication / authorization
+Authentication and authorization
 
 Persistent storage
 
@@ -181,11 +186,11 @@ Encrypted communications
 
 Classified data handling
 
-These elements are intentionally omitted to keep the prototype architecture-focused.
+These elements are omitted by design to keep the focus on architecture, real-time behavior, and system clarity.
 
 10. Planned Extensions
 
-Track detail and analysis panels
+Track detail and analytical panels
 
 Pause / resume with buffered playback
 
@@ -206,7 +211,8 @@ It does not represent an active or deployed military system.
 
 Emre Altunbulak
 Mechanical Engineer
-Focus Areas:
+
+Focus Areas
 
 Command & Control Systems
 
@@ -217,4 +223,4 @@ COP / ISR Architectures
 13. Keywords
 
 Common Operational Picture · C2 · ISR · Defense Software ·
-Real-Time Systems · WebSocket · Operational UI
+Real-Time Systems · Event-Driven Architecture · Aerospace Ground Systems
