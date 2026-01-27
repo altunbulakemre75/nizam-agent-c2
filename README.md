@@ -202,6 +202,63 @@ Persistent state and replay
 
 Role-based operator views
 
+## 🚀 Mission Scenario – Aerospace Ground Systems
+
+### Scenario Overview
+NIZAM can be adapted as a real-time situational awareness and decision-support layer for aerospace ground systems, particularly in environments where multiple heterogeneous sensors must be correlated into a single operational picture.
+
+Potential application domains include:
+- Launch site and spaceport perimeter security
+- Ground station monitoring for space missions
+- Autonomous facility surveillance for aerospace infrastructure
+- Pre-launch and post-landing operational awareness
+
+---
+
+### Operational Context
+Modern aerospace ground operations rely on a combination of sensors such as:
+- Electro-optical cameras
+- Radar-based tracking systems
+- RF monitoring equipment
+- Simulation and telemetry feeds
+
+These data sources often operate independently, creating fragmented awareness and delayed operational response.
+
+NIZAM addresses this challenge by acting as a sensor-agnostic COP layer, aggregating real-time events into a unified, deterministic operational state shared across all operators.
+
+---
+
+### Example Mission Flow
+1. Multiple ground sensors generate track events around a launch facility
+2. Events are ingested by the NIZAM backend through standardized interfaces
+3. The system maintains an authoritative operational state and evaluates threat context
+4. A synchronized COP is broadcast in real time to all connected operators
+5. Operators visualize tracks, threat levels, and restricted zones on a shared geospatial interface
+
+This workflow enables low-latency situational awareness, consistent decision-making, and scalable operator coordination.
+
+---
+
+### Relevance to Aerospace Ground Systems
+The architecture and design principles demonstrated by NIZAM align with key requirements of aerospace ground systems:
+
+- Real-time and deterministic state distribution
+- Sensor-agnostic and extensible architecture
+- Operator-centric situational awareness
+- Support for simulation-driven testing and replay
+- Clear separation between data ingestion, state management, and visualization
+
+NIZAM is not a mission-specific system but a foundational COP architecture prototype that can be extended for aerospace, planetary surface operations, and spaceport ground support systems.
+
+---
+
+### Research and Extension Potential
+Future extensions relevant to aerospace missions include:
+- Multi-sensor fusion algorithms
+- Time-synchronized event replay for mission analysis
+- Autonomous alerting and anomaly detection
+- Integration with simulation and digital twin environments
+
 11. Disclaimer
 
 This software is a technical prototype developed for demonstration and educational purposes only.
