@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import fastapi, uvicorn; print\\('OK'\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import uvicorn; print\\(uvicorn.__version__\\)\")",
+      "Bash(timeout 6 python start.py --duration_s 5 --rate_hz 2)"
+    ]
+  }
+}

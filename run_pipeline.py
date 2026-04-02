@@ -1,0 +1,236 @@
+"""
+run_pipeline.py  —  NIZAM agent pipeline launcher
+
+Starts the full sensing pipeline and connects it to the COP server.
+
+Pipeline topology:
+                         ┌─→ rf_sim_agent ─┐
+  world → radar_sim ──tee                  merge ─→ fuser → cop_publisher
+                         └────────────────-┘
+
+COP server must be running separately:
+  uvicorn cop.server:app --host 0.0.0.0 --port 8100 --reload
+
+Usage:
+  python run_pipeline.py [options]
+
+Options:
+  --cop_url       COP ingest URL      (default: http://127.0.0.1:8100)
+  --origin_lat    Sensor origin lat   (default: 41.015  = Istanbul)
+  --origin_lon    Sensor origin lon   (default: 28.979)
+  --duration_s    Simulation duration (default: 300s)
+  --rate_hz       World update rate   (default: 1.0 Hz)
+  --verbose       Print all events to stderr
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+ROOT = Path(__file__).parent
+
+
+# ---------------------------------------------------------------------------
+# Fan-out / merge helpers
+# ---------------------------------------------------------------------------
+
+def _forward(src, *dsts, verbose: bool = False, tag: str = "") -> None:
+    """Read lines from src and write to all dsts (thread-safe per-write)."""
+    try:
+        for line in src:
+            if verbose:
+                print(f"[{tag}] {line.decode().rstrip()}", file=sys.stderr)
+            for dst in dsts:
+                try:
+                    dst.write(line)
+                    dst.flush()
+                except BrokenPipeError:
+                    pass
+    except Exception as e:
+        print(f"[pipeline] forward thread error ({tag}): {e}", file=sys.stderr)
+
+
+def _merge_into(src, dst, verbose: bool = False, tag: str = "") -> None:
+    """Read lines from src and write into dst (for merging side-streams)."""
+    _forward(src, dst, verbose=verbose, tag=tag)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="NIZAM pipeline launcher")
+    ap.add_argument("--cop_url",     default="http://127.0.0.1:8100")
+    ap.add_argument("--origin_lat",  type=float, default=41.015)
+    ap.add_argument("--origin_lon",  type=float, default=28.979)
+    ap.add_argument("--duration_s",  type=float, default=300.0)
+    ap.add_argument("--rate_hz",     type=float, default=1.0)
+    ap.add_argument("--verbose",     action="store_true")
+    args = ap.parse_args()
+
+    py = sys.executable  # use same Python interpreter
+
+    print("[pipeline] Starting NIZAM pipeline...", file=sys.stderr)
+    print(f"[pipeline] COP URL  : {args.cop_url}", file=sys.stderr)
+    print(f"[pipeline] Origin   : lat={args.origin_lat}, lon={args.origin_lon}", file=sys.stderr)
+    print(f"[pipeline] Duration : {args.duration_s}s @ {args.rate_hz} Hz", file=sys.stderr)
+
+    PIPE = subprocess.PIPE
+
+    # ------------------------------------------------------------------
+    # 1) World agent  →  stdout (world.state JSONL)
+    # ------------------------------------------------------------------
+    world = subprocess.Popen(
+        [
+            py, str(ROOT / "agents" / "world" / "world_agent.py"),
+            "--stdout",
+            "--duration_s", str(args.duration_s),
+            "--rate_hz",    str(args.rate_hz),
+            "--origin_lat", str(args.origin_lat),
+            "--origin_lon", str(args.origin_lon),
+        ],
+        stdout=PIPE,
+        stderr=sys.stderr,
+    )
+
+    # ------------------------------------------------------------------
+    # 2) Radar sim agent  world.state → sensor.detection.radar
+    # ------------------------------------------------------------------
+    radar = subprocess.Popen(
+        [py, str(ROOT / "agents" / "radar_sim" / "radar_sim_agent.py")],
+        stdin=world.stdout,
+        stdout=PIPE,
+        stderr=sys.stderr,
+    )
+    world.stdout.close()  # let radar own the pipe
+
+    # ------------------------------------------------------------------
+    # 3) RF sim agent  sensor.detection.radar → sensor.detection.rf
+    # ------------------------------------------------------------------
+    rf = subprocess.Popen(
+        [py, str(ROOT / "agents" / "rf_sim" / "rf_sim_agent.py")],
+        stdin=PIPE,
+        stdout=PIPE,
+        stderr=sys.stderr,
+    )
+
+    # ------------------------------------------------------------------
+    # 4) Fuser agent  (radar + rf) → track.update + threat.assessment
+    # ------------------------------------------------------------------
+    fuser = subprocess.Popen(
+        [py, str(ROOT / "agents" / "fuser" / "fuser_agent.py")],
+        stdin=PIPE,
+        stdout=PIPE,
+        stderr=sys.stderr,
+    )
+
+    # ------------------------------------------------------------------
+    # 5) COP publisher  track.update / threat.assessment → POST /ingest
+    # ------------------------------------------------------------------
+    cop_pub = subprocess.Popen(
+        [
+            py, str(ROOT / "agents" / "cop_publisher.py"),
+            "--cop_url",    args.cop_url,
+            "--origin_lat", str(args.origin_lat),
+            "--origin_lon", str(args.origin_lon),
+        ],
+        stdin=fuser.stdout,
+        stderr=sys.stderr,
+    )
+    fuser.stdout.close()  # let cop_pub own the pipe
+
+    # ------------------------------------------------------------------
+    # Thread wiring:
+    #   T1: radar.stdout → rf.stdin  AND  fuser.stdin  (fan-out)
+    #   T2: rf.stdout    → fuser.stdin                 (merge)
+    # ------------------------------------------------------------------
+    fuser_lock = threading.Lock()
+
+    def locked_write(stream, line: bytes) -> None:
+        with fuser_lock:
+            try:
+                stream.write(line)
+                stream.flush()
+            except BrokenPipeError:
+                pass
+
+    def fanout_radar() -> None:
+        """Read radar output; send to rf.stdin and fuser.stdin."""
+        try:
+            for line in radar.stdout:
+                if args.verbose:
+                    print(f"[radar] {line.decode().rstrip()}", file=sys.stderr)
+                # send to rf sim
+                try:
+                    rf.stdin.write(line)
+                    rf.stdin.flush()
+                except BrokenPipeError:
+                    pass
+                # send to fuser
+                locked_write(fuser.stdin, line)
+        except Exception as e:
+            print(f"[pipeline] fanout_radar error: {e}", file=sys.stderr)
+        finally:
+            try:
+                rf.stdin.close()
+            except Exception:
+                pass
+
+    def merge_rf() -> None:
+        """Read rf output; forward to fuser.stdin, then close fuser.stdin."""
+        try:
+            for line in rf.stdout:
+                if args.verbose:
+                    print(f"[rf] {line.decode().rstrip()}", file=sys.stderr)
+                locked_write(fuser.stdin, line)
+        except Exception as e:
+            print(f"[pipeline] merge_rf error: {e}", file=sys.stderr)
+        finally:
+            # RF done → close fuser stdin so it knows to exit
+            try:
+                fuser.stdin.close()
+            except Exception:
+                pass
+
+    t_fanout = threading.Thread(target=fanout_radar, daemon=True, name="fanout-radar")
+    t_merge   = threading.Thread(target=merge_rf,     daemon=True, name="merge-rf")
+
+    t_fanout.start()
+    t_merge.start()
+
+    # ------------------------------------------------------------------
+    # Wait for all processes
+    # ------------------------------------------------------------------
+    procs = [
+        ("world",   world),
+        ("radar",   radar),
+        ("rf",      rf),
+        ("fuser",   fuser),
+        ("cop_pub", cop_pub),
+    ]
+
+    try:
+        for name, proc in procs:
+            rc = proc.wait()
+            print(f"[pipeline] {name} exited (rc={rc})", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("\n[pipeline] Interrupted — terminating all agents...", file=sys.stderr)
+        for name, proc in procs:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    t_fanout.join(timeout=2)
+    t_merge.join(timeout=2)
+
+    print("[pipeline] Done.", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
