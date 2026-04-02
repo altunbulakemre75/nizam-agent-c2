@@ -1,4 +1,6 @@
 ﻿import asyncio
+import os
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Set
 
@@ -6,6 +8,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:8200")
 
 app = FastAPI(title="NIZAM COP", version="0.1")
 
@@ -75,12 +79,23 @@ def _make_snapshot_payload() -> Dict[str, Any]:
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     # UI entrypoint
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 @app.get("/api/agents")
 async def api_agents():
     return JSONResponse({"agents": STATE["agents"], "server_time": _utc_now_iso()})
+
+
+@app.get("/api/orchestrator/health")
+async def api_orchestrator_health():
+    """Proxy: fetch agent health from orchestrator so the UI avoids CORS issues."""
+    try:
+        with urllib.request.urlopen(ORCHESTRATOR_URL + "/agents/health", timeout=2) as r:
+            import json
+            return JSONResponse(json.loads(r.read()))
+    except Exception:
+        return JSONResponse({"ok": False, "agents": [], "total": 0, "alive": 0, "dead": 0}, status_code=503)
 
 
 @app.get("/api/tracks")

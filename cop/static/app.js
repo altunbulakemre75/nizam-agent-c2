@@ -222,6 +222,51 @@ function applySnapshot(payload) {
   });
 }
 
+/* ---------------------------
+   Threat-level icon factory
+--------------------------- */
+const THREAT_COLORS = { HIGH: "#e74c3c", MEDIUM: "#f39c12", LOW: "#27ae60" };
+
+function makeThreatIcon(level) {
+  const color = THREAT_COLORS[level] ?? "#2980b9";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="38" viewBox="0 0 28 38">
+    <path d="M14 0 C6.27 0 0 6.27 0 14 C0 24.5 14 38 14 38 C14 38 28 24.5 28 14 C28 6.27 21.73 0 14 0 Z"
+          fill="${color}" stroke="#fff" stroke-width="2"/>
+    <circle cx="14" cy="14" r="6" fill="#fff" opacity="0.9"/>
+  </svg>`;
+  return L.divIcon({
+    html: svg,
+    className: "",
+    iconSize: [28, 38],
+    iconAnchor: [14, 38],
+    tooltipAnchor: [0, -38],
+  });
+}
+
+function buildTooltip(track, threat) {
+  const id    = track.id ?? track.global_track_id ?? "?";
+  const kin   = track.kinematics ?? {};
+  const cls   = track.classification ?? {};
+  const sens  = (track.supporting_sensors ?? []).join(", ") || "—";
+  const level = threat?.threat_level ?? "—";
+  const score = threat?.score ?? "—";
+  const tti   = threat?.tti_s != null ? `${threat.tti_s}s` : "—";
+  const vr    = kin.radial_velocity_mps != null ? `${kin.radial_velocity_mps.toFixed(1)} m/s` : "—";
+  const range = kin.range_m != null ? `${Math.round(kin.range_m)} m` : "—";
+  const action = threat?.recommended_action ?? "—";
+
+  return `<div style="font:12px/1.5 monospace;min-width:160px">
+    <b style="font-size:13px">${id}</b><br>
+    <span style="color:${THREAT_COLORS[level] ?? '#aaa'}">&#9632; ${level}</span>
+    &nbsp;score: <b>${score}</b><br>
+    TTI: <b>${tti}</b> &nbsp; Vr: <b>${vr}</b><br>
+    Range: <b>${range}</b><br>
+    Label: ${cls.label ?? "?"} (${cls.conf != null ? (cls.conf * 100).toFixed(0) + "%" : "?"})<br>
+    Sensors: ${sens}<br>
+    Action: <b>${action}</b>
+  </div>`;
+}
+
 function upsertTrack(track) {
   const id = String(track.id ?? track.track_id ?? track.uid ?? "");
   if (!id) return;
@@ -231,22 +276,35 @@ function upsertTrack(track) {
   const latlon = getTrackLatLon(track);
   if (!latlon || !UI.map) return;
 
+  const threat = UI.threats.get(id);
+  const level  = threat?.threat_level ?? "LOW";
+  const icon   = makeThreatIcon(level);
+
   const existing = UI.trackMarkers.get(id);
   if (!existing) {
-    const m = L.marker(latlon).addTo(UI.map);
-    m.bindTooltip(id, { permanent: false, direction: "top" });
+    const m = L.marker(latlon, { icon }).addTo(UI.map);
+    m.bindTooltip(buildTooltip(track, threat), { permanent: false, direction: "top", opacity: 0.95 });
     UI.trackMarkers.set(id, m);
   } else {
     existing.setLatLng(latlon);
+    existing.setIcon(icon);
+    existing.setTooltipContent(buildTooltip(track, threat));
   }
 }
 
-/* Threat rendering optional (no-op for now) */
 function upsertThreat(threat) {
-  const id = String(threat.id ?? threat.threat_id ?? "");
+  const id = String(threat.id ?? threat.global_track_id ?? threat.threat_id ?? "");
   if (!id) return;
   UI.threats.set(id, threat);
-  // İstersen burada farklı icon/zone çizimi yaparsın.
+
+  // Re-render marker if track already on map
+  const marker = UI.trackMarkers.get(id);
+  const track  = UI.tracks.get(id);
+  if (marker && track) {
+    const level = threat.threat_level ?? "LOW";
+    marker.setIcon(makeThreatIcon(level));
+    marker.setTooltipContent(buildTooltip(track, threat));
+  }
 }
 
 /* ---------------------------
@@ -402,12 +460,65 @@ function connectWS() {
 }
 
 /* ---------------------------
+   Agent health panel
+--------------------------- */
+const ORCH_URL = "";
+let agentPanelEl = null;
+
+function mountAgentPanel() {
+  const panel = el("div", {
+    id: "agent-panel",
+    style: {
+      position: "fixed",
+      bottom: "12px",
+      left: "12px",
+      zIndex: "9999",
+      background: "rgba(0,0,0,0.65)",
+      color: "white",
+      padding: "8px 12px",
+      borderRadius: "10px",
+      fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial",
+      fontSize: "11px",
+      lineHeight: "1.5",
+      minWidth: "180px",
+    }
+  });
+  panel.innerHTML = "<b>Agents</b><br><span style='opacity:.6'>connecting...</span>";
+  document.body.appendChild(panel);
+  agentPanelEl = panel;
+}
+
+async function refreshAgentHealth() {
+  if (!agentPanelEl) return;
+  try {
+    const r = await fetch(`${ORCH_URL}/api/orchestrator/health`);
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    const agents = data.agents ?? [];
+    let html = `<b>Agents</b> <span style='opacity:.6'>${data.alive}/${data.total} alive</span><br>`;
+    agents.forEach(a => {
+      const color = a.status === "ALIVE" ? "#27ae60" : "#e74c3c";
+      const dot   = `<span style='color:${color}'>&#9679;</span>`;
+      const met   = a.metrics?.events_sent != null ? ` (${a.metrics.events_sent} ev)` : "";
+      html += `${dot} ${a.name}${met}<br>`;
+    });
+    agentPanelEl.innerHTML = html;
+  } catch {
+    agentPanelEl.innerHTML = "<b>Agents</b><br><span style='opacity:.5'>orchestrator offline</span>";
+  }
+}
+
+/* ---------------------------
    Boot
 --------------------------- */
 function boot() {
   initMap();
   mountControls();
+  mountAgentPanel();
   connectWS();
+  // Poll orchestrator health every 5 seconds
+  refreshAgentHealth();
+  setInterval(refreshAgentHealth, 5000);
 }
 
 document.addEventListener("DOMContentLoaded", boot);

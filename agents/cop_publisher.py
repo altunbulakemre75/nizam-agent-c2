@@ -28,7 +28,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+# Allow `from shared.heartbeat import Heartbeat` when running from repo root
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.heartbeat import Heartbeat
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +170,20 @@ def main() -> None:
     ap.add_argument("--origin_lon", type=float, default=28.979, help="Sensor origin longitude (WGS-84)")
     ap.add_argument("--retry_delay", type=float, default=0.5, help="Seconds to wait before retrying a failed POST")
     ap.add_argument("--passthrough", action="store_true", help="Echo each input line to stdout (for chaining)")
+    ap.add_argument("--orchestrator_url", default="http://127.0.0.1:8200", help="Orchestrator base URL")
     args = ap.parse_args()
 
     ingest_url = args.cop_url.rstrip("/") + "/ingest"
     print(f"[cop_publisher] Starting. Ingesting to: {ingest_url}", file=sys.stderr)
     print(f"[cop_publisher] Origin: lat={args.origin_lat}, lon={args.origin_lon}", file=sys.stderr)
+
+    # Register with orchestrator and start heartbeat
+    hb = Heartbeat(
+        name="cop-publisher",
+        orchestrator_url=args.orchestrator_url,
+        capabilities=["cop.track", "cop.threat"],
+    )
+    hb.start()
 
     sent = 0
     skipped = 0
@@ -209,6 +223,7 @@ def main() -> None:
             sent += 1
             if sent % 50 == 0:
                 print(f"[cop_publisher] {sent} events sent.", file=sys.stderr)
+                hb.report(events_sent=sent, skipped=skipped)
         else:
             # Brief pause so we don't spam a dead server
             time.sleep(args.retry_delay)

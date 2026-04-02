@@ -1,25 +1,32 @@
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+app = FastAPI(title="NIZAM Orchestrator", version="0.2.0")
 
 # -----------------------
-# FastAPI
+# Config
 # -----------------------
-app = FastAPI(title="NIZAM Orchestrator", version="0.1.0")
-
+AGENT_DEAD_AFTER_S = 15.0   # agent is DEAD if no heartbeat for this many seconds
 
 # -----------------------
 # In-memory state
 # -----------------------
 AGENTS: Dict[str, Dict[str, Any]] = {}
 EVENTS_COUNT: int = 0
-EVENTS: List[Dict[str, Any]] = []  # keep last 50 events for debugging
+EVENTS: List[Dict[str, Any]] = []
 
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def _utc_ts() -> float:
+    return datetime.now(timezone.utc).timestamp()
 
 def _bump_event(evt: Dict[str, Any]) -> None:
     global EVENTS_COUNT, EVENTS
@@ -28,55 +35,150 @@ def _bump_event(evt: Dict[str, Any]) -> None:
     if len(EVENTS) > 50:
         EVENTS = EVENTS[-50:]
 
+def _agent_status(agent: Dict[str, Any]) -> str:
+    last_ts = agent.get("last_seen_ts")
+    if last_ts is None:
+        return "UNKNOWN"
+    if _utc_ts() - last_ts > AGENT_DEAD_AFTER_S:
+        return "DEAD"
+    return "ALIVE"
+
 
 # -----------------------
-# Request models (minimal, no external imports needed)
+# Startup: background health checker
 # -----------------------
+@app.on_event("startup")
+async def start_health_checker():
+    asyncio.create_task(_health_checker())
+
+async def _health_checker():
+    """Periodically update agent status fields."""
+    while True:
+        await asyncio.sleep(5)
+        for name, agent in AGENTS.items():
+            agent["status"] = _agent_status(agent)
+
+
+# -----------------------
+# Request models
+# -----------------------
+class AgentRegister(BaseModel):
+    name: str           # e.g. "cop-publisher"
+    url: str = ""       # optional for pipeline agents
+    capabilities: List[str] = []
+    metadata: Dict[str, Any] = {}
+
+class AgentHeartbeat(BaseModel):
+    name: str
+    status: str = "ALIVE"
+    metrics: Dict[str, Any] = {}
+
 class TaskRequest(BaseModel):
     action: str
     payload: Dict[str, Any] = {}
 
 
-class AgentRegister(BaseModel):
-    name: str  # e.g. "camera-1"
-    url: str   # e.g. "http://127.0.0.1:8001"
-
-
 # -----------------------
-# Core endpoints
+# Endpoints
 # -----------------------
 @app.get("/health")
 def health():
-    return {"project": "nizam", "status": "ok"}
-
-
-@app.get("/agents")
-def list_agents():
-    # Modules are informational; runtime registry is in /agents/registry
+    total = len(AGENTS)
+    alive = sum(1 for a in AGENTS.values() if _agent_status(a) == "ALIVE")
     return {
-        "agents": [
-            {"name": "camera", "module": "agents.camera_agent"},
-            {"name": "machine", "module": "agents.machine_agent"},
-        ]
+        "project": "nizam",
+        "status": "ok",
+        "agents_total": total,
+        "agents_alive": alive,
+        "agents_dead": total - alive,
     }
 
 
 @app.post("/agents/register")
 def register_agent(body: AgentRegister):
-    AGENTS[body.name] = {
-        "url": body.url,
-        "last_seen": datetime.utcnow().isoformat() + "Z",
-        "registered_at": datetime.utcnow().isoformat() + "Z",
-    }
-    _bump_event(
-        {
-            "type": "agent_registered",
-            "name": body.name,
+    now = _utc_now()
+    if body.name in AGENTS:
+        # re-registration: update fields, keep registered_at
+        AGENTS[body.name].update({
             "url": body.url,
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "capabilities": body.capabilities,
+            "metadata": body.metadata,
+            "last_seen": now,
+            "last_seen_ts": _utc_ts(),
+            "status": "ALIVE",
+        })
+    else:
+        AGENTS[body.name] = {
+            "url": body.url,
+            "capabilities": body.capabilities,
+            "metadata": body.metadata,
+            "registered_at": now,
+            "last_seen": now,
+            "last_seen_ts": _utc_ts(),
+            "status": "ALIVE",
         }
-    )
-    return {"ok": True, "registered": body.name, "agent": AGENTS[body.name]}
+    _bump_event({"type": "agent_registered", "name": body.name, "ts": now})
+    return {"ok": True, "registered": body.name}
+
+
+@app.post("/agents/heartbeat")
+def agent_heartbeat(body: AgentHeartbeat):
+    now = _utc_now()
+    if body.name not in AGENTS:
+        # auto-register unknown agents on first heartbeat
+        AGENTS[body.name] = {
+            "url": "",
+            "capabilities": [],
+            "metadata": {},
+            "registered_at": now,
+            "last_seen": now,
+            "last_seen_ts": _utc_ts(),
+            "status": "ALIVE",
+        }
+    else:
+        AGENTS[body.name]["last_seen"] = now
+        AGENTS[body.name]["last_seen_ts"] = _utc_ts()
+        AGENTS[body.name]["status"] = "ALIVE"
+        if body.metrics:
+            AGENTS[body.name]["metrics"] = body.metrics
+    return {"ok": True}
+
+
+@app.get("/agents")
+def list_agents():
+    result = []
+    for name, data in AGENTS.items():
+        result.append({
+            "name": name,
+            "status": _agent_status(data),
+            "last_seen": data.get("last_seen"),
+            "url": data.get("url", ""),
+            "capabilities": data.get("capabilities", []),
+            "metrics": data.get("metrics", {}),
+        })
+    return {"agents": result}
+
+
+@app.get("/agents/health")
+def agents_health():
+    result = []
+    for name, data in AGENTS.items():
+        status = _agent_status(data)
+        result.append({
+            "name": name,
+            "status": status,
+            "last_seen": data.get("last_seen"),
+            "metrics": data.get("metrics", {}),
+        })
+    alive = sum(1 for r in result if r["status"] == "ALIVE")
+    return {
+        "ok": True,
+        "total": len(result),
+        "alive": alive,
+        "dead": len(result) - alive,
+        "agents": result,
+        "server_time": _utc_now(),
+    }
 
 
 @app.get("/agents/registry")
@@ -86,30 +188,17 @@ def agent_registry():
 
 @app.post("/run")
 def run_task(task: TaskRequest):
-    """
-    For now, /run is the central ingestion point for events/commands.
-
-    We require payload.source to be registered when present (e.g. "camera-1").
-    This prevents random/untrusted senders in a real system.
-    """
-    source = None
-    if isinstance(task.payload, dict):
-        source = task.payload.get("source")
-
-    # If source specified, enforce registration
+    source = task.payload.get("source") if isinstance(task.payload, dict) else None
     if source and source not in AGENTS:
         raise HTTPException(status_code=400, detail="Agent not registered")
-
     evt = {
         "type": "task",
         "action": task.action,
         "payload": task.payload,
         "source": source,
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": _utc_now(),
     }
     _bump_event(evt)
-
-    # Minimal response for now
     return {"ok": True, "accepted": True, "event_id": EVENTS_COUNT}
 
 
@@ -119,5 +208,5 @@ def state():
         "ok": True,
         "events_count": EVENTS_COUNT,
         "agents": AGENTS,
-        "recent_events": EVENTS[-10:],  # show last 10
+        "recent_events": EVENTS[-10:],
     }

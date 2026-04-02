@@ -36,7 +36,18 @@ def run_cop_server(host: str, port: int) -> None:
         "cop.server:app",
         host=host,
         port=port,
-        log_level="warning",   # keep stderr clean
+        log_level="warning",
+        reload=False,
+    )
+
+
+def run_orchestrator(host: str, port: int) -> None:
+    import uvicorn
+    uvicorn.run(
+        "orchestrator.app:app",
+        host=host,
+        port=port,
+        log_level="warning",
         reload=False,
     )
 
@@ -48,11 +59,12 @@ def run_cop_server(host: str, port: int) -> None:
 def run_pipeline(args: argparse.Namespace) -> subprocess.Popen:
     cmd = [
         sys.executable, str(ROOT / "run_pipeline.py"),
-        "--cop_url",    f"http://127.0.0.1:{args.cop_port}",
-        "--origin_lat", str(args.origin_lat),
-        "--origin_lon", str(args.origin_lon),
-        "--duration_s", str(args.duration_s),
-        "--rate_hz",    str(args.rate_hz),
+        "--cop_url",          f"http://127.0.0.1:{args.cop_port}",
+        "--orchestrator_url", f"http://127.0.0.1:{args.orch_port}",
+        "--origin_lat",       str(args.origin_lat),
+        "--origin_lon",       str(args.origin_lon),
+        "--duration_s",       str(args.duration_s),
+        "--rate_hz",          str(args.rate_hz),
     ]
     if args.verbose:
         cmd.append("--verbose")
@@ -67,6 +79,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="NIZAM all-in-one launcher")
     ap.add_argument("--cop_host",    default="0.0.0.0")
     ap.add_argument("--cop_port",    type=int,   default=8100)
+    ap.add_argument("--orch_port",   type=int,   default=8200)
     ap.add_argument("--origin_lat",  type=float, default=41.015)
     ap.add_argument("--origin_lon",  type=float, default=28.979)
     ap.add_argument("--duration_s",  type=float, default=300.0)
@@ -75,21 +88,30 @@ def main() -> None:
     ap.add_argument("--verbose",     action="store_true")
     args = ap.parse_args()
 
-    ui_url = f"http://127.0.0.1:{args.cop_port}"
+    ui_url   = f"http://127.0.0.1:{args.cop_port}"
+    orch_url = f"http://127.0.0.1:{args.orch_port}"
 
-    # -- 1) COP server in a daemon thread -----------------------------------
-    server_thread = threading.Thread(
+    # -- 1a) Orchestrator in a daemon thread --------------------------------
+    threading.Thread(
+        target=run_orchestrator,
+        args=(args.cop_host, args.orch_port),
+        daemon=True,
+        name="orchestrator",
+    ).start()
+    print(f"[start] Orchestrator starting on {orch_url} ...", file=sys.stderr)
+
+    # -- 1b) COP server in a daemon thread ----------------------------------
+    threading.Thread(
         target=run_cop_server,
         args=(args.cop_host, args.cop_port),
         daemon=True,
         name="cop-server",
-    )
-    server_thread.start()
+    ).start()
     print(f"[start] COP server starting on {ui_url} ...", file=sys.stderr)
 
-    # Give uvicorn a moment to bind the port before pipeline starts posting
+    # Give both servers a moment to bind before pipeline starts
     time.sleep(1.5)
-    print(f"[start] COP server ready.", file=sys.stderr)
+    print(f"[start] Servers ready. Orchestrator: {orch_url}", file=sys.stderr)
 
     # -- 2) Open browser (optional) -----------------------------------------
     if args.open_browser:

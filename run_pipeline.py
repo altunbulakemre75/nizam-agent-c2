@@ -65,7 +65,8 @@ def _merge_into(src, dst, verbose: bool = False, tag: str = "") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="NIZAM pipeline launcher")
-    ap.add_argument("--cop_url",     default="http://127.0.0.1:8100")
+    ap.add_argument("--cop_url",          default="http://127.0.0.1:8100")
+    ap.add_argument("--orchestrator_url", default="http://127.0.0.1:8200")
     ap.add_argument("--origin_lat",  type=float, default=41.015)
     ap.add_argument("--origin_lon",  type=float, default=28.979)
     ap.add_argument("--duration_s",  type=float, default=300.0)
@@ -135,9 +136,10 @@ def main() -> None:
     cop_pub = subprocess.Popen(
         [
             py, str(ROOT / "agents" / "cop_publisher.py"),
-            "--cop_url",    args.cop_url,
-            "--origin_lat", str(args.origin_lat),
-            "--origin_lon", str(args.origin_lon),
+            "--cop_url",          args.cop_url,
+            "--orchestrator_url", args.orchestrator_url,
+            "--origin_lat",       str(args.origin_lat),
+            "--origin_lon",       str(args.origin_lon),
         ],
         stdin=fuser.stdout,
         stderr=sys.stderr,
