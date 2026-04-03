@@ -1348,6 +1348,244 @@ function drawTimelineChart(data, trackId) {
   }
 }
 
+/* ── AI: After-Action Report (AAR) modal ──────────────────── */
+let aarModalEl = null;
+
+function mountAARButton() {
+  const btn = el("div", {style:{
+    position:"fixed", top:"60px", right:"12px", zIndex:"10002",
+    background:"#c0392b", color:"#fff",
+    padding:"6px 14px", borderRadius:"20px", cursor:"pointer",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    fontWeight:"bold", boxShadow:"0 2px 8px rgba(0,0,0,0.4)",
+    border:"1px solid rgba(255,255,255,0.2)",
+  }, onclick:()=>openAAR()}, ["AAR Raporu"]);
+  document.body.appendChild(btn);
+}
+
+function mountAARModal() {
+  aarModalEl = el("div", { id:"aar-modal", style:{
+    display:"none", position:"fixed", inset:"0", zIndex:"10010",
+    background:"rgba(0,0,0,0.88)", color:"white",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    overflowY:"auto",
+  }});
+  aarModalEl.innerHTML = `
+    <div id="aar-content" style="max-width:780px;margin:30px auto;padding:20px 28px;
+         background:rgba(15,15,30,0.95);border-radius:14px;border:1px solid rgba(100,150,255,0.2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0;font-size:18px">After-Action Report</h2>
+        <div>
+          <button id="aar-download" style="background:#2980b9;color:#fff;border:none;border-radius:6px;
+            padding:5px 12px;cursor:pointer;margin-right:8px;font-size:11px">JSON Indir</button>
+          <span id="aar-close" style="cursor:pointer;opacity:.6;font-size:20px;padding:0 8px">\u2715</span>
+        </div>
+      </div>
+      <div id="aar-body" style="line-height:1.7">
+        <p style="opacity:.5">Rapor yukleniyor...</p>
+      </div>
+    </div>`;
+  document.body.appendChild(aarModalEl);
+  document.getElementById("aar-close").addEventListener("click", ()=>{
+    aarModalEl.style.display = "none";
+  });
+  document.getElementById("aar-download").addEventListener("click", ()=>{
+    downloadAARJson();
+  });
+}
+
+let _lastAARData = null;
+
+async function openAAR() {
+  if(!aarModalEl) return;
+  aarModalEl.style.display = "block";
+  document.getElementById("aar-body").innerHTML = "<p style='opacity:.5'>Rapor yukleniyor...</p>";
+  try {
+    const resp = await fetch("/api/ai/aar").then(r=>r.json());
+    _lastAARData = resp;
+    renderAAR(resp);
+  } catch(e) {
+    document.getElementById("aar-body").innerHTML = "<p style='color:#e74c3c'>Rapor alinamadi: " + escHtml(e.message) + "</p>";
+  }
+}
+
+function downloadAARJson() {
+  if(!_lastAARData) return;
+  const blob = new Blob([JSON.stringify(_lastAARData, null, 2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `aar_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.json`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function renderAAR(r) {
+  const body = document.getElementById("aar-body");
+  if(!body) return;
+  const ex = r.executive_summary || {};
+  const ta = r.threat_analysis || {};
+  const aa = r.anomaly_analysis || {};
+  const ca = r.coordinated_attack_analysis || {};
+  const za = r.zone_breach_analysis || {};
+  const ts = r.task_summary || {};
+  const ra = r.risk_assessment || {};
+  const tracks = r.track_summaries || [];
+  const timeline = r.key_event_timeline || [];
+
+  const riskColors = {CRITICAL:"#e74c3c",HIGH:"#e67e22",MEDIUM:"#f39c12",LOW:"#27ae60"};
+  const riskColor = riskColors[ra.overall_risk] || "#95a5a6";
+
+  let html = "";
+
+  // ── Risk Assessment Banner ──
+  html += `<div style="background:${riskColor}22;border:2px solid ${riskColor};border-radius:10px;padding:12px 16px;margin-bottom:16px">
+    <div style="font-size:16px;font-weight:bold;color:${riskColor}">GENEL RISK: ${ra.overall_risk || "?"}</div>
+    <ul style="margin:6px 0 0 16px;padding:0;opacity:.9">${(ra.reasons||[]).map(r=>`<li>${escHtml(r)}</li>`).join("")}</ul>
+  </div>`;
+
+  // ── Executive Summary ──
+  html += `<div style="margin-bottom:14px">
+    <h3 style="margin:0 0 6px;color:#3498db;font-size:14px">Yonetici Ozeti</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      ${_aarStatCard("Sure", ex.duration_display || "?", "#3498db")}
+      ${_aarStatCard("Toplam Hedef", ex.total_unique_tracks || 0, "#9b59b6")}
+      ${_aarStatCard("Maks. Esanli", ex.max_concurrent_tracks || 0, "#8e44ad")}
+      ${_aarStatCard("Zirve Tehdit", ex.peak_threat_score || 0, "#e74c3c")}
+      ${_aarStatCard("Anomali", ex.total_anomalies || 0, "#e67e22")}
+      ${_aarStatCard("Koord. Saldiri", ex.total_coord_attacks || 0, "#c0392b")}
+      ${_aarStatCard("Bolge Ihlali", ex.total_zone_breaches || 0, "#f39c12")}
+      ${_aarStatCard("Gorev", ex.total_tasks || 0, "#2980b9")}
+      ${_aarStatCard("Bolge", ex.zones_defined || 0, "#1abc9c")}
+    </div>
+    ${ex.peak_threat_track ? `<div style="margin-top:6px;opacity:.7;font-size:11px">Zirve tehdit: <b>${escHtml(ex.peak_threat_track)}</b> (skor:${ex.peak_threat_score}, t+${ex.peak_threat_time_elapsed}s)</div>` : ""}
+  </div>`;
+
+  // ── Threat Analysis ──
+  html += `<div style="margin-bottom:14px">
+    <h3 style="margin:0 0 6px;color:#e74c3c;font-size:14px">Tehdit Analizi</h3>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px">
+      <div><span style="color:#e74c3c">\u25A0</span> HIGH: <b>${ta.high_threat_count||0}</b></div>
+      <div><span style="color:#f39c12">\u25A0</span> MEDIUM: <b>${ta.medium_threat_count||0}</b></div>
+      <div><span style="color:#27ae60">\u25A0</span> LOW: <b>${ta.low_threat_count||0}</b></div>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;opacity:.8">
+      ${Object.entries(ta.intent_distribution||{}).map(([k,v])=>`<div>${k}: <b>${v}</b></div>`).join("")}
+    </div>`;
+
+  if((ta.top_threatening_tracks||[]).length > 0) {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px">
+      <tr style="opacity:.6;text-align:left"><th style="padding:2px 6px">Hedef</th><th>Zirve Skor</th><th>Seviye</th><th>Niyet</th></tr>`;
+    (ta.top_threatening_tracks||[]).slice(0,8).forEach(t => {
+      const c = riskColors[t.peak_level] || "#aaa";
+      html += `<tr><td style="padding:2px 6px;font-weight:bold">${escHtml(t.track_id)}</td>
+        <td>${t.peak_score}</td><td style="color:${c}">${t.peak_level}</td><td>${t.peak_intent}</td></tr>`;
+    });
+    html += `</table>`;
+  }
+  html += `</div>`;
+
+  // ── Anomaly Analysis ──
+  if(aa.total > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#e67e22;font-size:14px">Anomali Analizi (${aa.total})</h3>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+        ${Object.entries(aa.by_type||{}).map(([k,v])=>`<div style="background:rgba(255,255,255,0.06);padding:2px 8px;border-radius:4px">${k}: <b>${v}</b></div>`).join("")}
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;opacity:.7">
+        ${Object.entries(aa.by_severity||{}).map(([k,v])=>{
+          const sc = riskColors[k]||"#aaa";
+          return `<div><span style="color:${sc}">\u25CF</span> ${k}: ${v}</div>`;
+        }).join("")}
+      </div>
+    </div>`;
+  }
+
+  // ── Coordinated Attack Analysis ──
+  if(ca.total > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#ff0050;font-size:14px">Koordineli Saldiri Analizi (${ca.total})</h3>
+      <div style="display:flex;gap:12px;margin-bottom:6px">
+        <div style="background:#ff005033;padding:3px 10px;border-radius:6px">Kiskac: <b>${ca.pincer_count||0}</b></div>
+        <div style="background:#ff660033;padding:3px 10px;border-radius:6px">Yakinsama: <b>${ca.convergence_count||0}</b></div>
+      </div>`;
+    (ca.events||[]).slice(0,5).forEach(e => {
+      const ec = e.subtype.includes("PINCER") ? "#ff0050" : "#ff6600";
+      html += `<div style="border-left:3px solid ${ec};padding-left:6px;margin:3px 0;font-size:11px">${escHtml(e.message||e.subtype)}</div>`;
+    });
+    html += `</div>`;
+  }
+
+  // ── Zone Breach Analysis ──
+  if(za.total > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#f39c12;font-size:14px">Bolge Ihlali (${za.total})</h3>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        ${Object.entries(za.by_zone||{}).map(([k,v])=>`<div style="background:rgba(243,156,18,0.12);padding:2px 8px;border-radius:4px">${escHtml(k)}: <b>${v}</b></div>`).join("")}
+      </div>
+    </div>`;
+  }
+
+  // ── Task Summary ──
+  if(ts.total_created > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#2980b9;font-size:14px">Gorev Ozeti (${ts.total_created})</h3>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        ${Object.entries(ts.by_action||{}).map(([k,v])=>`<div>${k}: <b>${v}</b></div>`).join("")}
+      </div>
+      <div style="margin-top:4px;opacity:.7">Bekleyen: ${ts.pending_count||0} | Onaylanan: ${ts.approved_count||0} | Reddedilen: ${ts.rejected_count||0}</div>
+    </div>`;
+  }
+
+  // ── Track Summaries ──
+  if(tracks.length > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#9b59b6;font-size:14px">Hedef Ozeti (${tracks.length})</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <tr style="opacity:.6;text-align:left">
+          <th style="padding:2px 6px">ID</th><th>Zirve</th><th>Ort.</th><th>Son</th><th>Niyet</th><th>Deg.</th><th>Anom.</th>
+        </tr>`;
+    tracks.slice(0,12).forEach(t => {
+      const c = riskColors[t.final_level] || "#aaa";
+      html += `<tr>
+        <td style="padding:2px 6px;font-weight:bold">${escHtml(t.track_id)}</td>
+        <td>${t.peak_score}</td><td>${t.avg_score}</td>
+        <td style="color:${c}">${t.final_score}</td>
+        <td>${t.dominant_intent}</td><td>${t.intent_changes}</td><td>${t.anomaly_count}</td>
+      </tr>`;
+    });
+    html += `</table></div>`;
+  }
+
+  // ── Key Event Timeline ──
+  if(timeline.length > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#1abc9c;font-size:14px">Olay Zaman Cizelgesi (${timeline.length})</h3>
+      <div style="max-height:200px;overflow-y:auto">`;
+    timeline.forEach(ev => {
+      const sc = riskColors[ev.severity] || "#95a5a6";
+      html += `<div style="display:flex;gap:8px;margin:2px 0;font-size:11px">
+        <span style="color:${sc};min-width:50px;opacity:.7">${ev.elapsed_display}</span>
+        <span style="color:${sc};font-weight:bold;min-width:100px">${ev.type}</span>
+        <span style="opacity:.85">${escHtml(ev.message)}</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // ── Footer ──
+  html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.1);opacity:.4;font-size:10px;text-align:center">
+    NIZAM COP — After-Action Report — ${r.generated_at_iso || ""}
+  </div>`;
+
+  body.innerHTML = html;
+}
+
+function _aarStatCard(label, value, color) {
+  return `<div style="background:${color}18;border:1px solid ${color}44;border-radius:8px;padding:6px 10px;text-align:center">
+    <div style="font-size:18px;font-weight:bold;color:${color}">${value}</div>
+    <div style="font-size:10px;opacity:.7">${label}</div>
+  </div>`;
+}
+
 /* ── AI: periodic refresh ──────────────────────────────────── */
 async function refreshAI() {
   try {
@@ -1399,6 +1637,8 @@ function boot(){
   mountTimelinePopup();
   mountChatPanel();
   mountChatToggle();
+  mountAARModal();
+  mountAARButton();
   connectWS();
   refreshAgentHealth();
   setInterval(refreshAgentHealth, 5000);

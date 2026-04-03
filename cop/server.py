@@ -45,6 +45,7 @@ from ai import llm_advisor as ai_llm
 from ai import zone_breach as ai_zone_breach
 from ai import coordinated_attack as ai_coord_attack
 from ai import timeline as ai_timeline
+from ai import aar as ai_aar
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -88,6 +89,9 @@ async def lifespan(_app: FastAPI):
             log.info("[cop] State restored from database.")
         except Exception as exc:
             log.warning("[cop] DB init failed — running in-memory only: %s", exc)
+
+    # 3) Start AAR session
+    ai_aar.start_session()
 
     yield
 
@@ -430,6 +434,7 @@ async def _check_zone_breaches(track_id: str, lat: float, lon: float) -> None:
         _append_event_tail(alert)
         await broadcast(alert)
         asyncio.create_task(_db_write(_persist_alert(alert_payload)))
+        ai_aar.record_zone_breach(alert_payload)
 
 
 # ── Autonomous tasking ────────────────────────────────────────────────────────
@@ -484,6 +489,7 @@ async def _auto_task(threat_id: str, threat_payload: Dict[str, Any]) -> None:
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task(task)))
+    ai_aar.record_task(task)
 
 
 def _make_snapshot_payload() -> Dict[str, Any]:
@@ -756,6 +762,8 @@ async def api_reset(_=Depends(require_operator())):
         ai_zone_breach.reset()
         ai_coord_attack.reset()
         ai_timeline.reset()
+        ai_aar.reset()
+        ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
             "payload": {
@@ -803,6 +811,8 @@ async def ingest(req: Request):
                 if lat is not None and lon is not None:
                     _ai_process_track(str(track_id), float(lat), float(lon),
                                       payload.get("intent", "unknown"))
+                # AAR: record track
+                ai_aar.record_track(str(track_id), len(STATE["tracks"]))
 
             asyncio.create_task(_db_write(_persist_track(payload)))
 
@@ -816,6 +826,13 @@ async def ingest(req: Request):
                 await _auto_task(str(threat_id), payload)
                 # Timeline: record threat state
                 ai_timeline.record_threat(
+                    str(threat_id),
+                    score=int(payload.get("score", payload.get("threat_score", 0))),
+                    level=str(payload.get("threat_level", "LOW")),
+                    intent=str(payload.get("intent", "unknown")),
+                )
+                # AAR: record threat
+                ai_aar.record_threat(
                     str(threat_id),
                     score=int(payload.get("score", payload.get("threat_score", 0))),
                     level=str(payload.get("threat_level", "LOW")),
@@ -857,6 +874,7 @@ def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> Non
             ai_timeline.record_anomaly(
                 track_id, a.get("type", "UNKNOWN"), a.get("severity", "MEDIUM"),
             )
+            ai_aar.record_anomaly(a)
 
 
 def _ai_run_tactical() -> None:
@@ -909,6 +927,9 @@ def _ai_run_tactical() -> None:
     )
     AI_COORD_ATTACKS.clear()
     AI_COORD_ATTACKS.extend(coord_attacks)
+    # AAR: record coordinated attacks
+    for ca in coord_attacks:
+        ai_aar.record_coord_attack(ca)
 
 
 # ── Phase 5: AI API endpoints ───────────────────────────────
@@ -1034,6 +1055,20 @@ async def api_ai_timeline(track_id: Optional[str] = Query(None)):
     })
 
 
+@app.get("/api/ai/aar")
+async def api_ai_aar():
+    """Generate and return After-Action Report."""
+    report = ai_aar.generate_report(
+        tracks=STATE["tracks"],
+        threats=STATE["threats"],
+        zones=STATE["zones"],
+        assets=STATE["assets"],
+        tasks=STATE["tasks"],
+        timelines=ai_timeline.get_all_timelines(),
+    )
+    return JSONResponse(report)
+
+
 @app.get("/api/ai/status")
 async def api_ai_status():
     """AI subsystem status."""
@@ -1044,6 +1079,7 @@ async def api_ai_status():
         "pred_breaches_active": len(AI_PRED_BREACHES),
         "coord_attacks_active": len(AI_COORD_ATTACKS),
         "timeline": ai_timeline.get_summary(),
+        "aar": ai_aar.get_status(),
         "llm_enabled": ai_llm.LLM_ENABLED,
         "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
     })
