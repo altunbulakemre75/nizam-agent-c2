@@ -114,7 +114,20 @@ def main() -> None:
     world.stdout.close()  # let radar own the pipe
 
     # ------------------------------------------------------------------
-    # 3) RF sim agent  sensor.detection.radar → sensor.detection.rf
+    # 3) EO sim agent  sensor.detection.radar → + sensor.detection.eo
+    #    (pass-through + adds EO events)
+    # ------------------------------------------------------------------
+    eo = subprocess.Popen(
+        [py, str(ROOT / "agents" / "eo_sim" / "eo_sim_agent.py")],
+        stdin=radar.stdout,
+        stdout=PIPE,
+        stderr=sys.stderr,
+    )
+    radar.stdout.close()  # let eo own radar's pipe
+
+    # ------------------------------------------------------------------
+    # 4) RF sim agent  sensor.detection.radar → sensor.detection.rf
+    #    (reads from eo output which passes radar events through)
     # ------------------------------------------------------------------
     rf = subprocess.Popen(
         [py, str(ROOT / "agents" / "rf_sim" / "rf_sim_agent.py")],
@@ -124,7 +137,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 4) Fuser agent  (radar + rf) → track.update + threat.assessment
+    # 5) Fuser agent  (radar + rf + eo) → track.update + threat.assessment
     # ------------------------------------------------------------------
     fuser = subprocess.Popen(
         [py, str(ROOT / "agents" / "fuser" / "fuser_agent.py")],
@@ -134,7 +147,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 5) COP publisher  track.update / threat.assessment → POST /ingest
+    # 6) COP publisher  track.update / threat.assessment → POST /ingest
     # ------------------------------------------------------------------
     cop_cmd = [
         py, str(ROOT / "agents" / "cop_publisher.py"),
@@ -155,8 +168,12 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # Thread wiring:
-    #   T1: radar.stdout → rf.stdin  AND  fuser.stdin  (fan-out)
-    #   T2: rf.stdout    → fuser.stdin                 (merge)
+    #   T1: eo.stdout → rf.stdin  AND  fuser.stdin  (fan-out: radar+EO events)
+    #   T2: rf.stdout → fuser.stdin                 (merge RF into fuser)
+    #
+    #   eo.stdout carries both radar pass-through AND sensor.detection.eo events.
+    #   RF agent ignores EO events (only processes radar detections).
+    #   Fuser handles radar, rf, AND eo event types.
     # ------------------------------------------------------------------
     fuser_lock = threading.Lock()
 
@@ -168,22 +185,22 @@ def main() -> None:
             except BrokenPipeError:
                 pass
 
-    def fanout_radar() -> None:
-        """Read radar output; send to rf.stdin and fuser.stdin."""
+    def fanout_eo() -> None:
+        """Read EO output (radar pass-through + EO events); fan to rf.stdin and fuser.stdin."""
         try:
-            for line in radar.stdout:
+            for line in eo.stdout:
                 if args.verbose:
-                    print(f"[radar] {line.decode().rstrip()}", file=sys.stderr)
-                # send to rf sim
+                    print(f"[eo] {line.decode().rstrip()}", file=sys.stderr)
+                # RF only cares about radar events (it ignores others silently)
                 try:
                     rf.stdin.write(line)
                     rf.stdin.flush()
                 except BrokenPipeError:
                     pass
-                # send to fuser
+                # Fuser gets everything (radar + EO events)
                 locked_write(fuser.stdin, line)
         except Exception as e:
-            print(f"[pipeline] fanout_radar error: {e}", file=sys.stderr)
+            print(f"[pipeline] fanout_eo error: {e}", file=sys.stderr)
         finally:
             try:
                 rf.stdin.close()
@@ -200,14 +217,13 @@ def main() -> None:
         except Exception as e:
             print(f"[pipeline] merge_rf error: {e}", file=sys.stderr)
         finally:
-            # RF done → close fuser stdin so it knows to exit
             try:
                 fuser.stdin.close()
             except Exception:
                 pass
 
-    t_fanout = threading.Thread(target=fanout_radar, daemon=True, name="fanout-radar")
-    t_merge   = threading.Thread(target=merge_rf,     daemon=True, name="merge-rf")
+    t_fanout = threading.Thread(target=fanout_eo,  daemon=True, name="fanout-eo")
+    t_merge  = threading.Thread(target=merge_rf,   daemon=True, name="merge-rf")
 
     t_fanout.start()
     t_merge.start()
@@ -218,6 +234,7 @@ def main() -> None:
     procs = [
         ("world",   world),
         ("radar",   radar),
+        ("eo",      eo),
         ("rf",      rf),
         ("fuser",   fuser),
         ("cop_pub", cop_pub),

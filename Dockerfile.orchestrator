@@ -1,0 +1,19 @@
+# NIZAM Orchestrator — Dockerfile
+FROM python:3.11-slim
+
+RUN useradd -m -u 1001 nizam
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir fastapi uvicorn pydantic
+
+COPY . .
+
+USER nizam
+
+ENV ORCH_PORT=8200
+EXPOSE 8200
+
+CMD ["python", "-m", "uvicorn", "orchestrator.app:app", \
+     "--host", "0.0.0.0", "--port", "8200", \
+     "--log-level", "info"]

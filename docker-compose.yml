@@ -1,0 +1,117 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────
+#  NIZAM COP — Docker Compose
+#
+#  Services:
+#    db           — TimescaleDB (PostgreSQL 15 + timescaledb extension)
+#    orchestrator — Agent registry & heartbeat (port 8200)
+#    cop          — COP server: REST + WebSocket + UI (port 8100)
+#    pipeline     — Agent pipeline (world→radar→rf→fuser→cop_publisher)
+#
+#  Quick start:
+#    cp .env.example .env
+#    docker compose up --build
+#
+#  With auth:
+#    AUTH_ENABLED=true in .env, then register first user via /auth/register
+# ─────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  DATABASE_URL:         ${DATABASE_URL:-postgresql+asyncpg://nizam:nizam@db:5432/nizam}
+  AUTH_ENABLED:         ${AUTH_ENABLED:-false}
+  JWT_SECRET:           ${JWT_SECRET:-nizam-dev-secret-CHANGE-in-production}
+  JWT_EXPIRE_MINUTES:   ${JWT_EXPIRE_MINUTES:-480}
+  ORCHESTRATOR_URL:     http://orchestrator:${ORCH_PORT:-8200}
+
+services:
+
+  # ── Database ───────────────────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     nizam
+      POSTGRES_PASSWORD: nizam
+      POSTGRES_DB:       nizam
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nizam -d nizam"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Orchestrator ───────────────────────────────────────────
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    ports:
+      - "${ORCH_PORT:-8200}:8200"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8200/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── COP Server ─────────────────────────────────────────────
+  cop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    ports:
+      - "${COP_PORT:-8100}:8100"
+    depends_on:
+      db:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/api/tracks')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Agent Pipeline ─────────────────────────────────────────
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      <<: *common-env
+    depends_on:
+      cop:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    command:
+      - python
+      - run_pipeline.py
+      - --cop_url
+      - http://cop:${COP_PORT:-8100}
+      - --orchestrator_url
+      - http://orchestrator:${ORCH_PORT:-8200}
+      - --origin_lat
+      - "41.015"
+      - --origin_lon
+      - "28.979"
+      - --duration_s
+      - "3600"
+      - --rate_hz
+      - "1.0"
+      - --scenario
+      - scenarios/swarm_attack.json
+
+volumes:
+  db_data:
+    driver: local

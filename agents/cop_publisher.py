@@ -117,6 +117,15 @@ def translate_track_update(payload: Dict[str, Any], origin_lat: float, origin_lo
     else:
         lat, lon = origin_lat, origin_lon
 
+    # Convert polar history to lat/lon history for UI trail drawing
+    history_latlon = []
+    for h in payload.get("history", []):
+        hr  = h.get("range_m")
+        haz = h.get("az_deg")
+        if hr is not None and haz is not None:
+            hlat, hlon = polar_to_latlon(float(hr), float(haz), origin_lat, origin_lon)
+            history_latlon.append({"lat": hlat, "lon": hlon, "ts": h.get("ts", "")})
+
     return {
         # Keys for COP server state store
         "global_track_id": gid,
@@ -130,6 +139,12 @@ def translate_track_update(payload: Dict[str, Any], origin_lat: float, origin_lo
         "supporting_sensors": payload.get("supporting_sensors", []),
         "kinematics": kin,
         "server_time": payload.get("server_time"),
+        # Phase 2: intent + trail history (lat/lon)
+        "intent":      payload.get("intent", "unknown"),
+        "intent_conf": payload.get("intent_conf", 0.0),
+        "history":     history_latlon,
+        "threat_level": payload.get("threat_level"),
+        "threat_score": payload.get("threat_score"),
     }
 
 
@@ -154,6 +169,8 @@ def translate_threat_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
         "reasons": payload.get("reasons", []),
         "rules_fired": payload.get("rules_fired", []),
         "server_time": payload.get("server_time"),
+        "intent": payload.get("intent", "unknown"),
+        "ml_probability": payload.get("ml_probability"),
     }
 
 

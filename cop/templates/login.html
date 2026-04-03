@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>NIZAM — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%;
+      background: #0d1117;
+      font-family: ui-sans-serif, system-ui, Arial, sans-serif;
+      color: #e6edf3;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .card {
+      background: rgba(22,27,34,0.97);
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 36px 40px;
+      width: 340px;
+    }
+    h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: .5px; }
+    .sub { color: #8b949e; font-size: 13px; margin-bottom: 28px; }
+    label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+    input {
+      display: block; width: 100%; padding: 8px 10px;
+      background: #0d1117; border: 1px solid #30363d;
+      border-radius: 6px; color: #e6edf3; font-size: 14px;
+      margin-bottom: 16px;
+    }
+    input:focus { outline: none; border-color: #388bfd; }
+    button {
+      width: 100%; padding: 10px;
+      background: #238636; border: none; border-radius: 6px;
+      color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: #2ea043; }
+    #err {
+      color: #f85149; font-size: 13px; margin-top: 14px;
+      min-height: 20px; text-align: center;
+    }
+    .logo { text-align: center; margin-bottom: 20px; }
+    .logo span { font-size: 36px; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"><span>&#9760;</span></div>
+  <h1>NIZAM COP</h1>
+  <div class="sub">Ortak Harekât Tablosu — Giriş</div>
+
+  <label for="username">Kullanıcı adı</label>
+  <input id="username" type="text" autocomplete="username" placeholder="admin" />
+
+  <label for="password">Şifre</label>
+  <input id="password" type="password" autocomplete="current-password" placeholder="••••••••" />
+
+  <button id="loginBtn">Giriş Yap</button>
+  <div id="err"></div>
+</div>
+
+<script>
+(function() {
+  // If auth is disabled, go straight to map
+  fetch('/auth/status').then(r => r.json()).then(d => {
+    if (!d.auth_enabled) window.location.replace('/');
+  }).catch(() => {});
+
+  async function doLogin() {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    document.getElementById('err').textContent = '';
+
+    if (!username || !password) {
+      document.getElementById('err').textContent = 'Kullanıcı adı ve şifre gerekli.';
+      return;
+    }
+
+    try {
+      const r = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        document.getElementById('err').textContent = d.detail || 'Giriş başarısız.';
+        return;
+      }
+      const d = await r.json();
+      localStorage.setItem('nizam_token', d.access_token);
+      localStorage.setItem('nizam_user',  JSON.stringify({ username: d.username, role: d.role }));
+      window.location.replace('/');
+    } catch(e) {
+      document.getElementById('err').textContent = 'Sunucuya bağlanılamadı.';
+    }
+  }
+
+  document.getElementById('loginBtn').addEventListener('click', doLogin);
+  document.getElementById('password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+})();
+</script>
+</body>
+</html>

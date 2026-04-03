@@ -21,3 +21,9 @@ Thumbs.db
 
 # Env
 .env
+
+# Docker
+*.tar
+
+# Alembic
+alembic/versions/*.pyc

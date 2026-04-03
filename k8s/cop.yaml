@@ -1,0 +1,75 @@
+---
+# COP Service (LoadBalancer — dış erişim)
+apiVersion: v1
+kind: Service
+metadata:
+  name: cop
+  namespace: nizam
+  labels:
+    app: cop
+spec:
+  type: LoadBalancer
+  selector:
+    app: cop
+  ports:
+    - port: 8100
+      targetPort: 8100
+      protocol: TCP
+---
+# COP Deployment (scalable)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cop
+  namespace: nizam
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cop
+  template:
+    metadata:
+      labels:
+        app: cop
+    spec:
+      initContainers:
+        # Wait for DB to be ready before starting COP
+        - name: wait-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for db:5432..."
+              until nc -z db 5432; do sleep 1; done
+              echo "DB ready."
+      containers:
+        - name: cop
+          image: nizam-cop:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8100
+          envFrom:
+            - configMapRef:
+                name: nizam-config
+            - secretRef:
+                name: nizam-secrets
+          readinessProbe:
+            httpGet:
+              path: /api/tracks
+              port: 8100
+            initialDelaySeconds: 8
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tracks
+              port: 8100
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

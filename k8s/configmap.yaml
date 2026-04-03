@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nizam-config
+  namespace: nizam
+data:
+  COP_PORT: "8100"
+  ORCH_PORT: "8200"
+  AUTH_ENABLED: "false"
+  JWT_EXPIRE_MINUTES: "480"
+  ORCHESTRATOR_URL: "http://orchestrator:8200"
+  # Pipeline defaults
+  ORIGIN_LAT: "41.015"
+  ORIGIN_LON: "28.979"
+  DURATION_S: "3600"
+  RATE_HZ: "1.0"
+  SCENARIO: "scenarios/swarm_attack.json"

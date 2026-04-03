@@ -31,7 +31,10 @@ ROOT = Path(__file__).parent
 # ---------------------------------------------------------------------------
 
 def run_cop_server(host: str, port: int) -> None:
+    import asyncio
     import uvicorn
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(
         "cop.server:app",
         host=host,
@@ -42,7 +45,10 @@ def run_cop_server(host: str, port: int) -> None:
 
 
 def run_orchestrator(host: str, port: int) -> None:
+    import asyncio
     import uvicorn
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(
         "orchestrator.app:app",
         host=host,

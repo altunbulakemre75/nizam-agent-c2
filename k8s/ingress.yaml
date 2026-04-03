@@ -1,0 +1,28 @@
+---
+# Ingress — dış dünyadan COP UI'ye erişim
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cop-ingress
+  namespace: nizam
+  annotations:
+    # WebSocket desteği için timeout artır
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # WebSocket upgrade
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: nizam.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cop
+                port:
+                  number: 8100
