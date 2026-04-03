@@ -1,8 +1,9 @@
 /* ==========================================================
-   NIZAM COP — cop/static/app.js  (Phase 3)
+   NIZAM COP — cop/static/app.js  (Phase 5)
    Phase 1: tracks, threats, zones, zone-breach alerts
    Phase 2: trail polylines, intent badges, EO sensor, ML scoring
    Phase 3: asset management, autonomous task queue, mission waypoints
+   Phase 5: AI decision support (predictions, anomalies, tactical, LLM chat)
    ========================================================== */
 
 /* ── Utilities ──────────────────────────────────────────── */
@@ -696,9 +697,303 @@ async function refreshAgentHealth(){
   }
 }
 
+/* ==========================================================
+   Phase 5: AI Decision Support UI
+   ========================================================== */
+
+/* ── AI: Predicted trajectory lines ─────────────────────── */
+const predictionLines = new Map(); // track_id -> L.polyline
+
+function drawPredictions(predictions) {
+  // predictions: {track_id: [{lat,lon,time_ahead_s}, ...]}
+  if(!predictions || !UI.map) return;
+  // Clear old
+  for(const [id,pl] of predictionLines) {
+    if(!predictions[id]) { try{pl.remove();}catch{} predictionLines.delete(id); }
+  }
+  for(const [tid, pts] of Object.entries(predictions)) {
+    if(!pts || !pts.length) continue;
+    const track = UI.tracks.get(tid);
+    if(!track) continue;
+    const trackLL = getLL(track);
+    if(!trackLL) continue;
+    const lls = [trackLL, ...pts.map(p => [p.lat, p.lon])];
+    const ex = predictionLines.get(tid);
+    if(!ex) {
+      const pl = L.polyline(lls, {
+        color: "#00e5ff", weight: 2, opacity: 0.6,
+        dashArray: "3 6", className: "prediction-line"
+      }).addTo(UI.map);
+      pl.bindTooltip(`Predicted: ${tid} (+${pts[pts.length-1]?.time_ahead_s}s)`,
+                     {sticky:true, opacity:0.8});
+      predictionLines.set(tid, pl);
+    } else {
+      ex.setLatLngs(lls);
+    }
+  }
+}
+
+/* ── AI: Anomaly panel ──────────────────────────────────── */
+let anomalyPanelEl = null;
+const anomalyLog = [];
+const MAX_ANOMALY_LOG = 30;
+
+const ANOMALY_COLORS = {
+  CRITICAL: "#e74c3c",
+  HIGH:     "#e67e22",
+  MEDIUM:   "#f1c40f",
+  LOW:      "#95a5a6",
+};
+
+function mountAnomalyPanel() {
+  anomalyPanelEl = el("div", { id:"anomaly-panel", style:{
+    position:"fixed", bottom:"180px", right:"12px", zIndex:"9999",
+    background:"rgba(0,0,0,0.75)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
+    lineHeight:"1.4", minWidth:"220px", maxWidth:"290px",
+    maxHeight:"200px", overflowY:"auto",
+  }});
+  anomalyPanelEl.innerHTML = "<b>AI Anomalies</b><br><span style='opacity:.5'>No anomalies</span>";
+  document.body.appendChild(anomalyPanelEl);
+}
+
+function renderAnomalyPanel() {
+  if(!anomalyPanelEl) return;
+  if(anomalyLog.length === 0) {
+    anomalyPanelEl.innerHTML = "<b>AI Anomalies</b><br><span style='opacity:.5'>No anomalies</span>";
+    return;
+  }
+  let html = `<b>AI Anomalies</b> <span style="opacity:.6">${anomalyLog.length}</span><br>`;
+  anomalyLog.slice(0, 15).forEach(a => {
+    const c = ANOMALY_COLORS[a.severity] || "#aaa";
+    const tid = a.track_id || (a.track_ids||[]).join(",") || "?";
+    html += `<div style="border-left:2px solid ${c};padding-left:4px;margin:2px 0">
+      <span style="color:${c};font-weight:bold">${a.type}</span>
+      <span style="opacity:.7"> ${tid}</span><br>
+      <span style="opacity:.6;font-size:9px">${a.detail||a.message||""}</span>
+    </div>`;
+  });
+  anomalyPanelEl.innerHTML = html;
+}
+
+function pushAnomalies(anomalies) {
+  if(!anomalies || !anomalies.length) return;
+  for(const a of anomalies) {
+    anomalyLog.unshift(a);
+  }
+  while(anomalyLog.length > MAX_ANOMALY_LOG) anomalyLog.pop();
+  renderAnomalyPanel();
+  // Flash
+  if(anomalyPanelEl) {
+    const sev = anomalies[0]?.severity;
+    const c = ANOMALY_COLORS[sev] || "#e74c3c";
+    anomalyPanelEl.style.outline = `2px solid ${c}`;
+    setTimeout(() => { anomalyPanelEl.style.outline = "none"; }, 800);
+  }
+}
+
+/* ── AI: Tactical recommendations panel ─────────────────── */
+let tacPanelEl = null;
+
+const TAC_ICONS = {
+  INTERCEPT: "\u2694",     // crossed swords
+  ZONE_WARNING: "\u26A0",  // warning
+  ESCALATE: "\u2B06",      // up arrow
+  WITHDRAW: "\u21A9",      // return arrow
+  MONITOR: "\u{1F441}",    // eye
+  REPOSITION: "\u27A1",    // right arrow
+};
+const TAC_COLORS = {
+  INTERCEPT: "#e74c3c",
+  ZONE_WARNING: "#f39c12",
+  ESCALATE: "#e74c3c",
+  WITHDRAW: "#3498db",
+  MONITOR: "#9b59b6",
+  REPOSITION: "#1abc9c",
+};
+
+function mountTacticalPanel() {
+  tacPanelEl = el("div", { id:"tac-panel", style:{
+    position:"fixed", bottom:"12px", left:"220px", zIndex:"9999",
+    background:"rgba(0,0,0,0.78)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
+    lineHeight:"1.4", minWidth:"260px", maxWidth:"340px",
+    maxHeight:"220px", overflowY:"auto",
+  }});
+  tacPanelEl.innerHTML = "<b>AI Tactical</b><br><span style='opacity:.5'>No recommendations</span>";
+  document.body.appendChild(tacPanelEl);
+}
+
+function renderTacticalPanel(recs) {
+  if(!tacPanelEl) return;
+  if(!recs || recs.length === 0) {
+    tacPanelEl.innerHTML = "<b>AI Tactical</b><br><span style='opacity:.5'>No recommendations</span>";
+    return;
+  }
+  let html = `<b>AI Tactical</b> <span style="opacity:.6">${recs.length} active</span><br>`;
+  recs.slice(0, 8).forEach(r => {
+    const icon = TAC_ICONS[r.type] || "\u2022";
+    const color = TAC_COLORS[r.type] || "#aaa";
+    html += `<div style="border-left:3px solid ${color};padding-left:5px;margin:3px 0">
+      <span style="font-size:12px">${icon}</span>
+      <span style="color:${color};font-weight:bold"> ${r.type}</span>
+      <span style="opacity:.6"> P${r.priority}</span><br>
+      <span style="font-size:9px">${r.message || ""}</span>
+    </div>`;
+  });
+  tacPanelEl.innerHTML = html;
+}
+
+/* ── AI: LLM Chat panel ───────────────────────────────────── */
+let chatPanelEl = null;
+const chatHistory = [];
+
+function mountChatPanel() {
+  chatPanelEl = el("div", { id:"chat-panel", style:{
+    position:"fixed", top:"12px", left:"50%", transform:"translateX(-50%)",
+    zIndex:"9998", background:"rgba(0,0,0,0.85)", color:"white",
+    padding:"10px 14px", borderRadius:"12px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    lineHeight:"1.5", width:"420px", maxHeight:"400px",
+    display:"none", flexDirection:"column",
+  }});
+
+  const header = el("div", {style:{display:"flex",justifyContent:"space-between",marginBottom:"6px"}}, [
+    el("b", {}, ["AI Advisor"]),
+    el("button", {style:{background:"none",border:"none",color:"#aaa",cursor:"pointer",fontSize:"14px"},
+      onclick:()=>{ chatPanelEl.style.display="none"; }}, ["\u2715"]),
+  ]);
+
+  const msgArea = el("div", {id:"chat-messages", style:{
+    flex:"1", overflowY:"auto", maxHeight:"280px", marginBottom:"8px",
+    padding:"4px", fontSize:"11px", lineHeight:"1.5",
+  }});
+  msgArea.innerHTML = "<span style='opacity:.5'>AI danismana soru sorun...</span>";
+
+  const inputRow = el("div", {style:{display:"flex",gap:"6px"}});
+  const input = el("input", {type:"text", placeholder:"Soru sorun veya komut verin...",
+    style:{flex:"1",padding:"5px 8px",borderRadius:"6px",border:"1px solid #555",
+           background:"#222",color:"#fff",fontSize:"12px"}});
+  const sendBtn = el("button", {style:{background:"#2980b9",color:"#fff",border:"none",
+    borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px"},
+    onclick:()=>sendChat(input, msgArea)}, ["Gonder"]);
+
+  input.addEventListener("keydown", e => {
+    if(e.key === "Enter") sendChat(input, msgArea);
+  });
+
+  // Briefing button
+  const briefBtn = el("button", {style:{background:"#8e44ad",color:"#fff",border:"none",
+    borderRadius:"6px",padding:"5px 10px",cursor:"pointer",fontSize:"10px",marginRight:"4px"},
+    onclick:()=>getBriefing(msgArea)}, ["Brifing"]);
+
+  inputRow.appendChild(input);
+  inputRow.appendChild(briefBtn);
+  inputRow.appendChild(sendBtn);
+  chatPanelEl.appendChild(header);
+  chatPanelEl.appendChild(msgArea);
+  chatPanelEl.appendChild(inputRow);
+  document.body.appendChild(chatPanelEl);
+}
+
+async function sendChat(input, msgArea) {
+  const q = input.value.trim();
+  if(!q) return;
+  input.value = "";
+
+  // Show user message
+  chatHistory.push({role:"user", text:q});
+  renderChatMessages(msgArea);
+
+  try {
+    const resp = await fetch("/api/ai/chat", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({question: q}),
+    });
+    const data = await resp.json();
+    const answer = data.answer || data.briefing || "Yanit alinamadi.";
+    const badge = data.llm_used ? " [LLM]" : " [LOCAL]";
+    chatHistory.push({role:"ai", text: answer + badge});
+  } catch(e) {
+    chatHistory.push({role:"ai", text:"Hata: " + e.message});
+  }
+  renderChatMessages(msgArea);
+}
+
+async function getBriefing(msgArea) {
+  chatHistory.push({role:"user", text:"[Durum Brifing Istegi]"});
+  renderChatMessages(msgArea);
+  try {
+    const resp = await fetch("/api/ai/briefing");
+    const data = await resp.json();
+    const badge = data.llm_used ? " [LLM]" : " [LOCAL]";
+    chatHistory.push({role:"ai", text: (data.briefing || "Brifing alinamadi.") + badge});
+  } catch(e) {
+    chatHistory.push({role:"ai", text:"Hata: " + e.message});
+  }
+  renderChatMessages(msgArea);
+}
+
+function renderChatMessages(area) {
+  let html = "";
+  chatHistory.slice(-20).forEach(m => {
+    if(m.role === "user") {
+      html += `<div style="text-align:right;margin:3px 0">
+        <span style="background:#2c3e50;padding:3px 8px;border-radius:8px;display:inline-block;max-width:85%">${escHtml(m.text)}</span>
+      </div>`;
+    } else {
+      html += `<div style="text-align:left;margin:3px 0">
+        <span style="background:#1a252f;padding:3px 8px;border-radius:8px;display:inline-block;max-width:85%;white-space:pre-wrap">${escHtml(m.text)}</span>
+      </div>`;
+    }
+  });
+  area.innerHTML = html;
+  area.scrollTop = area.scrollHeight;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+/* ── AI: toggle chat button (floating) ─────────────────── */
+function mountChatToggle() {
+  const btn = el("div", {style:{
+    position:"fixed", top:"60px", left:"50%", transform:"translateX(-50%)",
+    zIndex:"9999", background:"#8e44ad", color:"#fff",
+    padding:"5px 14px", borderRadius:"20px", cursor:"pointer",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    boxShadow:"0 2px 8px rgba(0,0,0,0.4)",
+  }, onclick:()=>{
+    if(!chatPanelEl) return;
+    chatPanelEl.style.display = chatPanelEl.style.display === "none" ? "flex" : "none";
+  }}, ["AI Advisor"]);
+  document.body.appendChild(btn);
+}
+
+/* ── AI: periodic refresh ──────────────────────────────────── */
+async function refreshAI() {
+  try {
+    const [predResp, anomResp, recResp] = await Promise.all([
+      fetch("/api/ai/predictions").then(r=>r.json()).catch(()=>({})),
+      fetch("/api/ai/anomalies").then(r=>r.json()).catch(()=>({anomalies:[]})),
+      fetch("/api/ai/recommendations").then(r=>r.json()).catch(()=>({recommendations:[]})),
+    ]);
+    // Draw predictions
+    drawPredictions(predResp.predictions || {});
+    // Update anomaly panel (only new ones)
+    const newAnomalies = (anomResp.anomalies || []).filter(a => {
+      return !anomalyLog.some(e => e.time === a.time && e.type === a.type &&
+        (e.track_id||"") === (a.track_id||""));
+    });
+    if(newAnomalies.length > 0) pushAnomalies(newAnomalies);
+    // Tactical recommendations
+    renderTacticalPanel(recResp.recommendations || []);
+  } catch(e) { /* silent */ }
+}
+
 /* ── Boot ────────────────────────────────────────────────── */
-// expose for zone draw guard
-// assetPlacingType declared at line 447 (module-scope, accessible here)
 
 function boot(){
   initMap();
@@ -709,9 +1004,16 @@ function boot(){
   mountTaskPanel();
   mountAssetPanel();
   mountMissionPanel();
+  // Phase 5: AI panels
+  mountAnomalyPanel();
+  mountTacticalPanel();
+  mountChatPanel();
+  mountChatToggle();
   connectWS();
   refreshAgentHealth();
-  setInterval(refreshAgentHealth,5000);
+  setInterval(refreshAgentHealth, 5000);
+  // AI refresh every 3s
+  setInterval(refreshAI, 3000);
 }
 document.addEventListener("DOMContentLoaded", () => {
   try { boot(); }

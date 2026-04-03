@@ -1,13 +1,21 @@
 """
-cop/server.py  —  NIZAM COP  (Phase 4)
+cop/server.py  —  NIZAM COP  (Phase 5)
 Phases 1-3: tracks, threats, zones, alerts, assets, tasks, waypoints
 Phase 4   : PostgreSQL/TimescaleDB persistence + JWT auth (optional)
+Phase 5   : AI Decision Support Layer
+            - Kalman-filter track prediction
+            - Anomaly & swarm detection
+            - Tactical recommendation engine
+            - LLM-powered operator advisor (Claude / OpenAI)
 
 ENV:
   DATABASE_URL      postgresql+asyncpg://user:pass@host:5432/nizam
   AUTH_ENABLED      true | false (default false)
   JWT_SECRET        change in production
   ORCHESTRATOR_URL  http://127.0.0.1:8200
+  ANTHROPIC_API_KEY sk-ant-...  (optional, for LLM advisor)
+  OPENAI_API_KEY    sk-...      (optional, for LLM advisor)
+  LLM_PROVIDER      anthropic | openai
 """
 from __future__ import annotations
 
@@ -28,6 +36,12 @@ from fastapi.templating import Jinja2Templates
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:8200")
 
 log = logging.getLogger("nizam.cop")
+
+# ── AI Decision Support imports ──────────────────────────────────────────────
+from ai import predictor as ai_predictor
+from ai import anomaly as ai_anomaly
+from ai import tactical as ai_tactical
+from ai import llm_advisor as ai_llm
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -102,6 +116,12 @@ STATE: Dict[str, Any] = {
 BREACH_STATE: Dict[str, Set[str]] = {}
 TASK_EMITTED: Dict[str, Set[str]] = {}
 EVENT_TAIL_MAX = 500
+
+# Phase 5 — AI state
+AI_PREDICTIONS: Dict[str, List[Dict]] = {}   # {track_id: [predicted points]}
+AI_ANOMALIES: List[Dict] = []                # recent anomalies (max 100)
+AI_RECOMMENDATIONS: List[Dict] = []           # latest tactical recommendations
+AI_ANOMALY_MAX = 100
 
 CLIENTS: Set[WebSocket] = set()
 CLIENTS_LOCK = asyncio.Lock()
@@ -468,6 +488,9 @@ def _make_snapshot_payload() -> Dict[str, Any]:
         "assets":    list(STATE["assets"].values()),
         "tasks":     [t for t in STATE["tasks"].values() if t["status"] == "PENDING"],
         "waypoints": list(STATE["waypoints"].values()),
+        "predictions":     AI_PREDICTIONS,
+        "anomalies":       AI_ANOMALIES[-20:],
+        "recommendations": AI_RECOMMENDATIONS,
         "server_time": _utc_now_iso(),
     }
 
@@ -711,6 +734,13 @@ async def api_reset(_=Depends(require_operator())):
         STATE["tasks"].clear()
         BREACH_STATE.clear()
         TASK_EMITTED.clear()
+        AI_PREDICTIONS.clear()
+        AI_ANOMALIES.clear()
+        AI_RECOMMENDATIONS.clear()
+        ai_predictor.reset()
+        ai_anomaly.reset()
+        ai_tactical.reset()
+        ai_llm.reset()
         snapshot = {
             "event_type": "cop.snapshot",
             "payload": {
@@ -753,6 +783,12 @@ async def ingest(req: Request):
                 lon = payload.get("lon")
                 if lat is not None and lon is not None and STATE["zones"]:
                     await _check_zone_breaches(str(track_id), float(lat), float(lon))
+
+                # ── Phase 5: AI hooks on track update ──
+                if lat is not None and lon is not None:
+                    _ai_process_track(str(track_id), float(lat), float(lon),
+                                      payload.get("intent", "unknown"))
+
             asyncio.create_task(_db_write(_persist_track(payload)))
 
         elif event_type == "cop.threat":
@@ -768,8 +804,153 @@ async def ingest(req: Request):
         elif event_type == "cop.snapshot":
             pass
 
+    # ── Phase 5: periodic tactical analysis (every ingest) ──
+    _ai_run_tactical()
+
     await broadcast(ev)
     return JSONResponse({"ok": True})
+
+
+# ── Phase 5: AI processing helpers ───────────────────────────
+
+_ai_tactical_last = 0.0
+_AI_TACTICAL_INTERVAL = 3.0  # run tactical engine every N seconds
+
+
+def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> None:
+    """Run predictor + anomaly detection on a single track update."""
+    # 1) Kalman filter prediction
+    preds = ai_predictor.update_track(track_id, lat, lon)
+    if preds:
+        AI_PREDICTIONS[track_id] = preds
+
+    # 2) Anomaly detection
+    anomalies = ai_anomaly.check_track(track_id, lat, lon, intent=intent)
+    if anomalies:
+        AI_ANOMALIES.extend(anomalies)
+        if len(AI_ANOMALIES) > AI_ANOMALY_MAX:
+            del AI_ANOMALIES[: len(AI_ANOMALIES) - AI_ANOMALY_MAX]
+
+
+def _ai_run_tactical() -> None:
+    """Run tactical recommendation engine (rate-limited)."""
+    import time as _time
+    global _ai_tactical_last
+    now = _time.time()
+    if now - _ai_tactical_last < _AI_TACTICAL_INTERVAL:
+        return
+    _ai_tactical_last = now
+
+    # Swarm detection
+    swarm_anomalies = ai_anomaly.detect_swarms(STATE["tracks"])
+    if swarm_anomalies:
+        AI_ANOMALIES.extend(swarm_anomalies)
+        if len(AI_ANOMALIES) > AI_ANOMALY_MAX:
+            del AI_ANOMALIES[: len(AI_ANOMALIES) - AI_ANOMALY_MAX]
+
+    # Tactical recommendations
+    recs = ai_tactical.generate_recommendations(
+        tracks=STATE["tracks"],
+        threats=STATE["threats"],
+        assets=STATE["assets"],
+        zones=STATE["zones"],
+        anomalies=AI_ANOMALIES,
+        predictions=AI_PREDICTIONS,
+    )
+    AI_RECOMMENDATIONS.clear()
+    AI_RECOMMENDATIONS.extend(recs)
+
+
+# ── Phase 5: AI API endpoints ───────────────────────────────
+
+@app.get("/api/ai/predictions")
+async def api_ai_predictions(track_id: Optional[str] = Query(None)):
+    """Get predicted future positions for tracks."""
+    if track_id:
+        return JSONResponse({
+            "track_id": track_id,
+            "predictions": AI_PREDICTIONS.get(track_id, []),
+        })
+    return JSONResponse({"predictions": {k: v for k, v in AI_PREDICTIONS.items()}})
+
+
+@app.get("/api/ai/anomalies")
+async def api_ai_anomalies(limit: int = Query(50, le=200)):
+    """Get recent anomalies."""
+    return JSONResponse({
+        "count": len(AI_ANOMALIES),
+        "anomalies": AI_ANOMALIES[-limit:],
+    })
+
+
+@app.get("/api/ai/recommendations")
+async def api_ai_recommendations():
+    """Get current tactical recommendations."""
+    return JSONResponse({
+        "count": len(AI_RECOMMENDATIONS),
+        "recommendations": AI_RECOMMENDATIONS,
+    })
+
+
+@app.get("/api/ai/briefing")
+async def api_ai_briefing():
+    """Get AI-generated situation briefing."""
+    result = await ai_llm.get_briefing(
+        tracks=STATE["tracks"],
+        threats=STATE["threats"],
+        assets=STATE["assets"],
+        zones=STATE["zones"],
+        anomalies=AI_ANOMALIES,
+        recommendations=AI_RECOMMENDATIONS,
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/ai/chat")
+async def api_ai_chat(req: Request):
+    """Operator chat with AI advisor."""
+    body = await req.json()
+    question = body.get("question", "")
+    if not question:
+        return JSONResponse({"ok": False, "error": "question required"}, status_code=400)
+    result = await ai_llm.chat(
+        question=question,
+        tracks=STATE["tracks"],
+        threats=STATE["threats"],
+        assets=STATE["assets"],
+        zones=STATE["zones"],
+        anomalies=AI_ANOMALIES,
+        recommendations=AI_RECOMMENDATIONS,
+        session_id=body.get("session_id", "default"),
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/ai/command")
+async def api_ai_command(req: Request):
+    """Parse natural-language command via LLM."""
+    body = await req.json()
+    command = body.get("command", "")
+    if not command:
+        return JSONResponse({"ok": False, "error": "command required"}, status_code=400)
+    result = await ai_llm.parse_command(
+        command=command,
+        tracks=STATE["tracks"],
+        assets=STATE["assets"],
+    )
+    return JSONResponse(result)
+
+
+@app.get("/api/ai/status")
+async def api_ai_status():
+    """AI subsystem status."""
+    return JSONResponse({
+        "predictions_active": len(AI_PREDICTIONS),
+        "anomalies_total": len(AI_ANOMALIES),
+        "recommendations_active": len(AI_RECOMMENDATIONS),
+        "llm_enabled": ai_llm.LLM_ENABLED,
+        "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
+    })
 
 
 # ── Analytics endpoints (Phase 4) ────────────────────────────
