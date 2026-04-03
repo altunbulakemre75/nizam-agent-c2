@@ -42,6 +42,7 @@ from ai import predictor as ai_predictor
 from ai import anomaly as ai_anomaly
 from ai import tactical as ai_tactical
 from ai import llm_advisor as ai_llm
+from ai import zone_breach as ai_zone_breach
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -121,6 +122,8 @@ EVENT_TAIL_MAX = 500
 AI_PREDICTIONS: Dict[str, List[Dict]] = {}   # {track_id: [predicted points]}
 AI_ANOMALIES: List[Dict] = []                # recent anomalies (max 100)
 AI_RECOMMENDATIONS: List[Dict] = []           # latest tactical recommendations
+AI_PRED_BREACHES: List[Dict] = []             # predictive zone breach warnings
+AI_UNCERTAINTY_CONES: Dict[str, List[Dict]] = {}  # uncertainty cones for frontend
 AI_ANOMALY_MAX = 100
 
 CLIENTS: Set[WebSocket] = set()
@@ -488,9 +491,11 @@ def _make_snapshot_payload() -> Dict[str, Any]:
         "assets":    list(STATE["assets"].values()),
         "tasks":     [t for t in STATE["tasks"].values() if t["status"] == "PENDING"],
         "waypoints": list(STATE["waypoints"].values()),
-        "predictions":     AI_PREDICTIONS,
-        "anomalies":       AI_ANOMALIES[-20:],
-        "recommendations": AI_RECOMMENDATIONS,
+        "predictions":       AI_PREDICTIONS,
+        "anomalies":         AI_ANOMALIES[-20:],
+        "recommendations":   AI_RECOMMENDATIONS,
+        "pred_breaches":     AI_PRED_BREACHES,
+        "uncertainty_cones": AI_UNCERTAINTY_CONES,
         "server_time": _utc_now_iso(),
     }
 
@@ -737,10 +742,13 @@ async def api_reset(_=Depends(require_operator())):
         AI_PREDICTIONS.clear()
         AI_ANOMALIES.clear()
         AI_RECOMMENDATIONS.clear()
+        AI_PRED_BREACHES.clear()
+        AI_UNCERTAINTY_CONES.clear()
         ai_predictor.reset()
         ai_anomaly.reset()
         ai_tactical.reset()
         ai_llm.reset()
+        ai_zone_breach.reset()
         snapshot = {
             "event_type": "cop.snapshot",
             "payload": {
@@ -860,6 +868,19 @@ def _ai_run_tactical() -> None:
     AI_RECOMMENDATIONS.clear()
     AI_RECOMMENDATIONS.extend(recs)
 
+    # Predictive zone breach detection
+    breaches = ai_zone_breach.check_predictive_breaches(
+        predictions=AI_PREDICTIONS,
+        zones=STATE["zones"],
+    )
+    AI_PRED_BREACHES.clear()
+    AI_PRED_BREACHES.extend(breaches)
+
+    # Uncertainty cones for frontend
+    cones = ai_zone_breach.build_uncertainty_cones(AI_PREDICTIONS)
+    AI_UNCERTAINTY_CONES.clear()
+    AI_UNCERTAINTY_CONES.update(cones)
+
 
 # ── Phase 5: AI API endpoints ───────────────────────────────
 
@@ -941,6 +962,26 @@ async def api_ai_command(req: Request):
     return JSONResponse(result)
 
 
+@app.get("/api/ai/pred_breaches")
+async def api_ai_pred_breaches():
+    """Get predictive zone breach warnings."""
+    return JSONResponse({
+        "count": len(AI_PRED_BREACHES),
+        "breaches": AI_PRED_BREACHES,
+    })
+
+
+@app.get("/api/ai/uncertainty")
+async def api_ai_uncertainty(track_id: Optional[str] = Query(None)):
+    """Get uncertainty cone data for predicted trajectories."""
+    if track_id:
+        return JSONResponse({
+            "track_id": track_id,
+            "cone": AI_UNCERTAINTY_CONES.get(track_id, []),
+        })
+    return JSONResponse({"cones": AI_UNCERTAINTY_CONES})
+
+
 @app.get("/api/ai/status")
 async def api_ai_status():
     """AI subsystem status."""
@@ -948,6 +989,7 @@ async def api_ai_status():
         "predictions_active": len(AI_PREDICTIONS),
         "anomalies_total": len(AI_ANOMALIES),
         "recommendations_active": len(AI_RECOMMENDATIONS),
+        "pred_breaches_active": len(AI_PRED_BREACHES),
         "llm_enabled": ai_llm.LLM_ENABLED,
         "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
     })

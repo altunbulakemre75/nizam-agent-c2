@@ -733,6 +733,92 @@ function drawPredictions(predictions) {
   }
 }
 
+/* ── AI: Uncertainty cones ─────────────────────────────── */
+const uncertaintyCones = new Map(); // track_id -> L.polygon
+
+function drawUncertaintyCones(cones) {
+  // cones: {track_id: [{lat,lon,sigma_lat_m,sigma_lon_m,time_ahead_s}, ...]}
+  if(!cones || !UI.map) return;
+  // Remove stale cones
+  for(const [id, poly] of uncertaintyCones) {
+    if(!cones[id]) { try{poly.remove();}catch{} uncertaintyCones.delete(id); }
+  }
+  for(const [tid, pts] of Object.entries(cones)) {
+    if(!pts || pts.length < 2) continue;
+    const track = UI.tracks.get(tid);
+    if(!track) continue;
+    const trackLL = getLL(track);
+    if(!trackLL) continue;
+
+    // Build cone polygon: upper edge -> reversed lower edge
+    const DEG_PER_M = 1.0 / 111320.0;
+    const upper = [trackLL];
+    const lower = [trackLL];
+    for(const pt of pts) {
+      const sLatDeg = (pt.sigma_lat_m || 0) * DEG_PER_M * 2; // 2-sigma
+      const cosLat = Math.cos(pt.lat * Math.PI / 180);
+      const sLonDeg = (pt.sigma_lon_m || 0) * DEG_PER_M / (cosLat || 1) * 2;
+      upper.push([pt.lat + sLatDeg, pt.lon + sLonDeg]);
+      lower.push([pt.lat - sLatDeg, pt.lon - sLonDeg]);
+    }
+    const coneCoords = [...upper, ...lower.reverse()];
+
+    const ex = uncertaintyCones.get(tid);
+    if(!ex) {
+      const poly = L.polygon(coneCoords, {
+        color: "#00e5ff", fillColor: "#00e5ff",
+        fillOpacity: 0.08, weight: 1, opacity: 0.25,
+        dashArray: "2 4", interactive: false,
+      }).addTo(UI.map);
+      uncertaintyCones.set(tid, poly);
+    } else {
+      ex.setLatLngs(coneCoords);
+    }
+  }
+}
+
+/* ── AI: Predictive breach panel ──────────────────────── */
+let breachPanelEl = null;
+
+function mountBreachPanel() {
+  breachPanelEl = el("div", { id:"breach-panel", style:{
+    position:"fixed", bottom:"390px", right:"12px", zIndex:"9999",
+    background:"rgba(40,0,0,0.82)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
+    lineHeight:"1.4", minWidth:"230px", maxWidth:"300px",
+    maxHeight:"180px", overflowY:"auto",
+    border:"1px solid rgba(231,76,60,0.4)",
+  }});
+  breachPanelEl.innerHTML = "<b>\u26A0 Predictive Breach</b><br><span style='opacity:.5'>No predicted breaches</span>";
+  document.body.appendChild(breachPanelEl);
+}
+
+function renderBreachPanel(breaches) {
+  if(!breachPanelEl) return;
+  if(!breaches || breaches.length === 0) {
+    breachPanelEl.innerHTML = "<b>\u26A0 Predictive Breach</b><br><span style='opacity:.5'>No predicted breaches</span>";
+    breachPanelEl.style.borderColor = "rgba(231,76,60,0.4)";
+    return;
+  }
+  let html = `<b>\u26A0 Predictive Breach</b> <span style="opacity:.6">${breaches.length} warning(s)</span><br>`;
+  breaches.slice(0, 6).forEach(b => {
+    const sevColor = b.severity === "CRITICAL" ? "#e74c3c" : "#f39c12";
+    const confBadge = b.confidence === "HIGH"
+      ? '<span style="background:#e74c3c;padding:0 4px;border-radius:3px;font-size:8px">CERTAIN</span>'
+      : '<span style="background:#f39c12;padding:0 4px;border-radius:3px;font-size:8px">PROBABLE</span>';
+    html += `<div style="border-left:3px solid ${sevColor};padding-left:5px;margin:3px 0">
+      <span style="color:${sevColor};font-weight:bold">${b.track_id}</span>
+      \u2192 ${b.zone_name} ${confBadge}<br>
+      <span style="font-size:9px;opacity:.8">\u23F1 ${b.time_to_breach_s}s | ${b.current_distance_m}m | ${b.zone_type}</span>
+    </div>`;
+  });
+  breachPanelEl.innerHTML = html;
+  // Flash on new critical breaches
+  breachPanelEl.style.borderColor = "#e74c3c";
+  setTimeout(() => { breachPanelEl.style.borderColor = "rgba(231,76,60,0.4)"; }, 1200);
+}
+
 /* ── AI: Anomaly panel ──────────────────────────────────── */
 let anomalyPanelEl = null;
 const anomalyLog = [];
@@ -975,13 +1061,19 @@ function mountChatToggle() {
 /* ── AI: periodic refresh ──────────────────────────────────── */
 async function refreshAI() {
   try {
-    const [predResp, anomResp, recResp] = await Promise.all([
+    const [predResp, anomResp, recResp, breachResp, coneResp] = await Promise.all([
       fetch("/api/ai/predictions").then(r=>r.json()).catch(()=>({})),
       fetch("/api/ai/anomalies").then(r=>r.json()).catch(()=>({anomalies:[]})),
       fetch("/api/ai/recommendations").then(r=>r.json()).catch(()=>({recommendations:[]})),
+      fetch("/api/ai/pred_breaches").then(r=>r.json()).catch(()=>({breaches:[]})),
+      fetch("/api/ai/uncertainty").then(r=>r.json()).catch(()=>({cones:{}})),
     ]);
     // Draw predictions
     drawPredictions(predResp.predictions || {});
+    // Draw uncertainty cones
+    drawUncertaintyCones(coneResp.cones || {});
+    // Predictive breach warnings
+    renderBreachPanel(breachResp.breaches || []);
     // Update anomaly panel (only new ones)
     const newAnomalies = (anomResp.anomalies || []).filter(a => {
       return !anomalyLog.some(e => e.time === a.time && e.type === a.type &&
@@ -1005,6 +1097,7 @@ function boot(){
   mountAssetPanel();
   mountMissionPanel();
   // Phase 5: AI panels
+  mountBreachPanel();
   mountAnomalyPanel();
   mountTacticalPanel();
   mountChatPanel();

@@ -136,6 +136,38 @@ class _KF:
             preds.append((x_cur[0][0], x_cur[1][0]))
         return preds
 
+    def extrapolate_with_uncertainty(self, steps: int, dt: float
+                                     ) -> List[Tuple[float, float, float, float]]:
+        """Return predicted (lat, lon, sigma_lat, sigma_lon) for each step.
+
+        sigma values are 1-sigma standard deviations in degrees, derived
+        from propagating the covariance matrix through the state transition.
+        """
+        F = _eye(4)
+        F[0][2] = dt
+        F[1][3] = dt
+
+        q = self.q_std ** 2
+        dt2 = dt * dt
+        dt3 = dt2 * dt / 2.0
+        dt4 = dt2 * dt2 / 4.0
+        Q = _zeros(4, 4)
+        Q[0][0] = dt4 * q;  Q[0][2] = dt3 * q
+        Q[1][1] = dt4 * q;  Q[1][3] = dt3 * q
+        Q[2][0] = dt3 * q;  Q[2][2] = dt2 * q
+        Q[3][1] = dt3 * q;  Q[3][3] = dt2 * q
+
+        x_cur = [row[:] for row in self.x]
+        P_cur = [row[:] for row in self.P]
+        preds = []
+        for _ in range(steps):
+            x_cur = _mul(F, x_cur)
+            P_cur = _add(_mul(_mul(F, P_cur), _T(F)), Q)
+            sigma_lat = math.sqrt(max(P_cur[0][0], 0.0))
+            sigma_lon = math.sqrt(max(P_cur[1][1], 0.0))
+            preds.append((x_cur[0][0], x_cur[1][0], sigma_lat, sigma_lon))
+        return preds
+
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -177,9 +209,10 @@ def update_track(track_id: str, lat: float, lon: float,
     kf.update(lat, lon)
     kf.last_t = now
 
-    preds = kf.extrapolate(PREDICT_STEPS, PREDICT_STEP_S)
+    preds = kf.extrapolate_with_uncertainty(PREDICT_STEPS, PREDICT_STEP_S)
     return [
         {"lat": round(p[0], 7), "lon": round(p[1], 7),
+         "sigma_lat": round(p[2], 9), "sigma_lon": round(p[3], 9),
          "time_ahead_s": (i + 1) * PREDICT_STEP_S}
         for i, p in enumerate(preds)
     ]
