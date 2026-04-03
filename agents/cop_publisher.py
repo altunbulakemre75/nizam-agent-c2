@@ -171,11 +171,19 @@ def main() -> None:
     ap.add_argument("--retry_delay", type=float, default=0.5, help="Seconds to wait before retrying a failed POST")
     ap.add_argument("--passthrough", action="store_true", help="Echo each input line to stdout (for chaining)")
     ap.add_argument("--orchestrator_url", default="http://127.0.0.1:8200", help="Orchestrator base URL")
+    ap.add_argument("--log_out", default=None, help="Save all COP ingest events to this JSONL file for replay")
     args = ap.parse_args()
 
     ingest_url = args.cop_url.rstrip("/") + "/ingest"
     print(f"[cop_publisher] Starting. Ingesting to: {ingest_url}", file=sys.stderr)
     print(f"[cop_publisher] Origin: lat={args.origin_lat}, lon={args.origin_lon}", file=sys.stderr)
+
+    log_file = None
+    if args.log_out:
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(args.log_out)), exist_ok=True)
+        log_file = open(args.log_out, "w", encoding="utf-8")
+        print(f"[cop_publisher] Logging to: {args.log_out}", file=sys.stderr)
 
     # Register with orchestrator and start heartbeat
     hb = Heartbeat(
@@ -218,6 +226,10 @@ def main() -> None:
             # Silently ignore unrecognised event types (world.state, sensor.detection.*, etc.)
             continue
 
+        if log_file:
+            log_file.write(json.dumps(body, ensure_ascii=False) + "\n")
+            log_file.flush()
+
         ok = post_json(ingest_url, body, timeout=3.0)
         if ok:
             sent += 1
@@ -225,7 +237,6 @@ def main() -> None:
                 print(f"[cop_publisher] {sent} events sent.", file=sys.stderr)
                 hb.report(events_sent=sent, skipped=skipped)
         else:
-            # Brief pause so we don't spam a dead server
             time.sleep(args.retry_delay)
 
 

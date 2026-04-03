@@ -1,0 +1,16 @@
+{
+  "name": "single_drone",
+  "description": "Single drone approaching from north, high speed",
+  "duration_s": 300,
+  "rate_hz": 1.0,
+  "entities": [
+    {
+      "entity_id": "E-DRONE-01",
+      "label": "drone",
+      "range_m": 1200.0,
+      "az_deg": 15.0,
+      "speed_mps": 25.0,
+      "heading_deg": 180.0
+    }
+  ]
+}

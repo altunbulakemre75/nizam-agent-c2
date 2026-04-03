@@ -203,23 +203,70 @@ function getTrackLatLon(track) {
 /* ---------------------------
    Render/update functions
 --------------------------- */
+/* ---------------------------
+   Zone rendering
+--------------------------- */
+const ZONE_COLORS = {
+  restricted: { fill: "#f39c12", stroke: "#e67e22" },
+  kill:       { fill: "#e74c3c", stroke: "#c0392b" },
+  friendly:   { fill: "#27ae60", stroke: "#1e8449" },
+};
+
+UI.zonePolygons = new Map(); // zone_id -> L.Polygon
+
+function upsertZone(zone) {
+  if (!zone || !zone.id || !zone.coordinates) return;
+  const id = zone.id;
+  const colors = ZONE_COLORS[zone.type] ?? { fill: "#8e44ad", stroke: "#6c3483" };
+
+  removeZone(id);
+
+  const poly = L.polygon(zone.coordinates, {
+    color:       colors.stroke,
+    fillColor:   colors.fill,
+    fillOpacity: 0.2,
+    weight:      2,
+    dashArray:   zone.type === "restricted" ? "6 4" : null,
+  }).addTo(UI.map);
+
+  poly.bindTooltip(
+    `<b>${zone.name ?? id}</b><br>Type: ${zone.type}`,
+    { sticky: true, opacity: 0.9 }
+  );
+
+  UI.zonePolygons.set(id, poly);
+}
+
+function removeZone(id) {
+  const existing = UI.zonePolygons.get(id);
+  if (existing) { try { existing.remove(); } catch {} }
+  UI.zonePolygons.delete(id);
+}
+
 function applySnapshot(payload) {
-  // snapshot payload may include tracks/threats, or be full snapshot object
+  // snapshot payload may include tracks/threats/zones, or be full snapshot object
   const tracksArr = normalizeTracksPayload(payload?.tracks ?? payload);
-  // Clear UI state and markers
+
+  // Clear tracks
   UI.tracks.clear();
-  for (const [id, marker] of UI.trackMarkers.entries()) {
+  for (const [, marker] of UI.trackMarkers.entries()) {
     try { marker.remove(); } catch {}
   }
   UI.trackMarkers.clear();
 
-  // Re-add
+  // Clear zones
+  for (const [id] of UI.zonePolygons.entries()) removeZone(id);
+
+  // Re-add tracks
   tracksArr.forEach(t => {
     const id = String(t.id ?? t.track_id ?? t.uid ?? "");
     if (!id) return;
     UI.tracks.set(id, t);
     upsertTrack(t);
   });
+
+  // Re-add zones
+  (payload?.zones ?? []).forEach(z => upsertZone(z));
 }
 
 /* ---------------------------
@@ -330,9 +377,11 @@ const CopEngine = (() => {
 
   function route(ev) {
     if (!ev || !ev.event_type) return;
-    if (ev.event_type === "cop.snapshot") return hooks.applySnapshot(ev.payload);
-    if (ev.event_type === "cop.track") return hooks.upsertTrack(ev.payload);
-    if (ev.event_type === "cop.threat") return hooks.upsertThreat(ev.payload);
+    if (ev.event_type === "cop.snapshot")     return hooks.applySnapshot(ev.payload);
+    if (ev.event_type === "cop.track")        return hooks.upsertTrack(ev.payload);
+    if (ev.event_type === "cop.threat")       return hooks.upsertThreat(ev.payload);
+    if (ev.event_type === "cop.zone")         return upsertZone(ev.payload);
+    if (ev.event_type === "cop.zone_removed") return removeZone(ev.payload.id);
   }
 
   function onEvent(ev) {
@@ -460,6 +509,105 @@ function connectWS() {
 }
 
 /* ---------------------------
+   Zone draw panel
+--------------------------- */
+let zoneDrawPoints = [];
+let zoneDrawMarkers = [];
+let zoneDrawing = false;
+
+function mountZonePanel() {
+  const panel = el("div", {
+    style: {
+      position: "fixed", top: "12px", right: "12px", zIndex: "9999",
+      background: "rgba(0,0,0,0.65)", color: "white",
+      padding: "8px 12px", borderRadius: "10px",
+      fontFamily: "ui-sans-serif, system-ui, Arial", fontSize: "12px",
+      lineHeight: "1.5", minWidth: "180px",
+    }
+  });
+
+  const typeSelect = el("select", { style: { marginBottom: "4px", width: "100%", borderRadius: "4px", padding: "2px" } });
+  ["restricted", "kill", "friendly"].forEach(t => {
+    const o = el("option", { value: t }, [t]);
+    typeSelect.appendChild(o);
+  });
+
+  const nameInput = el("input", {
+    type: "text", placeholder: "Zone name",
+    style: { width: "100%", marginBottom: "4px", borderRadius: "4px", padding: "2px", boxSizing: "border-box" }
+  });
+
+  const btnDraw = el("button", { style: { marginRight: "4px", cursor: "pointer" } }, ["Draw Zone"]);
+  const btnSave = el("button", { style: { marginRight: "4px", cursor: "pointer", display: "none" } }, ["Save"]);
+  const btnCancel = el("button", { style: { cursor: "pointer", display: "none" } }, ["Cancel"]);
+  const hint = el("div", { style: { marginTop: "4px", opacity: "0.7", fontSize: "11px" } }, [""]);
+
+  btnDraw.addEventListener("click", () => {
+    zoneDrawPoints = [];
+    zoneDrawMarkers = [];
+    zoneDrawing = true;
+    btnDraw.style.display = "none";
+    btnSave.style.display = "";
+    btnCancel.style.display = "";
+    hint.textContent = "Click map to add points (min 3)";
+    UI.map.getContainer().style.cursor = "crosshair";
+  });
+
+  btnCancel.addEventListener("click", () => {
+    cancelDraw();
+  });
+
+  btnSave.addEventListener("click", async () => {
+    if (zoneDrawPoints.length < 3) { hint.textContent = "Need at least 3 points!"; return; }
+    const zone = {
+      id: "zone-" + Date.now(),
+      name: nameInput.value || typeSelect.value + "-zone",
+      type: typeSelect.value,
+      coordinates: [...zoneDrawPoints],
+    };
+    await fetch("/api/zones", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(zone),
+    });
+    cancelDraw();
+  });
+
+  panel.appendChild(el("b", {}, ["Zones"]));
+  panel.appendChild(el("br"));
+  panel.appendChild(nameInput);
+  panel.appendChild(typeSelect);
+  panel.appendChild(el("div", {}, [btnDraw, btnSave, btnCancel]));
+  panel.appendChild(hint);
+  document.body.appendChild(panel);
+
+  // Map click handler for drawing
+  UI.map.on("click", (e) => {
+    if (!zoneDrawing) return;
+    const { lat, lng } = e.latlng;
+    zoneDrawPoints.push([lat, lng]);
+    const m = L.circleMarker([lat, lng], { radius: 5, color: "#f39c12", fillOpacity: 1 }).addTo(UI.map);
+    zoneDrawMarkers.push(m);
+    hint.textContent = `${zoneDrawPoints.length} points (Save when done)`;
+  });
+}
+
+function cancelDraw() {
+  zoneDrawing = false;
+  zoneDrawPoints = [];
+  zoneDrawMarkers.forEach(m => { try { m.remove(); } catch {} });
+  zoneDrawMarkers = [];
+  const btnDraw = document.querySelector("button");
+  document.querySelectorAll("button").forEach(b => {
+    if (b.textContent === "Draw Zone") b.style.display = "";
+    if (b.textContent === "Save" || b.textContent === "Cancel") b.style.display = "none";
+  });
+  const hints = document.querySelectorAll("div[style*='opacity: 0.7']");
+  hints.forEach(h => { if (h.textContent.includes("points")) h.textContent = ""; });
+  if (UI.map) UI.map.getContainer().style.cursor = "";
+}
+
+/* ---------------------------
    Agent health panel
 --------------------------- */
 const ORCH_URL = "";
@@ -514,9 +662,9 @@ async function refreshAgentHealth() {
 function boot() {
   initMap();
   mountControls();
+  mountZonePanel();
   mountAgentPanel();
   connectWS();
-  // Poll orchestrator health every 5 seconds
   refreshAgentHealth();
   setInterval(refreshAgentHealth, 5000);
 }

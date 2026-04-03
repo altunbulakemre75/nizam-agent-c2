@@ -1,0 +1,48 @@
+{
+  "name": "swarm_attack",
+  "description": "5-drone swarm approaching from different bearings simultaneously",
+  "duration_s": 300,
+  "rate_hz": 1.0,
+  "entities": [
+    {
+      "entity_id": "E-SWARM-01",
+      "label": "drone",
+      "range_m": 1500.0,
+      "az_deg": -30.0,
+      "speed_mps": 22.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-SWARM-02",
+      "label": "drone",
+      "range_m": 1400.0,
+      "az_deg": -10.0,
+      "speed_mps": 24.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-SWARM-03",
+      "label": "drone",
+      "range_m": 1600.0,
+      "az_deg": 10.0,
+      "speed_mps": 20.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-SWARM-04",
+      "label": "drone",
+      "range_m": 1300.0,
+      "az_deg": 30.0,
+      "speed_mps": 26.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-SWARM-05",
+      "label": "drone",
+      "range_m": 1700.0,
+      "az_deg": 50.0,
+      "speed_mps": 18.0,
+      "heading_deg": 180.0
+    }
+  ]
+}

@@ -26,6 +26,7 @@ STATE: Dict[str, Any] = {
     "agents": {},        # agent_key -> {status,last_seen,tags...}
     "tracks": {},        # global_track_id -> latest track.update payload
     "threats": {},       # global_track_id -> latest threat.assessment payload
+    "zones": {},         # zone_id -> {id, name, type, coordinates, color}
     "events_tail": [],   # last N events (for debug)
 }
 
@@ -65,11 +66,10 @@ async def broadcast(ev: Dict[str, Any]) -> None:
 
 
 def _make_snapshot_payload() -> Dict[str, Any]:
-    tracks_list = list(STATE["tracks"].values())
-    threats_list = list(STATE["threats"].values())
     return {
-        "tracks": tracks_list,
-        "threats": threats_list,
+        "tracks": list(STATE["tracks"].values()),
+        "threats": list(STATE["threats"].values()),
+        "zones": list(STATE["zones"].values()),
         "server_time": _utc_now_iso(),
     }
 
@@ -111,6 +111,51 @@ async def api_threats():
 @app.get("/api/events_tail")
 async def api_events_tail():
     return JSONResponse({"events_tail": STATE["events_tail"], "server_time": _utc_now_iso()})
+
+
+@app.get("/api/zones")
+async def api_zones():
+    return JSONResponse({"zones": list(STATE["zones"].values()), "server_time": _utc_now_iso()})
+
+
+@app.post("/api/zones")
+async def api_zones_create(req: Request):
+    """
+    Create or update a zone.
+    Body: {id, name, type: "restricted"|"kill"|"friendly", coordinates: [[lat,lon],...], color?}
+    """
+    body = await req.json()
+    zone_id = body.get("id")
+    if not zone_id or not body.get("coordinates"):
+        return JSONResponse({"ok": False, "error": "id and coordinates required"}, status_code=400)
+
+    zone = {
+        "id": zone_id,
+        "name": body.get("name", zone_id),
+        "type": body.get("type", "restricted"),
+        "coordinates": body["coordinates"],
+        "color": body.get("color"),
+        "created_at": _utc_now_iso(),
+    }
+    async with STATE_LOCK:
+        STATE["zones"][zone_id] = zone
+
+    ev = {"event_type": "cop.zone", "payload": zone}
+    _append_event_tail(ev)
+    await broadcast(ev)
+    return JSONResponse({"ok": True, "zone": zone})
+
+
+@app.delete("/api/zones/{zone_id}")
+async def api_zones_delete(zone_id: str):
+    async with STATE_LOCK:
+        removed = STATE["zones"].pop(zone_id, None)
+    if not removed:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    ev = {"event_type": "cop.zone_removed", "payload": {"id": zone_id}}
+    _append_event_tail(ev)
+    await broadcast(ev)
+    return JSONResponse({"ok": True, "removed": zone_id})
 
 
 @app.post("/api/reset")

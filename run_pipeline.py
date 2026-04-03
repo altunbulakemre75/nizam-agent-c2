@@ -71,6 +71,8 @@ def main() -> None:
     ap.add_argument("--origin_lon",  type=float, default=28.979)
     ap.add_argument("--duration_s",  type=float, default=300.0)
     ap.add_argument("--rate_hz",     type=float, default=1.0)
+    ap.add_argument("--scenario",    default=None, help="Path to scenario JSON file")
+    ap.add_argument("--log_out",     default=None, help="Path to save pipeline events as JSONL for replay")
     ap.add_argument("--verbose",     action="store_true")
     args = ap.parse_args()
 
@@ -86,18 +88,19 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 1) World agent  →  stdout (world.state JSONL)
     # ------------------------------------------------------------------
-    world = subprocess.Popen(
-        [
-            py, str(ROOT / "agents" / "world" / "world_agent.py"),
-            "--stdout",
-            "--duration_s", str(args.duration_s),
-            "--rate_hz",    str(args.rate_hz),
-            "--origin_lat", str(args.origin_lat),
-            "--origin_lon", str(args.origin_lon),
-        ],
-        stdout=PIPE,
-        stderr=sys.stderr,
-    )
+    world_cmd = [
+        py, str(ROOT / "agents" / "world" / "world_agent.py"),
+        "--stdout",
+        "--duration_s", str(args.duration_s),
+        "--rate_hz",    str(args.rate_hz),
+        "--origin_lat", str(args.origin_lat),
+        "--origin_lon", str(args.origin_lon),
+    ]
+    if args.scenario:
+        world_cmd += ["--scenario", args.scenario]
+        print(f"[pipeline] Scenario : {args.scenario}", file=sys.stderr)
+
+    world = subprocess.Popen(world_cmd, stdout=PIPE, stderr=sys.stderr)
 
     # ------------------------------------------------------------------
     # 2) Radar sim agent  world.state → sensor.detection.radar
@@ -133,14 +136,18 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 5) COP publisher  track.update / threat.assessment → POST /ingest
     # ------------------------------------------------------------------
-    cop_pub = subprocess.Popen(
-        [
-            py, str(ROOT / "agents" / "cop_publisher.py"),
-            "--cop_url",          args.cop_url,
-            "--orchestrator_url", args.orchestrator_url,
-            "--origin_lat",       str(args.origin_lat),
-            "--origin_lon",       str(args.origin_lon),
-        ],
+    cop_cmd = [
+        py, str(ROOT / "agents" / "cop_publisher.py"),
+        "--cop_url",          args.cop_url,
+        "--orchestrator_url", args.orchestrator_url,
+        "--origin_lat",       str(args.origin_lat),
+        "--origin_lon",       str(args.origin_lon),
+    ]
+    if args.log_out:
+        cop_cmd += ["--log_out", args.log_out]
+        print(f"[pipeline] Log out  : {args.log_out}", file=sys.stderr)
+
+    cop_pub = subprocess.Popen(cop_cmd,
         stdin=fuser.stdout,
         stderr=sys.stderr,
     )

@@ -89,6 +89,23 @@ def default_entities() -> List[Entity]:
     )
     return [drone, veh]
 
+def entities_from_scenario(path: str) -> Optional[List[Entity]]:
+    import json as _json
+    with open(path, encoding="utf-8") as f:
+        sc = _json.load(f)
+    result = []
+    for e in sc.get("entities", []):
+        result.append(Entity(
+            entity_id=e["entity_id"],
+            label=e.get("label", "unknown"),
+            range_m=float(e["range_m"]),
+            az_deg=float(e["az_deg"]),
+            speed_mps=float(e.get("speed_mps", 20.0)),
+            heading_deg=float(e.get("heading_deg", 180.0)),
+        ))
+    return result or None
+
+
 def main():
     ap = argparse.ArgumentParser(description="World agent producing ground-truth states in polar coordinates.")
     ap.add_argument("--correlation_id", default="demo-run-0002", help="Correlation ID for the run")
@@ -97,12 +114,16 @@ def main():
     ap.add_argument("--origin_lat", type=float, default=None, help="Optional: origin latitude (for future geo mapping)")
     ap.add_argument("--origin_lon", type=float, default=None, help="Optional: origin longitude (for future geo mapping)")
     ap.add_argument("--stdout", action="store_true", help="Print events to stdout (JSONL)")
+    ap.add_argument("--scenario", default=None, help="Path to scenario JSON file (overrides default entities)")
     args = ap.parse_args()
 
     dt = 1.0 / max(args.rate_hz, 1e-6)
     steps = int(args.duration_s * args.rate_hz)
 
-    entities = default_entities()
+    if args.scenario:
+        entities = entities_from_scenario(args.scenario) or default_entities()
+    else:
+        entities = default_entities()
 
     host = "dev"
     source_agent = "world-agent"

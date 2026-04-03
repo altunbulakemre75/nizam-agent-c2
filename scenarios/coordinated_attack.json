@@ -1,0 +1,40 @@
+{
+  "name": "coordinated_attack",
+  "description": "Drone + helicopter coordinated flanking attack from two directions",
+  "duration_s": 300,
+  "rate_hz": 1.0,
+  "entities": [
+    {
+      "entity_id": "E-DRONE-01",
+      "label": "drone",
+      "range_m": 1000.0,
+      "az_deg": -45.0,
+      "speed_mps": 30.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-DRONE-02",
+      "label": "drone",
+      "range_m": 1100.0,
+      "az_deg": 45.0,
+      "speed_mps": 28.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-HELI-01",
+      "label": "helicopter",
+      "range_m": 2000.0,
+      "az_deg": 0.0,
+      "speed_mps": 50.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-RECON-01",
+      "label": "drone",
+      "range_m": 2500.0,
+      "az_deg": 90.0,
+      "speed_mps": 15.0,
+      "heading_deg": 150.0
+    }
+  ]
+}

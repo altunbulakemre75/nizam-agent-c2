@@ -66,6 +66,10 @@ def run_pipeline(args: argparse.Namespace) -> subprocess.Popen:
         "--duration_s",       str(args.duration_s),
         "--rate_hz",          str(args.rate_hz),
     ]
+    if args.scenario:
+        cmd += ["--scenario", args.scenario]
+    if args.log_out:
+        cmd += ["--log_out", args.log_out]
     if args.verbose:
         cmd.append("--verbose")
     return subprocess.Popen(cmd, stderr=sys.stderr)
@@ -84,6 +88,8 @@ def main() -> None:
     ap.add_argument("--origin_lon",  type=float, default=28.979)
     ap.add_argument("--duration_s",  type=float, default=300.0)
     ap.add_argument("--rate_hz",     type=float, default=1.0)
+    ap.add_argument("--scenario",    default=None, help="Path to scenario JSON (e.g. scenarios/swarm_attack.json)")
+    ap.add_argument("--log_out",     default=None, help="Save events to JSONL for replay (e.g. logs/run.jsonl)")
     ap.add_argument("--open_browser", action="store_true", help="Open COP UI in default browser")
     ap.add_argument("--verbose",     action="store_true")
     args = ap.parse_args()
