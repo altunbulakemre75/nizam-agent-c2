@@ -43,6 +43,8 @@ from ai import anomaly as ai_anomaly
 from ai import tactical as ai_tactical
 from ai import llm_advisor as ai_llm
 from ai import zone_breach as ai_zone_breach
+from ai import coordinated_attack as ai_coord_attack
+from ai import timeline as ai_timeline
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -124,6 +126,7 @@ AI_ANOMALIES: List[Dict] = []                # recent anomalies (max 100)
 AI_RECOMMENDATIONS: List[Dict] = []           # latest tactical recommendations
 AI_PRED_BREACHES: List[Dict] = []             # predictive zone breach warnings
 AI_UNCERTAINTY_CONES: Dict[str, List[Dict]] = {}  # uncertainty cones for frontend
+AI_COORD_ATTACKS: List[Dict] = []                 # coordinated attack warnings
 AI_ANOMALY_MAX = 100
 
 CLIENTS: Set[WebSocket] = set()
@@ -496,6 +499,7 @@ def _make_snapshot_payload() -> Dict[str, Any]:
         "recommendations":   AI_RECOMMENDATIONS,
         "pred_breaches":     AI_PRED_BREACHES,
         "uncertainty_cones": AI_UNCERTAINTY_CONES,
+        "coord_attacks":     AI_COORD_ATTACKS,
         "server_time": _utc_now_iso(),
     }
 
@@ -744,11 +748,14 @@ async def api_reset(_=Depends(require_operator())):
         AI_RECOMMENDATIONS.clear()
         AI_PRED_BREACHES.clear()
         AI_UNCERTAINTY_CONES.clear()
+        AI_COORD_ATTACKS.clear()
         ai_predictor.reset()
         ai_anomaly.reset()
         ai_tactical.reset()
         ai_llm.reset()
         ai_zone_breach.reset()
+        ai_coord_attack.reset()
+        ai_timeline.reset()
         snapshot = {
             "event_type": "cop.snapshot",
             "payload": {
@@ -807,6 +814,13 @@ async def ingest(req: Request):
             if threat_id is not None:
                 STATE["threats"][str(threat_id)] = payload
                 await _auto_task(str(threat_id), payload)
+                # Timeline: record threat state
+                ai_timeline.record_threat(
+                    str(threat_id),
+                    score=int(payload.get("score", payload.get("threat_score", 0))),
+                    level=str(payload.get("threat_level", "LOW")),
+                    intent=str(payload.get("intent", "unknown")),
+                )
             asyncio.create_task(_db_write(_persist_threat(payload)))
 
         elif event_type == "cop.snapshot":
@@ -838,6 +852,11 @@ def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> Non
         AI_ANOMALIES.extend(anomalies)
         if len(AI_ANOMALIES) > AI_ANOMALY_MAX:
             del AI_ANOMALIES[: len(AI_ANOMALIES) - AI_ANOMALY_MAX]
+        # Timeline: record anomaly events
+        for a in anomalies:
+            ai_timeline.record_anomaly(
+                track_id, a.get("type", "UNKNOWN"), a.get("severity", "MEDIUM"),
+            )
 
 
 def _ai_run_tactical() -> None:
@@ -880,6 +899,16 @@ def _ai_run_tactical() -> None:
     cones = ai_zone_breach.build_uncertainty_cones(AI_PREDICTIONS)
     AI_UNCERTAINTY_CONES.clear()
     AI_UNCERTAINTY_CONES.update(cones)
+
+    # Coordinated attack detection
+    coord_attacks = ai_coord_attack.detect_coordinated_attacks(
+        tracks=STATE["tracks"],
+        predictions=AI_PREDICTIONS,
+        zones=STATE["zones"],
+        assets=STATE["assets"],
+    )
+    AI_COORD_ATTACKS.clear()
+    AI_COORD_ATTACKS.extend(coord_attacks)
 
 
 # ── Phase 5: AI API endpoints ───────────────────────────────
@@ -982,6 +1011,29 @@ async def api_ai_uncertainty(track_id: Optional[str] = Query(None)):
     return JSONResponse({"cones": AI_UNCERTAINTY_CONES})
 
 
+@app.get("/api/ai/coordinated")
+async def api_ai_coordinated():
+    """Get coordinated attack warnings."""
+    return JSONResponse({
+        "count": len(AI_COORD_ATTACKS),
+        "attacks": AI_COORD_ATTACKS,
+    })
+
+
+@app.get("/api/ai/timeline")
+async def api_ai_timeline(track_id: Optional[str] = Query(None)):
+    """Get threat timeline history for a track or all tracks."""
+    if track_id:
+        return JSONResponse({
+            "track_id": track_id,
+            "timeline": ai_timeline.get_timeline(track_id),
+        })
+    return JSONResponse({
+        "tracks": ai_timeline.get_active_track_ids(),
+        "timelines": ai_timeline.get_all_timelines(),
+    })
+
+
 @app.get("/api/ai/status")
 async def api_ai_status():
     """AI subsystem status."""
@@ -990,6 +1042,8 @@ async def api_ai_status():
         "anomalies_total": len(AI_ANOMALIES),
         "recommendations_active": len(AI_RECOMMENDATIONS),
         "pred_breaches_active": len(AI_PRED_BREACHES),
+        "coord_attacks_active": len(AI_COORD_ATTACKS),
+        "timeline": ai_timeline.get_summary(),
         "llm_enabled": ai_llm.LLM_ENABLED,
         "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
     })

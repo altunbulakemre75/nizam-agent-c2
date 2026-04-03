@@ -179,6 +179,7 @@ function upsertTrack(track) {
   if(!ex) {
     const m=L.marker(ll,{icon}).addTo(UI.map);
     m.bindTooltip(tip,{permanent:false,direction:"top",opacity:0.95});
+    m.on("click", () => openTimeline(id));
     UI.trackMarkers.set(id,m);
   } else { ex.setLatLng(ll); ex.setIcon(icon); ex.setTooltipContent(tip); }
   upsertTrail(track, threat);
@@ -819,6 +820,112 @@ function renderBreachPanel(breaches) {
   setTimeout(() => { breachPanelEl.style.borderColor = "rgba(231,76,60,0.4)"; }, 1200);
 }
 
+/* ── AI: Coordinated Attack panel + convergence lines ──── */
+let coordPanelEl = null;
+const convergenceMarkers = new Map(); // key -> L.circleMarker
+const convergenceLines   = new Map(); // key -> [L.polyline, ...]
+
+function mountCoordPanel() {
+  coordPanelEl = el("div", { id:"coord-panel", style:{
+    position:"fixed", bottom:"580px", right:"12px", zIndex:"9999",
+    background:"rgba(80,0,40,0.85)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
+    lineHeight:"1.4", minWidth:"240px", maxWidth:"320px",
+    maxHeight:"180px", overflowY:"auto",
+    border:"1px solid rgba(255,0,80,0.4)",
+  }});
+  coordPanelEl.innerHTML = "<b>\u2694 Coordinated Attack</b><br><span style='opacity:.5'>No coordinated threats</span>";
+  document.body.appendChild(coordPanelEl);
+}
+
+function renderCoordPanel(attacks) {
+  if(!coordPanelEl) return;
+  // Clean stale map markers/lines
+  const activeKeys = new Set();
+
+  if(!attacks || attacks.length === 0) {
+    coordPanelEl.innerHTML = "<b>\u2694 Coordinated Attack</b><br><span style='opacity:.5'>No coordinated threats</span>";
+    coordPanelEl.style.borderColor = "rgba(255,0,80,0.4)";
+    // Remove all convergence visuals
+    for(const [k,m] of convergenceMarkers) { try{m.remove();}catch{} }
+    convergenceMarkers.clear();
+    for(const [k,lines] of convergenceLines) { lines.forEach(l=>{try{l.remove();}catch{}}); }
+    convergenceLines.clear();
+    return;
+  }
+
+  let html = `<b>\u2694 Coordinated Attack</b> <span style="opacity:.6">${attacks.length} warning(s)</span><br>`;
+  attacks.slice(0, 5).forEach((a, idx) => {
+    const key = `coord-${idx}-${a.track_ids.join(",")}`;
+    activeKeys.add(key);
+
+    const subtypeColors = {
+      PINCER:"#ff0050", CONVERGENCE:"#ff6600",
+      ZONE_PINCER:"#ff0050", ZONE_CONVERGE:"#ff6600",
+      ASSET_PINCER:"#ff0050", ASSET_CONVERGE:"#ff6600",
+    };
+    const color = subtypeColors[a.subtype] || "#ff6600";
+    const badge = a.subtype.includes("PINCER")
+      ? `<span style="background:#ff0050;padding:0 4px;border-radius:3px;font-size:8px">PINCER</span>`
+      : `<span style="background:#ff6600;padding:0 4px;border-radius:3px;font-size:8px">CONVERGE</span>`;
+
+    const targetInfo = a.target_name ? ` \u2192 ${a.target_name}` : "";
+    html += `<div style="border-left:3px solid ${color};padding-left:5px;margin:3px 0">
+      <span style="color:${color};font-weight:bold">${a.count} tracks${targetInfo}</span> ${badge}<br>
+      <span style="font-size:9px;opacity:.8">\u23F1 ${a.time_to_convergence_s}s | ${a.angular_spread_deg}\u00B0 spread | ${a.track_ids.join(", ")}</span>
+    </div>`;
+
+    // Draw convergence point marker on map
+    if(UI.map && a.convergence_lat && a.convergence_lon) {
+      const existing = convergenceMarkers.get(key);
+      if(!existing) {
+        const marker = L.circleMarker([a.convergence_lat, a.convergence_lon], {
+          radius: 12, color: color, fillColor: color,
+          fillOpacity: 0.3, weight: 2, dashArray: "4 4",
+        }).addTo(UI.map);
+        marker.bindTooltip(`Convergence: ${a.count} tracks, ${a.time_to_convergence_s}s`, {permanent:false});
+        convergenceMarkers.set(key, marker);
+      } else {
+        existing.setLatLng([a.convergence_lat, a.convergence_lon]);
+      }
+
+      // Draw lines from each track's current position to convergence point
+      const lines = [];
+      (a.track_ids || []).forEach(tid => {
+        const track = UI.tracks.get(tid);
+        if(track) {
+          const tll = getLL(track);
+          if(tll) {
+            const line = L.polyline([tll, [a.convergence_lat, a.convergence_lon]], {
+              color: color, weight: 1.5, opacity: 0.5,
+              dashArray: "6 4", interactive: false,
+            }).addTo(UI.map);
+            lines.push(line);
+          }
+        }
+      });
+      // Remove old lines for this key
+      const oldLines = convergenceLines.get(key);
+      if(oldLines) oldLines.forEach(l=>{try{l.remove();}catch{}});
+      convergenceLines.set(key, lines);
+    }
+  });
+
+  // Remove stale markers/lines
+  for(const [k,m] of convergenceMarkers) {
+    if(!activeKeys.has(k)) { try{m.remove();}catch{} convergenceMarkers.delete(k); }
+  }
+  for(const [k,lines] of convergenceLines) {
+    if(!activeKeys.has(k)) { lines.forEach(l=>{try{l.remove();}catch{}}); convergenceLines.delete(k); }
+  }
+
+  coordPanelEl.innerHTML = html;
+  // Flash border on new attacks
+  coordPanelEl.style.borderColor = "#ff0050";
+  setTimeout(() => { coordPanelEl.style.borderColor = "rgba(255,0,80,0.4)"; }, 1200);
+}
+
 /* ── AI: Anomaly panel ──────────────────────────────────── */
 let anomalyPanelEl = null;
 const anomalyLog = [];
@@ -1058,15 +1165,199 @@ function mountChatToggle() {
   document.body.appendChild(btn);
 }
 
+/* ── AI: Threat Timeline chart (canvas popup) ──────────── */
+let timelinePopupEl = null;
+let timelineCurrentTrack = null;
+
+function mountTimelinePopup() {
+  timelinePopupEl = el("div", { id:"timeline-popup", style:{
+    display:"none", position:"fixed", bottom:"60px", left:"50%",
+    transform:"translateX(-50%)", zIndex:"10001",
+    background:"rgba(10,10,25,0.92)", color:"white",
+    padding:"10px 14px", borderRadius:"12px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
+    border:"1px solid rgba(100,150,255,0.3)",
+    boxShadow:"0 4px 20px rgba(0,0,0,0.6)",
+    minWidth:"420px", maxWidth:"520px",
+  }});
+  timelinePopupEl.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <b id="tl-title">Threat Timeline</b>
+      <span id="tl-close" style="cursor:pointer;opacity:.6;font-size:14px">\u2715</span>
+    </div>
+    <canvas id="tl-canvas" width="480" height="140" style="width:100%;height:140px;border-radius:6px;background:rgba(0,0,0,0.3)"></canvas>
+    <div id="tl-legend" style="margin-top:4px;opacity:.7;font-size:9px"></div>
+  `;
+  document.body.appendChild(timelinePopupEl);
+  document.getElementById("tl-close").addEventListener("click", () => {
+    timelinePopupEl.style.display = "none";
+    timelineCurrentTrack = null;
+  });
+}
+
+function openTimeline(trackId) {
+  if(!timelinePopupEl) return;
+  timelineCurrentTrack = trackId;
+  document.getElementById("tl-title").textContent = `Timeline: ${trackId}`;
+  timelinePopupEl.style.display = "block";
+  fetchAndDrawTimeline(trackId);
+}
+
+async function fetchAndDrawTimeline(trackId) {
+  try {
+    const resp = await fetch(`/api/ai/timeline?track_id=${encodeURIComponent(trackId)}`).then(r=>r.json());
+    drawTimelineChart(resp.timeline || [], trackId);
+  } catch(e) { /* silent */ }
+}
+
+function drawTimelineChart(data, trackId) {
+  const canvas = document.getElementById("tl-canvas");
+  if(!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if(!data || data.length < 2) {
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Waiting for data...", W/2, H/2);
+    return;
+  }
+
+  const pad = {l:35, r:10, t:10, b:22};
+  const cw = W - pad.l - pad.r;
+  const ch = H - pad.t - pad.b;
+
+  const tMin = data[0].t;
+  const tMax = data[data.length-1].t;
+  const tRange = Math.max(tMax - tMin, 1);
+
+  const toX = t => pad.l + ((t - tMin) / tRange) * cw;
+  const toY = score => pad.t + ch - (score / 100) * ch;
+
+  // ── Background grid ──
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 0.5;
+  for(let s = 0; s <= 100; s += 25) {
+    const y = toY(s);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W-pad.r, y); ctx.stroke();
+  }
+
+  // ── Y-axis labels ──
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.font = "8px sans-serif";
+  ctx.textAlign = "right";
+  for(let s = 0; s <= 100; s += 25) {
+    ctx.fillText(s, pad.l - 4, toY(s) + 3);
+  }
+
+  // ── Intent color bands (background) ──
+  const intentColors = {
+    attack:"rgba(231,76,60,0.15)", reconnaissance:"rgba(155,89,182,0.15)",
+    loitering:"rgba(230,126,34,0.15)", unknown:"rgba(150,150,150,0.05)",
+  };
+  for(let i = 0; i < data.length - 1; i++) {
+    const x1 = toX(data[i].t);
+    const x2 = toX(data[i+1].t);
+    const ic = intentColors[data[i].intent] || intentColors.unknown;
+    ctx.fillStyle = ic;
+    ctx.fillRect(x1, pad.t, x2 - x1, ch);
+  }
+
+  // ── Threat score line ──
+  ctx.strokeStyle = "#3498db";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.forEach((d, i) => {
+    const x = toX(d.t), y = toY(d.score);
+    if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // ── Score fill gradient ──
+  const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
+  grad.addColorStop(0, "rgba(231,76,60,0.25)");
+  grad.addColorStop(0.5, "rgba(52,152,219,0.1)");
+  grad.addColorStop(1, "rgba(39,174,96,0.05)");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  data.forEach((d, i) => {
+    const x = toX(d.t), y = toY(d.score);
+    if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.lineTo(toX(data[data.length-1].t), pad.t + ch);
+  ctx.lineTo(toX(data[0].t), pad.t + ch);
+  ctx.closePath();
+  ctx.fill();
+
+  // ── Threat level color on score dots ──
+  const levelColors = {HIGH:"#e74c3c", MEDIUM:"#f39c12", LOW:"#27ae60"};
+  data.forEach(d => {
+    const x = toX(d.t), y = toY(d.score);
+    ctx.fillStyle = levelColors[d.level] || "#3498db";
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI*2); ctx.fill();
+  });
+
+  // ── Anomaly event markers (triangles) ──
+  const anomColors = {CRITICAL:"#e74c3c", HIGH:"#e67e22", MEDIUM:"#f1c40f"};
+  data.forEach(d => {
+    if(!d.events || d.events.length === 0) return;
+    const x = toX(d.t);
+    d.events.forEach(ev => {
+      const color = anomColors[ev.severity] || "#f1c40f";
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(x, pad.t + 2);
+      ctx.lineTo(x - 4, pad.t + 10);
+      ctx.lineTo(x + 4, pad.t + 10);
+      ctx.closePath();
+      ctx.fill();
+      // Vertical line down
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 0.5;
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath(); ctx.moveTo(x, pad.t + 10); ctx.lineTo(x, pad.t + ch); ctx.stroke();
+      ctx.globalAlpha = 1.0;
+    });
+  });
+
+  // ── Time axis ──
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.font = "8px sans-serif";
+  ctx.textAlign = "center";
+  const elapsed = tRange;
+  const steps = Math.min(6, data.length);
+  for(let i = 0; i <= steps; i++) {
+    const t = tMin + (i / steps) * tRange;
+    const sec = Math.round(t - tMin);
+    ctx.fillText(`${sec}s`, toX(t), H - 4);
+  }
+
+  // ── Legend ──
+  const legendEl = document.getElementById("tl-legend");
+  if(legendEl) {
+    const lastD = data[data.length - 1];
+    const intentLabel = (lastD.intent || "unknown").toUpperCase();
+    legendEl.innerHTML =
+      `<span style="color:#3498db">\u2501 Score</span> &nbsp; ` +
+      `<span style="color:${levelColors[lastD.level]||'#fff'}">\u25CF ${lastD.level}</span> &nbsp; ` +
+      `<span style="color:${(intentColors[lastD.intent]||'').replace('0.15','0.9')}">${intentLabel}</span> &nbsp; ` +
+      `<span style="color:#f1c40f">\u25B2 Anomaly</span> &nbsp; ` +
+      `Latest: ${lastD.score}/100`;
+  }
+}
+
 /* ── AI: periodic refresh ──────────────────────────────────── */
 async function refreshAI() {
   try {
-    const [predResp, anomResp, recResp, breachResp, coneResp] = await Promise.all([
+    const [predResp, anomResp, recResp, breachResp, coneResp, coordResp] = await Promise.all([
       fetch("/api/ai/predictions").then(r=>r.json()).catch(()=>({})),
       fetch("/api/ai/anomalies").then(r=>r.json()).catch(()=>({anomalies:[]})),
       fetch("/api/ai/recommendations").then(r=>r.json()).catch(()=>({recommendations:[]})),
       fetch("/api/ai/pred_breaches").then(r=>r.json()).catch(()=>({breaches:[]})),
       fetch("/api/ai/uncertainty").then(r=>r.json()).catch(()=>({cones:{}})),
+      fetch("/api/ai/coordinated").then(r=>r.json()).catch(()=>({attacks:[]})),
     ]);
     // Draw predictions
     drawPredictions(predResp.predictions || {});
@@ -1074,6 +1365,8 @@ async function refreshAI() {
     drawUncertaintyCones(coneResp.cones || {});
     // Predictive breach warnings
     renderBreachPanel(breachResp.breaches || []);
+    // Coordinated attack warnings
+    renderCoordPanel(coordResp.attacks || []);
     // Update anomaly panel (only new ones)
     const newAnomalies = (anomResp.anomalies || []).filter(a => {
       return !anomalyLog.some(e => e.time === a.time && e.type === a.type &&
@@ -1082,6 +1375,8 @@ async function refreshAI() {
     if(newAnomalies.length > 0) pushAnomalies(newAnomalies);
     // Tactical recommendations
     renderTacticalPanel(recResp.recommendations || []);
+    // Auto-refresh open timeline chart
+    if(timelineCurrentTrack) fetchAndDrawTimeline(timelineCurrentTrack);
   } catch(e) { /* silent */ }
 }
 
@@ -1097,9 +1392,11 @@ function boot(){
   mountAssetPanel();
   mountMissionPanel();
   // Phase 5: AI panels
+  mountCoordPanel();
   mountBreachPanel();
   mountAnomalyPanel();
   mountTacticalPanel();
+  mountTimelinePopup();
   mountChatPanel();
   mountChatToggle();
   connectWS();
