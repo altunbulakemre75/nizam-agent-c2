@@ -123,6 +123,8 @@ function makeThreatIcon(level, intent) {
   return L.divIcon({ html:svg, className:"", iconSize:[32,42], iconAnchor:[16,42], tooltipAnchor:[0,-42] });
 }
 
+let mlPredictions = {}; // {track_id: {ml_level, ml_probability, ml_probabilities}}
+
 function buildTooltip(track, threat) {
   const id    = track.id ?? track.global_track_id ?? "?";
   const kin   = track.kinematics ?? {};
@@ -137,11 +139,16 @@ function buildTooltip(track, threat) {
   const intent= track.intent ?? threat?.intent ?? "unknown";
   const iconf = track.intent_conf ?? 0;
   const im    = INTENT_META[intent] ?? INTENT_META.unknown;
-  const mlP   = threat?.ml_probability != null ? `${(threat.ml_probability*100).toFixed(0)}%` : "-";
+  // ML prediction
+  const ml = mlPredictions[id];
+  const mlLevel = ml?.ml_level ?? "-";
+  const mlProb  = ml?.ml_probability != null ? `${(ml.ml_probability*100).toFixed(0)}%` : "-";
+  const mlColor = THREAT_COLORS[mlLevel] ?? "#6366f1";
   return `<div style="font:12px/1.5 monospace;min-width:175px">
     <b style="font-size:13px">${id}</b><br>
     <span style="color:${THREAT_COLORS[level]??'#aaa'}"> ${level}</span>
-    \u00a0score:<b>${score}</b> p=<b>${mlP}</b><br>
+    \u00a0score:<b>${score}</b>
+    \u00a0<span style="color:${mlColor}">ML:${mlLevel}(${mlProb})</span><br>
     TTI:<b>${tti}</b> Vr:<b>${vr}</b> Range:<b>${range}</b><br>
     Intent:<span style="color:${im.color}">${im.icon} ${im.label}</span>(${(iconf*100).toFixed(0)}%)<br>
     Label:${cls.label??"?"}(${cls.conf!=null?(cls.conf*100).toFixed(0)+"%":"?"}) Sensors:${sens}<br>
@@ -821,6 +828,56 @@ function renderBreachPanel(breaches) {
 }
 
 /* ── AI: ROE Advisory panel ────────────────────────────── */
+/* ── ML Threat Panel ────────────────────────────────────── */
+let mlPanelEl = null;
+let mlModelAvailable = false;
+
+function mountMLPanel() {
+  mlPanelEl = el("div", { id:"ml-panel", style:{
+    position:"fixed", top:"12px", right:"330px", zIndex:"9999",
+    background:"rgba(15,10,50,0.88)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
+    lineHeight:"1.5", minWidth:"200px", maxWidth:"260px",
+    maxHeight:"180px", overflowY:"auto",
+    border:"1px solid rgba(99,102,241,0.4)",
+  }});
+  mlPanelEl.innerHTML = '<b style="color:#818cf8">ML Model</b><br><span style="opacity:.5">Bekleniyor...</span>';
+  document.body.appendChild(mlPanelEl);
+}
+
+function renderMLPanel(preds) {
+  if (!mlPanelEl) return;
+  const entries = Object.entries(preds);
+  if (entries.length === 0) {
+    mlPanelEl.innerHTML = '<b style="color:#818cf8">ML Model</b><br><span style="opacity:.5">' +
+      (mlModelAvailable ? 'Veri bekleniyor...' : 'Model yok — egitim gerekli') + '</span>';
+    return;
+  }
+  // Sort by probability desc, show top 8
+  const sorted = entries
+    .map(([tid,p]) => ({tid, ...p}))
+    .sort((a,b) => (b.ml_probability||0) - (a.ml_probability||0))
+    .slice(0, 8);
+
+  let html = `<b style="color:#818cf8">\u2699 ML Threat</b> <span style="opacity:.5">(${entries.length} track)</span><br>`;
+  sorted.forEach(p => {
+    const c = THREAT_COLORS[p.ml_level] || "#6366f1";
+    const pct = p.ml_probability != null ? (p.ml_probability * 100).toFixed(0) : "?";
+    // Mini probability bar
+    const barW = Math.round((p.ml_probability || 0) * 60);
+    html += `<div style="margin:2px 0;display:flex;align-items:center;gap:4px">
+      <span style="min-width:75px;font-family:monospace;font-size:10px">${p.tid.slice(-10)}</span>
+      <span style="background:${c};color:#fff;border-radius:3px;padding:0 4px;font-size:9px;font-weight:bold">${p.ml_level}</span>
+      <div style="width:60px;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden">
+        <div style="width:${barW}px;height:100%;background:${c};border-radius:3px"></div>
+      </div>
+      <span style="font-size:10px;opacity:.7">${pct}%</span>
+    </div>`;
+  });
+  mlPanelEl.innerHTML = html;
+}
+
 let roePanelEl = null;
 
 const ROE_COLORS = {
@@ -1651,7 +1708,7 @@ function _aarStatCard(label, value, color) {
 /* ── AI: periodic refresh ──────────────────────────────────── */
 async function refreshAI() {
   try {
-    const [predResp, anomResp, recResp, breachResp, coneResp, coordResp, roeResp] = await Promise.all([
+    const [predResp, anomResp, recResp, breachResp, coneResp, coordResp, roeResp, mlResp] = await Promise.all([
       fetch("/api/ai/predictions").then(r=>r.json()).catch(()=>({})),
       fetch("/api/ai/anomalies").then(r=>r.json()).catch(()=>({anomalies:[]})),
       fetch("/api/ai/recommendations").then(r=>r.json()).catch(()=>({recommendations:[]})),
@@ -1659,6 +1716,7 @@ async function refreshAI() {
       fetch("/api/ai/uncertainty").then(r=>r.json()).catch(()=>({cones:{}})),
       fetch("/api/ai/coordinated").then(r=>r.json()).catch(()=>({attacks:[]})),
       fetch("/api/ai/roe").then(r=>r.json()).catch(()=>({advisories:[]})),
+      fetch("/api/ai/ml").then(r=>r.json()).catch(()=>({predictions:{}})),
     ]);
     // Draw predictions
     drawPredictions(predResp.predictions || {});
@@ -1670,6 +1728,10 @@ async function refreshAI() {
     renderCoordPanel(coordResp.attacks || []);
     // ROE advisories
     renderROEPanel(roeResp.advisories || []);
+    // ML threat predictions
+    mlPredictions = mlResp.predictions || {};
+    mlModelAvailable = mlResp.model?.available ?? false;
+    renderMLPanel(mlPredictions);
     // Update anomaly panel (only new ones)
     const newAnomalies = (anomResp.anomalies || []).filter(a => {
       return !anomalyLog.some(e => e.time === a.time && e.type === a.type &&
@@ -1916,6 +1978,7 @@ function applyReplayFrame(state) {
   if (state.coord_attacks) renderCoordPanel(state.coord_attacks);
   if (state.roe_advisories) renderROEPanel(state.roe_advisories);
   if (state.recommendations) renderTacticalPanel(state.recommendations);
+  if (state.ml_predictions) { mlPredictions = state.ml_predictions; renderMLPanel(mlPredictions); }
 }
 
 function updateReplayUI() {
@@ -1950,6 +2013,7 @@ function boot(){
   mountAssetPanel();
   mountMissionPanel();
   // Phase 5: AI panels
+  mountMLPanel();
   mountROEPanel();
   mountCoordPanel();
   mountBreachPanel();

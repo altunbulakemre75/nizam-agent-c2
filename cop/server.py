@@ -47,6 +47,7 @@ from ai import coordinated_attack as ai_coord_attack
 from ai import timeline as ai_timeline
 from ai import aar as ai_aar
 from ai import roe as ai_roe
+from ai import ml_threat as ai_ml
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -146,6 +147,8 @@ AI_PRED_BREACHES: List[Dict] = []             # predictive zone breach warnings
 AI_UNCERTAINTY_CONES: Dict[str, List[Dict]] = {}  # uncertainty cones for frontend
 AI_COORD_ATTACKS: List[Dict] = []                 # coordinated attack warnings
 AI_ROE_ADVISORIES: List[Dict] = []                # ROE engagement advisories
+AI_ML_PREDICTIONS: Dict[str, Dict] = {}               # ML threat predictions per track
+AI_ML_PREV_TRACKS: Dict[str, Dict] = {}               # previous frame tracks for acceleration calc
 AI_ANOMALY_MAX = 100
 
 CLIENTS: Set[WebSocket] = set()
@@ -522,6 +525,7 @@ def _make_snapshot_payload() -> Dict[str, Any]:
         "uncertainty_cones": AI_UNCERTAINTY_CONES,
         "coord_attacks":     AI_COORD_ATTACKS,
         "roe_advisories":    AI_ROE_ADVISORIES,
+        "ml_predictions":    AI_ML_PREDICTIONS,
         "server_time": _utc_now_iso(),
     }
 
@@ -772,6 +776,8 @@ async def api_reset(_=Depends(require_operator())):
         AI_UNCERTAINTY_CONES.clear()
         AI_COORD_ATTACKS.clear()
         AI_ROE_ADVISORIES.clear()
+        AI_ML_PREDICTIONS.clear()
+        AI_ML_PREV_TRACKS.clear()
         ai_predictor.reset()
         ai_anomaly.reset()
         ai_tactical.reset()
@@ -952,6 +958,21 @@ def _ai_run_tactical() -> None:
     for ca in coord_attacks:
         ai_aar.record_coord_attack(ca)
 
+    # ML threat scoring
+    if ai_ml.is_available():
+        ml_preds = ai_ml.predict_batch(
+            tracks=STATE["tracks"],
+            threats=STATE["threats"],
+            assets=STATE["assets"],
+            zones=STATE["zones"],
+            prev_tracks=AI_ML_PREV_TRACKS,
+            dt=_AI_TACTICAL_INTERVAL,
+        )
+        AI_ML_PREDICTIONS.clear()
+        AI_ML_PREDICTIONS.update(ml_preds)
+        AI_ML_PREV_TRACKS.clear()
+        AI_ML_PREV_TRACKS.update({k: dict(v) for k, v in STATE["tracks"].items()})
+
     # ROE: engagement advisories
     roe_advs = ai_roe.evaluate_all(
         tracks=STATE["tracks"],
@@ -1110,6 +1131,30 @@ async def api_ai_aar():
     return JSONResponse(report)
 
 
+@app.get("/api/ai/ml")
+async def api_ai_ml(track_id: Optional[str] = Query(None)):
+    """Get ML threat predictions."""
+    if track_id:
+        pred = AI_ML_PREDICTIONS.get(track_id)
+        return JSONResponse({"track_id": track_id, "prediction": pred})
+    return JSONResponse({
+        "count": len(AI_ML_PREDICTIONS),
+        "predictions": AI_ML_PREDICTIONS,
+        "model": ai_ml.get_model_info(),
+    })
+
+
+@app.post("/api/ai/ml/train")
+async def api_ai_ml_train():
+    """Re-train ML model from recordings."""
+    try:
+        result = ai_ml.train()
+        ai_ml.reset()  # force reload of new model
+        return JSONResponse({"ok": True, "result": result})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/ai/status")
 async def api_ai_status():
     """AI subsystem status."""
@@ -1123,6 +1168,7 @@ async def api_ai_status():
         "timeline": ai_timeline.get_summary(),
         "aar": ai_aar.get_status(),
         "recording": replay_recorder.get_status(),
+        "ml_model": ai_ml.get_model_info(),
         "llm_enabled": ai_llm.LLM_ENABLED,
         "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
     })
