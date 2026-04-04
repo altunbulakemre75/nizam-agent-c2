@@ -1683,6 +1683,261 @@ async function refreshAI() {
   } catch(e) { /* silent */ }
 }
 
+/* ── Replay System ──────────────────────────────────────── */
+
+let replayBarEl = null;
+let replayListEl = null;
+let replayActive = false;
+let replayTimer = null;
+let replayInfo = { state:"IDLE", duration_s:0, current_elapsed_s:0, speed:1, filename:"", scenario:"" };
+
+function mountReplayBar() {
+  // Bottom replay control bar (hidden by default)
+  replayBarEl = el("div", { id:"replay-bar", style:{
+    position:"fixed", bottom:"0", left:"0", right:"0", zIndex:"10001",
+    background:"linear-gradient(180deg, rgba(15,10,40,0.95), rgba(10,5,30,0.98))",
+    color:"white", padding:"10px 20px", display:"none",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    borderTop:"2px solid #7c3aed",
+    boxShadow:"0 -4px 20px rgba(124,58,237,0.3)",
+  }});
+  replayBarEl.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;max-width:1400px;margin:0 auto">
+      <div style="display:flex;align-items:center;gap:6px;min-width:140px">
+        <span style="color:#a78bfa;font-weight:bold;font-size:13px">\u25B6 REPLAY</span>
+        <span id="replay-scenario" style="color:#c4b5fd;font-size:11px"></span>
+      </div>
+      <button id="replay-btn-play" onclick="replayTogglePlay()" style="background:#7c3aed;color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:bold;font-size:12px">\u25B6 Play</button>
+      <button onclick="replayStop()" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px">\u25A0 Stop</button>
+      <div style="display:flex;align-items:center;gap:4px">
+        <span style="opacity:0.7">Speed:</span>
+        <select id="replay-speed" onchange="replaySetSpeed(this.value)" style="background:#1e1b4b;color:#fff;border:1px solid #4c1d95;border-radius:4px;padding:2px 4px;font-size:11px">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="5">5x</option>
+          <option value="10">10x</option>
+        </select>
+      </div>
+      <span id="replay-time" style="min-width:90px;text-align:center;font-family:monospace;color:#e9d5ff">00:00 / 00:00</span>
+      <input id="replay-slider" type="range" min="0" max="1000" value="0" step="1"
+        oninput="replaySeekFromSlider(this.value)"
+        style="flex:1;accent-color:#7c3aed;cursor:pointer">
+      <span id="replay-frame" style="opacity:0.5;min-width:50px;text-align:right;font-family:monospace"></span>
+    </div>
+  `;
+  document.body.appendChild(replayBarEl);
+}
+
+function mountReplayList() {
+  // Modal for selecting a recording
+  replayListEl = el("div", { id:"replay-list-modal", style:{
+    position:"fixed", inset:"0", zIndex:"10002", display:"none",
+    background:"rgba(0,0,0,0.8)", alignItems:"center", justifyContent:"center",
+  }});
+  replayListEl.innerHTML = `
+    <div style="background:#1e1b4b;border:2px solid #7c3aed;border-radius:16px;padding:24px;max-width:600px;width:90%;max-height:70vh;overflow-y:auto;color:white;font-family:ui-sans-serif,system-ui,Arial;margin:auto;margin-top:15vh">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0;color:#a78bfa;font-size:18px">\u25B6 Kayitli Senaryolar</h2>
+        <button onclick="closeReplayList()" style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer">\u2715</button>
+      </div>
+      <div id="replay-list-body" style="font-size:13px">
+        <span style="opacity:0.5">Y\u00fckleniyor...</span>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(replayListEl);
+}
+
+function mountReplayButton() {
+  const btn = el("button", {
+    id: "replay-open-btn",
+    onclick: () => openReplayList(),
+    style: {
+      position:"fixed", top:"12px", left:"260px", zIndex:"9999",
+      background:"linear-gradient(135deg,#7c3aed,#4c1d95)", color:"#fff",
+      border:"none", borderRadius:"8px", padding:"8px 14px",
+      cursor:"pointer", fontWeight:"bold", fontSize:"12px",
+      fontFamily:"ui-sans-serif,system-ui,Arial",
+      boxShadow:"0 2px 10px rgba(124,58,237,0.4)",
+    }
+  }, ["\u25B6 Replay"]);
+  document.body.appendChild(btn);
+}
+
+async function openReplayList() {
+  replayListEl.style.display = "flex";
+  const body = document.getElementById("replay-list-body");
+  body.innerHTML = '<span style="opacity:0.5">Y\u00fckleniyor...</span>';
+  try {
+    const resp = await fetch("/api/replay/recordings").then(r=>r.json());
+    const recs = resp.recordings || [];
+    if (recs.length === 0) {
+      body.innerHTML = '<span style="opacity:0.6">Hen\u00fcz kay\u0131t yok. Bir senaryo \u00e7al\u0131\u015ft\u0131r\u0131n, otomatik kaydedilecek.</span>';
+      return;
+    }
+    let html = '<table style="width:100%;border-collapse:collapse">';
+    html += '<tr style="border-bottom:1px solid #4c1d95;color:#a78bfa"><th style="text-align:left;padding:6px">Senaryo</th><th>S\u00fcre</th><th>Frame</th><th>Boyut</th><th></th></tr>';
+    recs.forEach(r => {
+      const dur = r.duration_s ? fmtTime(r.duration_s) : "-";
+      const frames = r.total_frames || "?";
+      const size = r.size_kb ? `${r.size_kb} KB` : "-";
+      const scenario = r.scenario || r.filename;
+      const date = r.start_time_iso ? r.start_time_iso.replace("T"," ").slice(0,19) : "";
+      html += `<tr style="border-bottom:1px solid rgba(124,58,237,0.2)">
+        <td style="padding:6px"><b>${scenario}</b><br><span style="opacity:0.5;font-size:11px">${date}</span></td>
+        <td style="text-align:center;padding:6px">${dur}</td>
+        <td style="text-align:center;padding:6px">${frames}</td>
+        <td style="text-align:center;padding:6px">${size}</td>
+        <td style="padding:6px"><button onclick="loadReplay('${r.filename}')" style="background:#7c3aed;color:#fff;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:11px">\u25B6 Y\u00fckle</button></td>
+      </tr>`;
+    });
+    html += '</table>';
+    body.innerHTML = html;
+  } catch(e) {
+    body.innerHTML = '<span style="color:#f87171">Hata: ' + e.message + '</span>';
+  }
+}
+
+function closeReplayList() {
+  replayListEl.style.display = "none";
+}
+
+async function loadReplay(filename) {
+  closeReplayList();
+  try {
+    const resp = await fetch("/api/replay/load", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({filename})
+    }).then(r=>r.json());
+    if (!resp.ok) { alert("Y\u00fckleme hatas\u0131: " + (resp.error||"")); return; }
+    replayInfo = resp.info;
+    enterReplayMode();
+  } catch(e) { alert("Replay y\u00fckleme hatas\u0131: " + e.message); }
+}
+
+function enterReplayMode() {
+  replayActive = true;
+  // Pause live mode
+  CopEngine.pause();
+  // Show replay bar
+  replayBarEl.style.display = "block";
+  // Hide replay open button
+  const btn = document.getElementById("replay-open-btn");
+  if (btn) btn.style.display = "none";
+  // Update UI
+  document.getElementById("replay-scenario").textContent = replayInfo.scenario || replayInfo.filename;
+  updateReplayUI();
+  // Start polling frames
+  startReplayPolling();
+}
+
+function exitReplayMode() {
+  replayActive = false;
+  stopReplayPolling();
+  replayBarEl.style.display = "none";
+  const btn = document.getElementById("replay-open-btn");
+  if (btn) btn.style.display = "";
+  // Resume live
+  CopEngine.resume(fetchCompositeSnapshot);
+}
+
+async function replayTogglePlay() {
+  if (replayInfo.state === "PLAYING") {
+    await fetch("/api/replay/pause", {method:"POST"});
+    replayInfo.state = "PAUSED";
+  } else {
+    const speed = document.getElementById("replay-speed").value;
+    await fetch("/api/replay/play", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({speed: parseFloat(speed)})
+    });
+    replayInfo.state = "PLAYING";
+  }
+  updateReplayUI();
+}
+
+async function replayStop() {
+  await fetch("/api/replay/stop", {method:"POST"});
+  replayInfo = { state:"IDLE", duration_s:0, current_elapsed_s:0, speed:1, filename:"", scenario:"" };
+  exitReplayMode();
+}
+
+async function replaySetSpeed(speed) {
+  await fetch("/api/replay/speed", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({speed: parseFloat(speed)})
+  });
+}
+
+async function replaySeekFromSlider(val) {
+  const t = (parseFloat(val) / 1000) * replayInfo.duration_s;
+  await fetch("/api/replay/seek", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({elapsed_s: t})
+  });
+  // Immediately fetch the frame at this position
+  replayFetchFrame();
+}
+
+function startReplayPolling() {
+  stopReplayPolling();
+  replayTimer = setInterval(replayFetchFrame, 500);
+}
+
+function stopReplayPolling() {
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+}
+
+async function replayFetchFrame() {
+  if (!replayActive) return;
+  try {
+    const resp = await fetch("/api/replay/frame").then(r=>r.json());
+    if (!resp.ok) return;
+    replayInfo = resp.info;
+    if (resp.frame) {
+      applyReplayFrame(resp.frame);
+    }
+    updateReplayUI();
+    // Auto-stop at end
+    if (replayInfo.state === "PAUSED" && replayInfo.current_elapsed_s >= replayInfo.duration_s && replayInfo.duration_s > 0) {
+      document.getElementById("replay-btn-play").textContent = "\u21BB Tekrar";
+    }
+  } catch(e) { /* silent */ }
+}
+
+function applyReplayFrame(state) {
+  // Feed the replay frame through applySnapshot
+  applySnapshot(state);
+  // Also apply AI overlay data if present
+  if (state.predictions) drawPredictions(state.predictions);
+  if (state.uncertainty_cones) drawUncertaintyCones(state.uncertainty_cones);
+  if (state.pred_breaches) renderBreachPanel(state.pred_breaches);
+  if (state.coord_attacks) renderCoordPanel(state.coord_attacks);
+  if (state.roe_advisories) renderROEPanel(state.roe_advisories);
+  if (state.recommendations) renderTacticalPanel(state.recommendations);
+}
+
+function updateReplayUI() {
+  const btn = document.getElementById("replay-btn-play");
+  if (btn) btn.textContent = replayInfo.state === "PLAYING" ? "\u23F8 Duraklat" : "\u25B6 Oynat";
+  const slider = document.getElementById("replay-slider");
+  if (slider && replayInfo.duration_s > 0) {
+    slider.value = Math.round((replayInfo.current_elapsed_s / replayInfo.duration_s) * 1000);
+  }
+  const timeEl = document.getElementById("replay-time");
+  if (timeEl) {
+    timeEl.textContent = fmtTime(replayInfo.current_elapsed_s) + " / " + fmtTime(replayInfo.duration_s);
+  }
+}
+
+function fmtTime(s) {
+  if (!s || s < 0) return "00:00";
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
+}
+
 /* ── Boot ────────────────────────────────────────────────── */
 
 function boot(){
@@ -1705,6 +1960,10 @@ function boot(){
   mountChatToggle();
   mountAARModal();
   mountAARButton();
+  // Replay system
+  mountReplayBar();
+  mountReplayList();
+  mountReplayButton();
   connectWS();
   refreshAgentHealth();
   setInterval(refreshAgentHealth, 5000);

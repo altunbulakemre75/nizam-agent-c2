@@ -16,6 +16,7 @@ Ctrl+C stops everything cleanly.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import threading
@@ -102,6 +103,11 @@ def main() -> None:
 
     ui_url   = f"http://127.0.0.1:{args.cop_port}"
     orch_url = f"http://127.0.0.1:{args.orch_port}"
+
+    # -- 0) Pass scenario name to COP server via env -------------------------
+    if args.scenario:
+        scenario_label = Path(args.scenario).stem
+        os.environ["NIZAM_SCENARIO"] = scenario_label
 
     # -- 1a) Orchestrator in a daemon thread --------------------------------
     threading.Thread(

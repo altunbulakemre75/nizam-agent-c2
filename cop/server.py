@@ -47,6 +47,8 @@ from ai import coordinated_attack as ai_coord_attack
 from ai import timeline as ai_timeline
 from ai import aar as ai_aar
 from ai import roe as ai_roe
+from replay import recorder as replay_recorder
+from replay import player as replay_player
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -94,7 +96,18 @@ async def lifespan(_app: FastAPI):
     # 3) Start AAR session
     ai_aar.start_session()
 
+    # 4) Start recording
+    scenario_name = os.environ.get("NIZAM_SCENARIO", "live")
+    rec_path = replay_recorder.start(scenario_name)
+    log.info("[cop] Recording started: %s", rec_path)
+
     yield
+
+    # Stop recording on shutdown
+    summary = replay_recorder.stop()
+    if summary:
+        log.info("[cop] Recording saved: %s (%d frames, %.1fs)",
+                 summary["path"], summary["frames"], summary["duration_s"])
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -851,6 +864,9 @@ async def ingest(req: Request):
     # ── Phase 5: periodic tactical analysis (every ingest) ──
     _ai_run_tactical()
 
+    # ── Record frame for replay ──
+    replay_recorder.capture_frame(_make_snapshot_payload)
+
     await broadcast(ev)
     return JSONResponse({"ok": True})
 
@@ -1106,8 +1122,107 @@ async def api_ai_status():
         "roe_advisories_active": len(AI_ROE_ADVISORIES),
         "timeline": ai_timeline.get_summary(),
         "aar": ai_aar.get_status(),
+        "recording": replay_recorder.get_status(),
         "llm_enabled": ai_llm.LLM_ENABLED,
         "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
+    })
+
+
+# ── Replay API endpoints ─────────────────────────────────────
+
+@app.get("/api/replay/recordings")
+async def api_replay_list():
+    """List all available recordings."""
+    recordings = replay_player.list_recordings()
+    return JSONResponse({"recordings": recordings})
+
+
+@app.post("/api/replay/load")
+async def api_replay_load(req: Request):
+    """Load a recording for playback."""
+    body = await req.json()
+    filename = body.get("filename")
+    if not filename:
+        return JSONResponse({"ok": False, "error": "filename required"}, status_code=400)
+    try:
+        player = replay_player.get_player()
+        info = player.load(filename)
+        return JSONResponse({"ok": True, "info": info})
+    except (FileNotFoundError, ValueError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+
+
+@app.post("/api/replay/play")
+async def api_replay_play(req: Request):
+    """Start or resume playback."""
+    body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
+    speed = float(body.get("speed", 1.0))
+    player = replay_player.get_player()
+    player.play(speed=speed)
+    return JSONResponse({"ok": True, "info": player.get_info()})
+
+
+@app.post("/api/replay/pause")
+async def api_replay_pause():
+    """Pause playback."""
+    player = replay_player.get_player()
+    player.pause()
+    return JSONResponse({"ok": True, "info": player.get_info()})
+
+
+@app.post("/api/replay/stop")
+async def api_replay_stop():
+    """Stop playback and unload recording."""
+    player = replay_player.get_player()
+    player.stop()
+    return JSONResponse({"ok": True, "info": player.get_info()})
+
+
+@app.post("/api/replay/seek")
+async def api_replay_seek(req: Request):
+    """Seek to a specific time."""
+    body = await req.json()
+    elapsed_s = float(body.get("elapsed_s", 0))
+    player = replay_player.get_player()
+    player.seek(elapsed_s)
+    return JSONResponse({"ok": True, "info": player.get_info()})
+
+
+@app.post("/api/replay/speed")
+async def api_replay_speed(req: Request):
+    """Change playback speed."""
+    body = await req.json()
+    speed = float(body.get("speed", 1.0))
+    player = replay_player.get_player()
+    player.set_speed(speed)
+    return JSONResponse({"ok": True, "info": player.get_info()})
+
+
+@app.get("/api/replay/frame")
+async def api_replay_frame(t: Optional[float] = Query(None)):
+    """Get the current (or specified) replay frame."""
+    player = replay_player.get_player()
+    if player.state == "IDLE":
+        return JSONResponse({"ok": False, "error": "no recording loaded"}, status_code=400)
+    if t is not None:
+        frame = player.get_frame_at(t)
+    else:
+        frame = player.get_current_frame()
+    info = player.get_info()
+    return JSONResponse({
+        "ok": True,
+        "info": info,
+        "frame": frame.get("state") if frame else None,
+    })
+
+
+@app.get("/api/replay/status")
+async def api_replay_status():
+    """Get current replay status."""
+    player = replay_player.get_player()
+    return JSONResponse({
+        "player": player.get_info(),
+        "recorder": replay_recorder.get_status(),
     })
 
 
