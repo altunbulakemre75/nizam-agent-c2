@@ -46,6 +46,7 @@ from ai import zone_breach as ai_zone_breach
 from ai import coordinated_attack as ai_coord_attack
 from ai import timeline as ai_timeline
 from ai import aar as ai_aar
+from ai import roe as ai_roe
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -131,6 +132,7 @@ AI_RECOMMENDATIONS: List[Dict] = []           # latest tactical recommendations
 AI_PRED_BREACHES: List[Dict] = []             # predictive zone breach warnings
 AI_UNCERTAINTY_CONES: Dict[str, List[Dict]] = {}  # uncertainty cones for frontend
 AI_COORD_ATTACKS: List[Dict] = []                 # coordinated attack warnings
+AI_ROE_ADVISORIES: List[Dict] = []                # ROE engagement advisories
 AI_ANOMALY_MAX = 100
 
 CLIENTS: Set[WebSocket] = set()
@@ -506,6 +508,7 @@ def _make_snapshot_payload() -> Dict[str, Any]:
         "pred_breaches":     AI_PRED_BREACHES,
         "uncertainty_cones": AI_UNCERTAINTY_CONES,
         "coord_attacks":     AI_COORD_ATTACKS,
+        "roe_advisories":    AI_ROE_ADVISORIES,
         "server_time": _utc_now_iso(),
     }
 
@@ -755,6 +758,7 @@ async def api_reset(_=Depends(require_operator())):
         AI_PRED_BREACHES.clear()
         AI_UNCERTAINTY_CONES.clear()
         AI_COORD_ATTACKS.clear()
+        AI_ROE_ADVISORIES.clear()
         ai_predictor.reset()
         ai_anomaly.reset()
         ai_tactical.reset()
@@ -763,6 +767,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_coord_attack.reset()
         ai_timeline.reset()
         ai_aar.reset()
+        ai_roe.reset()
         ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
@@ -931,6 +936,17 @@ def _ai_run_tactical() -> None:
     for ca in coord_attacks:
         ai_aar.record_coord_attack(ca)
 
+    # ROE: engagement advisories
+    roe_advs = ai_roe.evaluate_all(
+        tracks=STATE["tracks"],
+        threats=STATE["threats"],
+        zones=STATE["zones"],
+        assets=STATE["assets"],
+        coord_attacks=coord_attacks,
+    )
+    AI_ROE_ADVISORIES.clear()
+    AI_ROE_ADVISORIES.extend(roe_advs)
+
 
 # ── Phase 5: AI API endpoints ───────────────────────────────
 
@@ -1055,6 +1071,15 @@ async def api_ai_timeline(track_id: Optional[str] = Query(None)):
     })
 
 
+@app.get("/api/ai/roe")
+async def api_ai_roe():
+    """Get current ROE engagement advisories."""
+    return JSONResponse({
+        "count": len(AI_ROE_ADVISORIES),
+        "advisories": AI_ROE_ADVISORIES,
+    })
+
+
 @app.get("/api/ai/aar")
 async def api_ai_aar():
     """Generate and return After-Action Report."""
@@ -1078,6 +1103,7 @@ async def api_ai_status():
         "recommendations_active": len(AI_RECOMMENDATIONS),
         "pred_breaches_active": len(AI_PRED_BREACHES),
         "coord_attacks_active": len(AI_COORD_ATTACKS),
+        "roe_advisories_active": len(AI_ROE_ADVISORIES),
         "timeline": ai_timeline.get_summary(),
         "aar": ai_aar.get_status(),
         "llm_enabled": ai_llm.LLM_ENABLED,

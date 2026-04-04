@@ -820,6 +820,68 @@ function renderBreachPanel(breaches) {
   setTimeout(() => { breachPanelEl.style.borderColor = "rgba(231,76,60,0.4)"; }, 1200);
 }
 
+/* ── AI: ROE Advisory panel ────────────────────────────── */
+let roePanelEl = null;
+
+const ROE_COLORS = {
+  WEAPONS_FREE:"#e74c3c", WEAPONS_TIGHT:"#e67e22", WEAPONS_HOLD:"#f39c12",
+  WARN:"#9b59b6", TRACK_ONLY:"#3498db", HOLD_FIRE:"#27ae60",
+};
+const ROE_LABELS = {
+  WEAPONS_FREE:"SERBEST", WEAPONS_TIGHT:"KOSITLI", WEAPONS_HOLD:"SAVUNMA",
+  WARN:"UYAR", TRACK_ONLY:"IZLE", HOLD_FIRE:"ATES ETME",
+};
+
+function mountROEPanel() {
+  roePanelEl = el("div", { id:"roe-panel", style:{
+    position:"fixed", bottom:"770px", right:"12px", zIndex:"9999",
+    background:"rgba(20,10,40,0.88)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
+    lineHeight:"1.4", minWidth:"250px", maxWidth:"330px",
+    maxHeight:"180px", overflowY:"auto",
+    border:"1px solid rgba(155,89,182,0.4)",
+  }});
+  roePanelEl.innerHTML = "<b>\u2694 ROE Advisory</b><br><span style='opacity:.5'>No engagements</span>";
+  document.body.appendChild(roePanelEl);
+}
+
+function renderROEPanel(advisories) {
+  if(!roePanelEl) return;
+  if(!advisories || advisories.length === 0) {
+    roePanelEl.innerHTML = "<b>\u2694 ROE Advisory</b><br><span style='opacity:.5'>No engagements</span>";
+    roePanelEl.style.borderColor = "rgba(155,89,182,0.4)";
+    return;
+  }
+
+  let html = `<b>\u2694 ROE Advisory</b> <span style="opacity:.6">${advisories.length} active</span><br>`;
+  advisories.slice(0, 8).forEach(a => {
+    const color = ROE_COLORS[a.engagement] || "#aaa";
+    const label = ROE_LABELS[a.engagement] || a.engagement;
+    const urgColor = {CRITICAL:"#e74c3c",HIGH:"#e67e22",MEDIUM:"#f39c12",LOW:"#95a5a6"}[a.urgency] || "#aaa";
+
+    const badges = [];
+    if(a.is_coordinated) badges.push('<span style="background:#ff0050;padding:0 3px;border-radius:3px;font-size:7px">KOORD</span>');
+    if(a.in_kill_zone) badges.push('<span style="background:#e74c3c;padding:0 3px;border-radius:3px;font-size:7px">KILL</span>');
+
+    html += `<div style="border-left:3px solid ${color};padding-left:5px;margin:3px 0">
+      <span style="background:${color};padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold;color:#fff">${label}</span>
+      <span style="font-weight:bold;margin-left:3px">${a.track_id}</span>
+      ${badges.join(" ")}
+      <span style="float:right;color:${urgColor};font-size:9px;font-weight:bold">${a.urgency}</span><br>
+      <span style="font-size:9px;opacity:.75">${(a.reasons||[]).join("; ")}</span>
+    </div>`;
+  });
+
+  roePanelEl.innerHTML = html;
+  // Flash on CRITICAL
+  const hasCritical = advisories.some(a => a.urgency === "CRITICAL");
+  if(hasCritical) {
+    roePanelEl.style.borderColor = "#e74c3c";
+    setTimeout(() => { roePanelEl.style.borderColor = "rgba(155,89,182,0.4)"; }, 1500);
+  }
+}
+
 /* ── AI: Coordinated Attack panel + convergence lines ──── */
 let coordPanelEl = null;
 const convergenceMarkers = new Map(); // key -> L.circleMarker
@@ -1589,13 +1651,14 @@ function _aarStatCard(label, value, color) {
 /* ── AI: periodic refresh ──────────────────────────────────── */
 async function refreshAI() {
   try {
-    const [predResp, anomResp, recResp, breachResp, coneResp, coordResp] = await Promise.all([
+    const [predResp, anomResp, recResp, breachResp, coneResp, coordResp, roeResp] = await Promise.all([
       fetch("/api/ai/predictions").then(r=>r.json()).catch(()=>({})),
       fetch("/api/ai/anomalies").then(r=>r.json()).catch(()=>({anomalies:[]})),
       fetch("/api/ai/recommendations").then(r=>r.json()).catch(()=>({recommendations:[]})),
       fetch("/api/ai/pred_breaches").then(r=>r.json()).catch(()=>({breaches:[]})),
       fetch("/api/ai/uncertainty").then(r=>r.json()).catch(()=>({cones:{}})),
       fetch("/api/ai/coordinated").then(r=>r.json()).catch(()=>({attacks:[]})),
+      fetch("/api/ai/roe").then(r=>r.json()).catch(()=>({advisories:[]})),
     ]);
     // Draw predictions
     drawPredictions(predResp.predictions || {});
@@ -1605,6 +1668,8 @@ async function refreshAI() {
     renderBreachPanel(breachResp.breaches || []);
     // Coordinated attack warnings
     renderCoordPanel(coordResp.attacks || []);
+    // ROE advisories
+    renderROEPanel(roeResp.advisories || []);
     // Update anomaly panel (only new ones)
     const newAnomalies = (anomResp.anomalies || []).filter(a => {
       return !anomalyLog.some(e => e.time === a.time && e.type === a.type &&
@@ -1630,6 +1695,7 @@ function boot(){
   mountAssetPanel();
   mountMissionPanel();
   // Phase 5: AI panels
+  mountROEPanel();
   mountCoordPanel();
   mountBreachPanel();
   mountAnomalyPanel();
