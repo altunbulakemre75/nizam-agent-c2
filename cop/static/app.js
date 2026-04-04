@@ -333,6 +333,36 @@ function applySnapshot(payload) {
   (payload?.assets    ?? []).forEach(a => upsertAsset(a));
   (payload?.waypoints ?? []).forEach(w => upsertWaypoint(w));
   (payload?.tasks     ?? []).forEach(t => pushTask(t));
+
+  // AI state (if present in the snapshot payload)
+  if (payload && (payload.predictions || payload.recommendations
+      || payload.roe_advisories || payload.ml_predictions)) {
+    applyAIUpdate(payload);
+  }
+}
+
+/* Apply a WebSocket AI update event (cop.ai_update) */
+function applyAIUpdate(payload) {
+  if (!payload) return;
+  drawPredictions(payload.predictions || {});
+  drawUncertaintyCones(payload.uncertainty_cones || {});
+  renderBreachPanel(payload.pred_breaches || []);
+  renderCoordPanel(payload.coord_attacks || []);
+  renderROEPanel(payload.roe_advisories || []);
+  mlPredictions = payload.ml_predictions || {};
+  if (typeof payload.ml_available === "boolean") {
+    mlModelAvailable = payload.ml_available;
+  }
+  renderMLPanel(mlPredictions);
+  // Anomalies: only push new ones (dedupe against anomalyLog)
+  const newAnomalies = (payload.anomalies || []).filter(a =>
+    !anomalyLog.some(e => e.time === a.time && e.type === a.type
+      && (e.track_id||"") === (a.track_id||""))
+  );
+  if (newAnomalies.length > 0) pushAnomalies(newAnomalies);
+  renderTacticalPanel(payload.recommendations || []);
+  // Auto-refresh open timeline chart
+  if (timelineCurrentTrack) fetchAndDrawTimeline(timelineCurrentTrack);
 }
 
 /* ── Zone breach alert panel ─────────────────────────────── */
@@ -557,6 +587,8 @@ const CopEngine = (() => {
     if(!ev?.event_type) return;
     switch(ev.event_type){
       case "cop.snapshot":        return applySnapshot(ev.payload);
+      case "cop.ai_update":       return applyAIUpdate(ev.payload);
+      case "cop.ping":            return;  // heartbeat, no-op
       case "cop.track":           return upsertTrack(ev.payload);
       case "cop.threat":          return upsertThreat(ev.payload);
       case "cop.zone":            return upsertZone(ev.payload);
@@ -1707,6 +1739,9 @@ function _aarStatCard(label, value, color) {
 
 /* ── AI: periodic refresh ──────────────────────────────────── */
 async function refreshAI() {
+  // Polling fallback — used only if WebSocket is down. Normal AI updates
+  // arrive via cop.ai_update events (see applyAIUpdate).
+  if (UI.wsConnected) return;
   try {
     const [predResp, anomResp, recResp, breachResp, coneResp, coordResp, roeResp, mlResp] = await Promise.all([
       fetch("/api/ai/predictions").then(r=>r.json()).catch(()=>({})),
@@ -1718,30 +1753,17 @@ async function refreshAI() {
       fetch("/api/ai/roe").then(r=>r.json()).catch(()=>({advisories:[]})),
       fetch("/api/ai/ml").then(r=>r.json()).catch(()=>({predictions:{}})),
     ]);
-    // Draw predictions
-    drawPredictions(predResp.predictions || {});
-    // Draw uncertainty cones
-    drawUncertaintyCones(coneResp.cones || {});
-    // Predictive breach warnings
-    renderBreachPanel(breachResp.breaches || []);
-    // Coordinated attack warnings
-    renderCoordPanel(coordResp.attacks || []);
-    // ROE advisories
-    renderROEPanel(roeResp.advisories || []);
-    // ML threat predictions
-    mlPredictions = mlResp.predictions || {};
-    mlModelAvailable = mlResp.model?.available ?? false;
-    renderMLPanel(mlPredictions);
-    // Update anomaly panel (only new ones)
-    const newAnomalies = (anomResp.anomalies || []).filter(a => {
-      return !anomalyLog.some(e => e.time === a.time && e.type === a.type &&
-        (e.track_id||"") === (a.track_id||""));
+    applyAIUpdate({
+      predictions:       predResp.predictions || {},
+      anomalies:         anomResp.anomalies || [],
+      recommendations:   recResp.recommendations || [],
+      pred_breaches:     breachResp.breaches || [],
+      uncertainty_cones: coneResp.cones || {},
+      coord_attacks:     coordResp.attacks || [],
+      roe_advisories:    roeResp.advisories || [],
+      ml_predictions:    mlResp.predictions || {},
+      ml_available:      mlResp.model?.available ?? false,
     });
-    if(newAnomalies.length > 0) pushAnomalies(newAnomalies);
-    // Tactical recommendations
-    renderTacticalPanel(recResp.recommendations || []);
-    // Auto-refresh open timeline chart
-    if(timelineCurrentTrack) fetchAndDrawTimeline(timelineCurrentTrack);
   } catch(e) { /* silent */ }
 }
 
@@ -2031,8 +2053,9 @@ function boot(){
   connectWS();
   refreshAgentHealth();
   setInterval(refreshAgentHealth, 5000);
-  // AI refresh every 3s
-  setInterval(refreshAI, 3000);
+  // AI data now streams via WebSocket (cop.ai_update).
+  // Keep slow polling as a safety net for when the socket drops.
+  setInterval(refreshAI, 15000);
 }
 document.addEventListener("DOMContentLoaded", () => {
   try { boot(); }

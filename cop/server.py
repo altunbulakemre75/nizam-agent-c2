@@ -868,12 +868,30 @@ async def ingest(req: Request):
             pass
 
     # ── Phase 5: periodic tactical analysis (every ingest) ──
-    _ai_run_tactical()
+    ai_updated = _ai_run_tactical()
 
     # ── Record frame for replay ──
     replay_recorder.capture_frame(_make_snapshot_payload)
 
     await broadcast(ev)
+
+    # ── Push AI state update whenever tactical engine ran ──
+    if ai_updated:
+        await broadcast({
+            "event_type": "cop.ai_update",
+            "payload": {
+                "predictions":       AI_PREDICTIONS,
+                "anomalies":         AI_ANOMALIES[-20:],
+                "recommendations":   AI_RECOMMENDATIONS,
+                "pred_breaches":     AI_PRED_BREACHES,
+                "uncertainty_cones": AI_UNCERTAINTY_CONES,
+                "coord_attacks":     AI_COORD_ATTACKS,
+                "roe_advisories":    AI_ROE_ADVISORIES,
+                "ml_predictions":    AI_ML_PREDICTIONS,
+                "ml_available":      ai_ml.is_available(),
+                "server_time":       _utc_now_iso(),
+            },
+        })
     return JSONResponse({"ok": True})
 
 
@@ -904,13 +922,17 @@ def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> Non
             ai_aar.record_anomaly(a)
 
 
-def _ai_run_tactical() -> None:
-    """Run tactical recommendation engine (rate-limited)."""
+def _ai_run_tactical() -> bool:
+    """Run tactical recommendation engine (rate-limited).
+
+    Returns True if the engine actually ran this tick, False if skipped
+    due to rate limiting. Used by ingest() to decide whether to broadcast.
+    """
     import time as _time
     global _ai_tactical_last
     now = _time.time()
     if now - _ai_tactical_last < _AI_TACTICAL_INTERVAL:
-        return
+        return False
     _ai_tactical_last = now
 
     # Swarm detection
@@ -983,6 +1005,8 @@ def _ai_run_tactical() -> None:
     )
     AI_ROE_ADVISORIES.clear()
     AI_ROE_ADVISORIES.extend(roe_advs)
+
+    return True
 
 
 # ── Phase 5: AI API endpoints ───────────────────────────────
@@ -1373,8 +1397,13 @@ async def ws_endpoint(
             snapshot = {"event_type": "cop.snapshot", "payload": _make_snapshot_payload()}
         await websocket.send_json(snapshot)
 
+        # Heartbeat: send ping every 10s so dead connections surface quickly.
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(10)
+            try:
+                await websocket.send_json({"event_type": "cop.ping", "payload": {"t": _utc_now_iso()}})
+            except Exception:
+                break
 
     except WebSocketDisconnect:
         pass
