@@ -23,3 +23,11 @@ opencv-python==4.10.0.84
 
 # Config
 python-dotenv==1.0.1
+
+# AI / ML
+numpy>=1.24.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# Testing
+pytest>=7.4.0
