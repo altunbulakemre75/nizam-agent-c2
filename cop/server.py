@@ -739,11 +739,95 @@ async def api_task_approve(task_id: str, req: Request, _=Depends(require_operato
         task["status"]      = "APPROVED"
         task["resolved_at"] = _utc_now_iso()
         task["resolved_by"] = body.get("operator", "operator")
+        # Snapshot the action + target while still under the lock
+        action    = task.get("action")
+        target_id = task.get("track_id")
     ev = {"event_type": "cop.task_update", "payload": dict(task)}
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task_update(task)))
+
+    # ── Fire control loop ──
+    # If the approved task was an ENGAGE order, kick off the effector
+    # impact sequence on the target track. Runs as a background task so
+    # the API call returns immediately — the operator sees the task flip
+    # to APPROVED in the UI, then an expanding red circle animation over
+    # the target, then the target marker disappears.
+    if action == "ENGAGE" and target_id:
+        asyncio.create_task(_run_effector_impact(str(target_id), task["id"]))
+
     return JSONResponse({"ok": True, "task": task})
+
+
+# ── Fire control / effector pipeline ─────────────────────────
+
+# How long after approval to wait before the impact lands (seconds).
+# Represents weapon flight time; also gives the UI a beat to play its
+# animation before the target vanishes.
+_EFFECTOR_IMPACT_DELAY_S = 2.0
+
+
+async def _run_effector_impact(target_id: str, task_id: str) -> None:
+    """
+    Background task: resolve an ENGAGE order against a track.
+
+    Sequence:
+      1) Broadcast cop.effector_impact{target, lat, lon, delay_s}.
+         The UI uses this to start the expanding-circle animation.
+      2) Sleep _EFFECTOR_IMPACT_DELAY_S to simulate weapon flight time.
+      3) Remove the track and its threat from STATE under the lock.
+      4) Broadcast cop.track_removed so the UI drops the marker.
+
+    If the target disappears mid-flight (e.g. fusion lost it), we still
+    broadcast track_removed with whatever id we had so the UI cleans up
+    the animation gracefully.
+    """
+    # 1) Look up the target's current position for the impact event.
+    async with STATE_LOCK:
+        target = STATE["tracks"].get(target_id)
+        if not target:
+            # Track already gone — nothing to engage, quietly stop.
+            log.info("[fire] engage %s: target %s not found, aborting",
+                     task_id, target_id)
+            return
+        lat = target.get("lat")
+        lon = target.get("lon")
+
+    await broadcast({
+        "event_type": "cop.effector_impact",
+        "payload": {
+            "target_id":   target_id,
+            "task_id":     task_id,
+            "lat":         lat,
+            "lon":         lon,
+            "delay_s":     _EFFECTOR_IMPACT_DELAY_S,
+            "server_time": _utc_now_iso(),
+        },
+    })
+
+    # 2) Simulate weapon flight time.
+    await asyncio.sleep(_EFFECTOR_IMPACT_DELAY_S)
+
+    # 3) Remove target from state (track + threat).
+    async with STATE_LOCK:
+        STATE["tracks"].pop(target_id, None)
+        STATE["threats"].pop(target_id, None)
+        # Also clean up the AI prediction cache for this track so the
+        # tactical engine doesn't keep reasoning about a dead target.
+        AI_PREDICTIONS.pop(target_id, None)
+        AI_ML_PREDICTIONS.pop(target_id, None)
+
+    # 4) Tell the UI to drop the marker.
+    await broadcast({
+        "event_type": "cop.track_removed",
+        "payload": {
+            "id":          target_id,
+            "reason":      "engaged",
+            "task_id":     task_id,
+            "server_time": _utc_now_iso(),
+        },
+    })
+    log.info("[fire] engage %s: target %s neutralized", task_id, target_id)
 
 
 @app.post("/api/tasks/{task_id}/reject")

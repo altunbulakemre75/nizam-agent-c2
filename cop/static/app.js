@@ -192,6 +192,66 @@ function upsertTrack(track) {
   upsertTrail(track, threat);
 }
 
+/* ── Fire control: track removal + effector impact animation ── */
+function removeTrack(id) {
+  if(!id) return;
+  id = String(id);
+  const m = UI.trackMarkers.get(id);
+  if(m){ try{ m.remove(); }catch{} UI.trackMarkers.delete(id); }
+  const pl = UI.trackPolylines.get(id);
+  if(pl){ try{ pl.remove(); }catch{} UI.trackPolylines.delete(id); }
+  UI.tracks.delete(id);
+  UI.threats.delete(id);
+}
+
+function playEffectorImpact(payload) {
+  // payload: { target_id, task_id, lat, lon, delay_s }
+  if(!UI.map || payload?.lat == null || payload?.lon == null) return;
+  const lat = +payload.lat, lon = +payload.lon;
+  const delayS = +payload.delay_s || 2.0;
+
+  // Expanding red ring at the impact point. Grows from 20m to ~250m over
+  // delayS seconds, then fades out. Pure CSS via Leaflet circle radius
+  // animation driven by requestAnimationFrame.
+  const ring = L.circle([lat, lon], {
+    radius: 20,
+    color: "#e74c3c",
+    weight: 3,
+    fillColor: "#e74c3c",
+    fillOpacity: 0.35,
+  }).addTo(UI.map);
+
+  // Inner muzzle flash dot
+  const flash = L.circleMarker([lat, lon], {
+    radius: 6,
+    color: "#fff",
+    weight: 2,
+    fillColor: "#ffdd57",
+    fillOpacity: 1.0,
+  }).addTo(UI.map);
+
+  const startTs = performance.now();
+  const endTs   = startTs + delayS * 1000;
+  const maxRadiusM = 250;
+
+  function step(now) {
+    const t = (now - startTs) / (endTs - startTs);
+    if(t >= 1) {
+      // Fade-out phase: hold briefly then clean up
+      try { ring.remove(); } catch {}
+      try { flash.remove(); } catch {}
+      return;
+    }
+    const radius  = 20 + (maxRadiusM - 20) * t;
+    const opacity = 0.55 * (1 - t);
+    ring.setRadius(radius);
+    ring.setStyle({ fillOpacity: opacity, opacity: 0.9 * (1 - t * 0.5) });
+    flash.setStyle({ fillOpacity: 1 - t });
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
 function upsertThreat(threat) {
   const id=String(threat.id??threat.global_track_id??threat.threat_id??""); if(!id) return;
   UI.threats.set(id,threat);
@@ -598,6 +658,8 @@ const CopEngine = (() => {
       case "cop.asset_removed":   return removeAsset(ev.payload?.id);
       case "cop.task":            return pushTask(ev.payload);
       case "cop.task_update":     return updateTask(ev.payload);
+      case "cop.effector_impact": return playEffectorImpact(ev.payload);
+      case "cop.track_removed":   return removeTrack(ev.payload?.id);
       case "cop.waypoint":        return upsertWaypoint(ev.payload);
       case "cop.waypoint_removed":return removeWaypoint(ev.payload?.id);
       case "cop.waypoints_cleared":return clearWaypoints();
