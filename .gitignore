@@ -27,4 +27,7 @@ Thumbs.db
 
 # Alembic
 alembic/versions/*.pyc
+
+# Generated runtime artefacts
 recordings/
+reports/

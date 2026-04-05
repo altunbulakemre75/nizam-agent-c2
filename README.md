@@ -1,283 +1,340 @@
-NIZAM
+# NIZAM
 
-Real-Time, Event-Driven Common Operational Picture (COP) System
+**Real-Time, Event-Driven Common Operational Picture (COP) System**
 
-Overview
+NIZAM is a real-time COP / C2 prototype inspired by systems like
+Anduril Lattice. It demonstrates foundational architectural concepts
+used in modern command & control, ISR, and aerospace ground-segment
+software: event-driven data flow, deterministic state distribution,
+multi-sensor fusion, AI-assisted decision support, and operator-centric
+situational awareness.
 
-NIZAM is a real-time Common Operational Picture (COP) system prototype designed to demonstrate foundational architectural concepts used in modern Command & Control (C2), ISR, and aerospace ground systems.
+The project is a self-contained reference implementation — no external
+services are required to run it end-to-end.
 
-The system emphasizes event-driven data flow, deterministic state distribution, and operator-centric situational awareness, aligned with principles commonly applied in defense, security, and space ground segment software architectures.
+---
 
-1. Operational Purpose
+## 1. What NIZAM Does
 
-The primary objective of NIZAM is to provide a single, consistent operational picture by:
+- **Ingests** synthetic sensor events (radar, RF, electro-optical)
+  through an asynchronous agent pipeline.
+- **Fuses** multi-sensor observations into tracks with intent
+  classification and ML threat scoring.
+- **Maintains** the authoritative operational state: tracks, threats,
+  zones, friendly/hostile assets, tasks, waypoints.
+- **Runs** an AI decision-support layer: Kalman trajectory prediction,
+  swarm/coordinated attack detection, tactical recommendations,
+  rules-of-engagement advisories, after-action reports.
+- **Broadcasts** everything in real time over WebSocket to a Leaflet
+  browser UI.
 
-Collecting real-time track and event data
+---
 
-Maintaining an authoritative operational state
+## 2. Capabilities (all implemented)
 
-Broadcasting deterministic updates to all connected operators
+### Core COP
 
-Visualizing threats and restricted areas on a geospatial COP interface
+- Real-time WebSocket state distribution (tracks, threats, zones,
+  assets, tasks, waypoints)
+- Multi-sensor fusion: radar + RF bearing + EO/camera
+- Intent classification: attack / reconnaissance / loitering
+- ML threat scoring (RandomForest) with rule-based fallback
+- Threat-level visualization (HIGH / MEDIUM / LOW)
+- Zone system: restricted / kill / friendly polygons with ray-casting
+  breach detection
+- Asset management (friendly / hostile / unknown) and mission waypoints
+- Autonomous task proposal with operator approve / reject workflow
+- Pause / resume, reset, passthrough, replay from JSONL recordings
 
-The current implementation reflects Phase-1 Operational COP UI capabilities, focusing on correctness, clarity, and real-time behavior.
+### AI Decision Support (Phase 5)
 
-2. Core Capabilities
+- Kalman-filter track prediction (60 s ahead, 12 predicted points)
+- Anomaly detection: speed spikes, heading reversals, intent shifts
+- Swarm detection: proximity + correlated heading clustering
+- Coordinated attack detection (pincer, convergence)
+- Predictive zone breach + uncertainty cones
+- Tactical recommendation engine (intercept, zone warning, escalate,
+  withdraw, monitor, reposition)
+- Rules-of-Engagement (ROE) advisory engine
+- After-Action Report (AAR) generator
+- LLM operator advisor (Claude / OpenAI API, rule-based fallback)
 
-Real-time WebSocket-based C2 state distribution
+### Platform
 
-Live track ingestion and synchronized operational state
+- PostgreSQL / TimescaleDB persistence (optional)
+- JWT auth with operator roles (optional)
+- Docker + Docker Compose
+- Kubernetes manifests (namespace, StatefulSet, Deployment + HPA,
+  Ingress)
+- GitHub Actions CI: 170 pytest tests + end-to-end smoke test
+- Runtime metrics endpoint for performance diagnostics
 
-Threat-level–based visualization (Low / Medium / High)
+---
 
-Restricted and exclusion zone definition and rendering
+## 3. System Architecture
 
-Operator-controlled UI layers with no backend coupling
+```
+                 ┌─ radar_sim ─┐
+  world_agent ──┼─  rf_sim   ──┼─ fuser ─ cop_publisher ─► COP /ingest
+                 └─  eo_sim   ─┘                            │
+                                                            ▼
+                              orchestrator ◄──┐     ┌───────────────┐
+                                heartbeats    └────►│  COP Server   │
+                                                    │  (FastAPI)    │
+                                                    │               │
+                                                    │  STATE_LOCK   │
+                                                    │  tactical bg  │
+                                                    │  task (exec)  │
+                                                    └───────┬───────┘
+                                                            │ WebSocket
+                                                            ▼
+                                                    ┌───────────────┐
+                                                    │  Browser UI   │
+                                                    │  (Leaflet)    │
+                                                    └───────────────┘
+```
 
-Deterministic and predictable frontend rendering
+Key design properties:
 
-Pause- and buffer-ready backend design for future replay support
+- **Pipeline back-pressure is impossible.** `cop_publisher` uses a
+  bounded in-memory queue with drop-oldest eviction and a worker
+  thread pool. The stdin reader never blocks on HTTP.
+- **The event loop never stalls on AI compute.** The tactical engine
+  (swarm / coord attack / ML / ROE) runs in a `run_in_executor` thread
+  pool, driven by a fire-and-forget background task that `/ingest`
+  merely schedules. `/ingest` returns in milliseconds even during
+  heavy AI passes.
+- **Shallow state snapshots** are handed to the executor so concurrent
+  `/ingest` calls never see torn dicts during iteration.
 
-3. System Architecture Overview
-+---------------------------------------------------+
-|                   Operator UI                     |
-|             (Leaflet-based COP View)              |
-+-------------------------▲-------------------------+
-                          │ WebSocket (Live State)
-                          │
-+-------------------------▼-------------------------+
-|                Backend / C2 Core                  |
-|              FastAPI + WebSocket                  |
-|                                                   |
-|  - Track State Management                          |
-|  - Threat Context                                  |
-|  - Zone Definitions                                |
-|  - Event Broadcasting                              |
-+-------------------------▲-------------------------+
-                          │ REST (Control / Ingest)
-                          │
-+-------------------------▼-------------------------+
-|             External Data Sources                  |
-|     (Sensors, Simulators, External Systems)        |
-+---------------------------------------------------+
-The architecture is sensor-agnostic and extensible, enabling integration of heterogeneous data sources without modifying the core COP logic.
+---
 
-4. Backend Design
-Technology Stack
+## 4. Repository Layout
 
-Python
+```
+agents/           sensor + fusion + cop_publisher
+  cop_publisher.py        pipeline -> COP REST ingest (thread pool)
+  fuser/                  multi-sensor fusion + intent + ML scoring
+  radar_sim/ eo_sim/ rf_sim/ world/
+ai/               Phase 5 AI decision support
+  aar.py                  after-action report
+  anomaly.py              anomaly + swarm detection
+  coordinated_attack.py   pincer / convergence
+  llm_advisor.py          Claude / OpenAI operator advisor
+  ml_threat.py            RandomForest threat classifier
+  predictor.py            Kalman track prediction
+  roe.py                  rules of engagement
+  tactical.py             recommendation engine
+  timeline.py / zone_breach.py
+auth/             JWT + role-based deps (optional)
+cop/              FastAPI COP server (state, ingest, WS, AI hooks, API)
+db/               SQLAlchemy models, Postgres / TimescaleDB session
+k8s/              Kubernetes manifests
+orchestrator/     agent registry + heartbeat
+replay/           JSONL recorder + time-slider player
+scenarios/        single_drone / swarm / coordinated / multi_axis / decoy
+schemas/          event schemas
+scripts/          compare_scenarios.py, smoke_test.py
+shared/           heartbeat client
+tests/            170 pytest tests
+run_pipeline.py   pipeline launcher (fan-out into cop_publisher)
+start.py          all-in-one: orchestrator + COP + pipeline
+```
 
-FastAPI
+---
 
-WebSocket-based event dissemination
+## 5. Quick Start
 
-Stateless REST endpoints for ingestion and control
+Single-command demo (orchestrator + COP server + pipeline):
 
-Responsibilities
+```bash
+pip install -r requirements.txt
+python start.py --scenario scenarios/multi_axis_attack.json
+```
 
-Maintain the authoritative operational state
+Then open **http://127.0.0.1:8100** — the Leaflet COP UI.
 
-Accept external track and control events
+Endpoints:
 
-Broadcast COP updates to all connected clients
+| URL | Purpose |
+|---|---|
+| `http://127.0.0.1:8100` | COP UI |
+| `http://127.0.0.1:8100/api/metrics` | Runtime metrics (ingest, tactical timings, WS) |
+| `http://127.0.0.1:8100/api/ai/status` | AI subsystem status |
+| `http://127.0.0.1:8100/api/ai/aar` | After-action report |
+| `http://127.0.0.1:8200` | Orchestrator (agent health) |
 
-Provide snapshot synchronization on client connection
+Multi-scenario benchmark runner:
 
-5. Frontend Design
-Technology Stack
+```bash
+python scripts/compare_scenarios.py --duration 30
+```
 
-Leaflet.js
+Runs all five scenarios sequentially against a running COP server,
+prints a comparison table, and saves a full AAR bundle to `reports/`.
 
-Vanilla JavaScript (deterministic rendering)
+End-to-end smoke test (boots server, runs pipeline, asserts metrics):
 
-No framework dependency
+```bash
+python scripts/smoke_test.py --duration 12
+```
 
-Operator Interface Features
+---
 
-Real-time track visualization
+## 6. Performance
 
-Threat-based color coding
+The two biggest hot-path bottlenecks were identified and fixed
+through load testing against `multi_axis_attack` (5 simultaneous
+drones / helicopters from 4 cardinal directions):
 
-Restricted zone layer toggling
+| Fix | Before | After |
+|---|---|---|
+| `cop_publisher` thread pool + drop-oldest queue | pipeline deadlocked at ~207 s | clean exit, 0 dropped, 0 failed |
+| Server tactical engine offload to executor | 239 POST timeouts / 60 s | **0 failed** / 60 s |
 
-Minimum threat-level filtering
+Tactical engine timings observed on a 5-scenario benchmark
+(1161 ingests, 45 tactical ticks, 150 s wall time):
 
-Operational legend for threat interpretation
+```
+tactical.p50_ms = 1100.6
+tactical.p95_ms = 1920.3
+tactical.max_ms = 2115.5
+tactical.failed = 0
+tactical.overlap_skipped = 0
+```
 
-The UI design prioritizes clarity, low cognitive load, and operational usability.
+A tactical tick takes up to 2.1 seconds under load — if that work
+ran on the event loop, every tick would freeze `/ingest` for 1–2 s,
+which is exactly the failure mode the executor offload removes.
 
-6. Event Model
-Track Event (Ingest)
-Track Event (Ingest)
+---
+
+## 7. Running Tests
+
+```bash
+pytest tests/ -v
+python scripts/smoke_test.py --duration 12
+```
+
+170 unit tests + the end-to-end smoke test. Both are run in
+GitHub Actions on every push to `main`.
+
+---
+
+## 8. Event Model (excerpt)
+
+Track ingest (agent → COP):
+
+```json
 {
   "event_type": "cop.track",
   "payload": {
-    "id": "T1",
-    "lat": 41.015,
-    "lon": 28.979,
-    "threat_score": 80
+    "id": "T-001",
+    "lat": 41.020,
+    "lon": 28.985,
+    "intent": "attack",
+    "threat_level": "HIGH",
+    "classification": {"label": "drone", "confidence": 0.85},
+    "kinematics": {"range_m": 1200.0, "az_deg": 45.0, "speed_mps": 32.0}
   }
 }
+```
 
-Snapshot Event (WebSocket)
+AI update (COP → browser, WebSocket):
+
+```json
 {
-  "event_type": "cop.snapshot",
-  "tracks": {
-    "T1": {
-      "lat": 41.015,
-      "lon": 28.979
-    }
-  },
-  "paused": false
+  "event_type": "cop.ai_update",
+  "payload": {
+    "predictions":    {"T-001": [ ... 12 future points ... ]},
+    "recommendations": [ { "type": "intercept", "target": "T-001", ... } ],
+    "coord_attacks":   [ { "pattern": "pincer", "tracks": [...] } ],
+    "roe_advisories":  [ ... ],
+    "ml_predictions":  { "T-001": {"score": 0.94, "class": "hostile"} }
+  }
 }
+```
 
-7. Execution Instructions
-Backend
-cd nizam-backend
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+---
 
+## 9. Mission Scenario — Aerospace Ground Systems
 
-Health endpoint:
-
-http://127.0.0.1:8000/api/state
-
-
-WebSocket endpoint:
-
-ws://127.0.0.1:8000/ws
-
-Frontend
-cd nizam-frontend
-python -m http.server 5173
-
-
-Access:
-
-http://127.0.0.1:5173
-
-8. Operational Test (Track Injection)
-$t='{"event_type":"cop.track","payload":{"id":"T1","lat":41.015,"lon":28.979,"threat_score":80}}'
-Invoke-WebRequest -Uri http://127.0.0.1:8000/api/ingest `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body $t
-
-
-Expected outcome:
-
-Track appears immediately on COP UI
-
-Marker color reflects threat level
-
-Track state updates in real time
-
-9. Scope and Limitations
-
-This project represents a foundational COP architecture prototype, not a complete operational system.
-
-Intentionally excluded:
-
-Authentication and authorization
-
-Persistent storage
-
-Encrypted communications
-
-Classified data handling
-
-These elements are omitted by design to keep the focus on architecture, real-time behavior, and system clarity.
-
-10. Planned Extensions
-
-Track detail and analytical panels
-
-Pause / resume with buffered playback
-
-Multi-sensor fusion (EO, radar, RF)
-
-Threat scoring engines
-
-Persistent state and replay
-
-Role-based operator views
-
-## 🚀 Mission Scenario – Aerospace Ground Systems
-
-### Scenario Overview
-NIZAM can be adapted as a real-time situational awareness and decision-support layer for aerospace ground systems, particularly in environments where multiple heterogeneous sensors must be correlated into a single operational picture.
+NIZAM can be adapted as a real-time situational awareness and
+decision-support layer for aerospace ground systems, particularly
+in environments where multiple heterogeneous sensors must be
+correlated into a single operational picture.
 
 Potential application domains include:
-- Launch site and spaceport perimeter security
-- Ground station monitoring for space missions
+- Launch-site and spaceport perimeter security
+- Ground-station monitoring for space missions
 - Autonomous facility surveillance for aerospace infrastructure
 - Pre-launch and post-landing operational awareness
 
----
-
 ### Operational Context
-Modern aerospace ground operations rely on a combination of sensors such as:
-- Electro-optical cameras
-- Radar-based tracking systems
-- RF monitoring equipment
-- Simulation and telemetry feeds
 
-These data sources often operate independently, creating fragmented awareness and delayed operational response.
+Modern aerospace ground operations rely on a combination of sensors
+such as electro-optical cameras, radar-based tracking, RF monitoring,
+and simulation/telemetry feeds. These sources often operate
+independently, creating fragmented awareness and delayed operational
+response.
 
-NIZAM addresses this challenge by acting as a sensor-agnostic COP layer, aggregating real-time events into a unified, deterministic operational state shared across all operators.
-
----
+NIZAM addresses this by acting as a sensor-agnostic COP layer,
+aggregating real-time events into a unified, deterministic operational
+state shared across all operators.
 
 ### Example Mission Flow
-1. Multiple ground sensors generate track events around a launch facility
-2. Events are ingested by the NIZAM backend through standardized interfaces
-3. The system maintains an authoritative operational state and evaluates threat context
-4. A synchronized COP is broadcast in real time to all connected operators
-5. Operators visualize tracks, threat levels, and restricted zones on a shared geospatial interface
 
-This workflow enables low-latency situational awareness, consistent decision-making, and scalable operator coordination.
-
----
+1. Multiple ground sensors generate track events around a launch facility.
+2. Events are ingested by the NIZAM backend through standardized interfaces.
+3. The system maintains an authoritative operational state and evaluates
+   threat context.
+4. A synchronized COP is broadcast in real time to all connected operators.
+5. Operators visualize tracks, threat levels, predicted trajectories,
+   coordinated-attack warnings, and restricted zones on a shared
+   geospatial interface.
 
 ### Relevance to Aerospace Ground Systems
-The architecture and design principles demonstrated by NIZAM align with key requirements of aerospace ground systems:
 
 - Real-time and deterministic state distribution
 - Sensor-agnostic and extensible architecture
 - Operator-centric situational awareness
-- Support for simulation-driven testing and replay
-- Clear separation between data ingestion, state management, and visualization
+- Simulation-driven testing and replay
+- Clear separation between data ingestion, state management,
+  AI decision support, and visualization
 
-NIZAM is not a mission-specific system but a foundational COP architecture prototype that can be extended for aerospace, planetary surface operations, and spaceport ground support systems.
+NIZAM is not a mission-specific system but a foundational COP
+architecture prototype that can be extended for aerospace,
+planetary surface operations, and spaceport ground support systems.
 
 ---
 
-### Research and Extension Potential
-Future extensions relevant to aerospace missions include:
-- Multi-sensor fusion algorithms
-- Time-synchronized event replay for mission analysis
-- Autonomous alerting and anomaly detection
-- Integration with simulation and digital twin environments
+## 10. Scope and Limitations
 
-11. Disclaimer
+This project is a technical prototype developed for demonstration
+and educational purposes. It does **not** represent an active or
+deployed military system.
 
-This software is a technical prototype developed for demonstration and educational purposes only.
-It does not represent an active or deployed military system.
+Intentionally in scope:
+- Architecture, real-time behaviour, AI decision support
+- Multi-sensor fusion and operator-centric COP design
+- Performance hardening under load
 
-12. Author
+Intentionally out of scope:
+- Real sensor integration
+- Classified data handling
+- Fielded-grade security posture
 
-Emre Altunbulak
-Mechanical Engineer
+---
 
-Focus Areas
+## 11. Author
 
-Command & Control Systems
+**Emre Altunbulak** — Mechanical Engineer
 
-Real-Time Operational Software
+Focus areas: Command & Control Systems, Real-Time Operational
+Software, COP / ISR Architectures.
 
-COP / ISR Architectures
-
-13. Keywords
+## 12. Keywords
 
 Common Operational Picture · C2 · ISR · Defense Software ·
-Real-Time Systems · Event-Driven Architecture · Aerospace Ground Systems
+Real-Time Systems · Event-Driven Architecture · Multi-Sensor Fusion ·
+AI Decision Support · Aerospace Ground Systems
