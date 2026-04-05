@@ -1,0 +1,48 @@
+{
+  "name": "multi_axis_attack",
+  "description": "5 drones attacking from 4 cardinal directions (N/E/S/W) simultaneously",
+  "duration_s": 180,
+  "rate_hz": 1.0,
+  "entities": [
+    {
+      "entity_id": "E-NORTH-01",
+      "label": "drone",
+      "range_m": 1400.0,
+      "az_deg": 0.0,
+      "speed_mps": 24.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-EAST-01",
+      "label": "drone",
+      "range_m": 1300.0,
+      "az_deg": 90.0,
+      "speed_mps": 26.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-SOUTH-01",
+      "label": "drone",
+      "range_m": 1350.0,
+      "az_deg": 180.0,
+      "speed_mps": 25.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-WEST-01",
+      "label": "drone",
+      "range_m": 1400.0,
+      "az_deg": 270.0,
+      "speed_mps": 24.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-HIGH-01",
+      "label": "helicopter",
+      "range_m": 1600.0,
+      "az_deg": 45.0,
+      "speed_mps": 40.0,
+      "heading_deg": 180.0
+    }
+  ]
+}

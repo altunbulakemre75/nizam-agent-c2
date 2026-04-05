@@ -1,0 +1,48 @@
+{
+  "name": "decoy_attack",
+  "description": "2 fast close-range decoys draw attention while 3 slower main-force drones penetrate from the opposite axis",
+  "duration_s": 180,
+  "rate_hz": 1.0,
+  "entities": [
+    {
+      "entity_id": "E-DECOY-01",
+      "label": "drone",
+      "range_m": 700.0,
+      "az_deg": 10.0,
+      "speed_mps": 32.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-DECOY-02",
+      "label": "drone",
+      "range_m": 750.0,
+      "az_deg": -5.0,
+      "speed_mps": 34.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-MAIN-01",
+      "label": "drone",
+      "range_m": 2200.0,
+      "az_deg": 180.0,
+      "speed_mps": 20.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-MAIN-02",
+      "label": "drone",
+      "range_m": 2300.0,
+      "az_deg": 195.0,
+      "speed_mps": 19.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-MAIN-03",
+      "label": "helicopter",
+      "range_m": 2500.0,
+      "az_deg": 175.0,
+      "speed_mps": 45.0,
+      "heading_deg": 180.0
+    }
+  ]
+}
