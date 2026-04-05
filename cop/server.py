@@ -867,38 +867,42 @@ async def ingest(req: Request):
         elif event_type == "cop.snapshot":
             pass
 
-    # ── Phase 5: periodic tactical analysis (every ingest) ──
-    ai_updated = _ai_run_tactical()
+    # ── Phase 5: fire-and-forget tactical analysis ──
+    # Rate-limited internally. Runs in a thread pool executor so the heavy
+    # compute (swarm/coord-attack/ML/ROE) does NOT block the event loop —
+    # ingest returns immediately and the AI update is broadcast later when
+    # the background task finishes. This is what keeps /ingest responsive
+    # under 5+ drone scenarios.
+    _schedule_ai_tactical()
 
     # ── Record frame for replay ──
     replay_recorder.capture_frame(_make_snapshot_payload)
 
     await broadcast(ev)
 
-    # ── Push AI state update whenever tactical engine ran ──
-    if ai_updated:
-        await broadcast({
-            "event_type": "cop.ai_update",
-            "payload": {
-                "predictions":       AI_PREDICTIONS,
-                "anomalies":         AI_ANOMALIES[-20:],
-                "recommendations":   AI_RECOMMENDATIONS,
-                "pred_breaches":     AI_PRED_BREACHES,
-                "uncertainty_cones": AI_UNCERTAINTY_CONES,
-                "coord_attacks":     AI_COORD_ATTACKS,
-                "roe_advisories":    AI_ROE_ADVISORIES,
-                "ml_predictions":    AI_ML_PREDICTIONS,
-                "ml_available":      ai_ml.is_available(),
-                "server_time":       _utc_now_iso(),
-            },
-        })
     return JSONResponse({"ok": True})
 
 
 # ── Phase 5: AI processing helpers ───────────────────────────
+#
+# DESIGN NOTE (tactical offload):
+#
+# The tactical engine (swarm detect, recommendations, coord attack, ML,
+# ROE) is pure CPU work and takes meaningful time under load (5+ tracks
+# with ML enabled → hundreds of ms per tick). Originally it was called
+# synchronously from /ingest inside the event loop. Rate-limited to 3s,
+# but each invocation still froze the loop and caused /ingest timeouts
+# during multi-drone scenarios (see multi_axis_attack: 239 POST timeouts).
+#
+# Fix: move the compute into a thread pool executor, driven by a fire-
+# and-forget background task that /ingest merely schedules. /ingest now
+# returns immediately after the fast state update + WS broadcast. The
+# background task takes a brief state snapshot, runs the heavy compute
+# off-loop, then applies results + broadcasts cop.ai_update.
 
 _ai_tactical_last = 0.0
 _AI_TACTICAL_INTERVAL = 3.0  # run tactical engine every N seconds
+_ai_tactical_bg_lock = asyncio.Lock()
 
 
 def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> None:
@@ -922,11 +926,176 @@ def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> Non
             ai_aar.record_anomaly(a)
 
 
-def _ai_run_tactical() -> bool:
-    """Run tactical recommendation engine (rate-limited).
+def _ai_run_tactical_compute(
+    tracks_snap: Dict[str, Dict],
+    threats_snap: Dict[str, Dict],
+    assets_snap: Dict[str, Dict],
+    zones_snap: Dict[str, Dict],
+) -> Dict[str, Any]:
+    """
+    Pure-compute tactical engine pass. Runs in a thread pool executor so
+    it does NOT block the asyncio event loop during heavy ML / analysis.
 
-    Returns True if the engine actually ran this tick, False if skipped
-    due to rate limiting. Used by ingest() to decide whether to broadcast.
+    Iterates over caller-supplied snapshots (never STATE globals) so it
+    is safe against concurrent /ingest mutations. Reads from AI_* globals
+    that are only-extended-by-predictor (AI_PREDICTIONS, AI_ANOMALIES,
+    AI_ML_PREV_TRACKS) — these are eventually consistent and tolerant to
+    stale reads for one tick.
+
+    Returns a dict of results. The caller is responsible for applying
+    them to the AI_* globals on the event loop thread.
+    """
+    # Swarm detection
+    swarm_anomalies = ai_anomaly.detect_swarms(tracks_snap)
+
+    # Tactical recommendations
+    recs = ai_tactical.generate_recommendations(
+        tracks=tracks_snap,
+        threats=threats_snap,
+        assets=assets_snap,
+        zones=zones_snap,
+        anomalies=AI_ANOMALIES,
+        predictions=AI_PREDICTIONS,
+    )
+
+    # Predictive zone breach detection
+    breaches = ai_zone_breach.check_predictive_breaches(
+        predictions=AI_PREDICTIONS,
+        zones=zones_snap,
+    )
+
+    # Uncertainty cones for frontend
+    cones = ai_zone_breach.build_uncertainty_cones(AI_PREDICTIONS)
+
+    # Coordinated attack detection
+    coord_attacks = ai_coord_attack.detect_coordinated_attacks(
+        tracks=tracks_snap,
+        predictions=AI_PREDICTIONS,
+        zones=zones_snap,
+        assets=assets_snap,
+    )
+
+    # ML threat scoring
+    ml_preds: Dict[str, Dict] = {}
+    if ai_ml.is_available():
+        ml_preds = ai_ml.predict_batch(
+            tracks=tracks_snap,
+            threats=threats_snap,
+            assets=assets_snap,
+            zones=zones_snap,
+            prev_tracks=AI_ML_PREV_TRACKS,
+            dt=_AI_TACTICAL_INTERVAL,
+        )
+
+    # ROE: engagement advisories
+    roe_advs = ai_roe.evaluate_all(
+        tracks=tracks_snap,
+        threats=threats_snap,
+        zones=zones_snap,
+        assets=assets_snap,
+        coord_attacks=coord_attacks,
+    )
+
+    return {
+        "swarm_anomalies":   list(swarm_anomalies),
+        "recommendations":   list(recs),
+        "pred_breaches":     list(breaches),
+        "uncertainty_cones": dict(cones),
+        "coord_attacks":     list(coord_attacks),
+        "ml_predictions":    ml_preds,
+        "roe_advisories":    list(roe_advs),
+    }
+
+
+async def _ai_tactical_background_task() -> None:
+    """
+    Background task: snapshot state, run the tactical engine off-loop in
+    an executor, then apply results + broadcast.
+
+    Guarded by ``_ai_tactical_bg_lock`` so at most one pass is in flight.
+    If a previous pass is still computing (e.g. ML is slow), this call
+    drops the tick entirely — newer state will drive the next tick.
+    """
+    # Drop this tick if another one is already in flight. Under heavy
+    # load this is the right behaviour: no pile-up, always freshest data.
+    if _ai_tactical_bg_lock.locked():
+        return
+    async with _ai_tactical_bg_lock:
+        # 1) Snapshot state under STATE_LOCK (brief hold, shallow copies).
+        async with STATE_LOCK:
+            tracks_snap  = dict(STATE["tracks"])
+            threats_snap = dict(STATE["threats"])
+            assets_snap  = dict(STATE["assets"])
+            zones_snap   = dict(STATE["zones"])
+
+        # 2) Run the heavy compute in a thread pool executor so the event
+        #    loop stays free to handle /ingest and WebSocket traffic.
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                _ai_run_tactical_compute,
+                tracks_snap, threats_snap, assets_snap, zones_snap,
+            )
+        except Exception as exc:
+            log.warning("[cop] tactical compute failed: %s", exc)
+            return
+
+        # 3) Apply results to AI_* globals. We're back on the event loop
+        #    thread here, so writes are serialized w.r.t. /ingest handlers.
+        if result["swarm_anomalies"]:
+            AI_ANOMALIES.extend(result["swarm_anomalies"])
+            if len(AI_ANOMALIES) > AI_ANOMALY_MAX:
+                del AI_ANOMALIES[: len(AI_ANOMALIES) - AI_ANOMALY_MAX]
+
+        AI_RECOMMENDATIONS.clear()
+        AI_RECOMMENDATIONS.extend(result["recommendations"])
+
+        AI_PRED_BREACHES.clear()
+        AI_PRED_BREACHES.extend(result["pred_breaches"])
+
+        AI_UNCERTAINTY_CONES.clear()
+        AI_UNCERTAINTY_CONES.update(result["uncertainty_cones"])
+
+        AI_COORD_ATTACKS.clear()
+        AI_COORD_ATTACKS.extend(result["coord_attacks"])
+        for ca in result["coord_attacks"]:
+            ai_aar.record_coord_attack(ca)
+
+        if ai_ml.is_available():
+            AI_ML_PREDICTIONS.clear()
+            AI_ML_PREDICTIONS.update(result["ml_predictions"])
+            AI_ML_PREV_TRACKS.clear()
+            AI_ML_PREV_TRACKS.update({k: dict(v) for k, v in tracks_snap.items()})
+
+        AI_ROE_ADVISORIES.clear()
+        AI_ROE_ADVISORIES.extend(result["roe_advisories"])
+
+        # 4) Broadcast AI update to connected UI clients.
+        await broadcast({
+            "event_type": "cop.ai_update",
+            "payload": {
+                "predictions":       AI_PREDICTIONS,
+                "anomalies":         AI_ANOMALIES[-20:],
+                "recommendations":   AI_RECOMMENDATIONS,
+                "pred_breaches":     AI_PRED_BREACHES,
+                "uncertainty_cones": AI_UNCERTAINTY_CONES,
+                "coord_attacks":     AI_COORD_ATTACKS,
+                "roe_advisories":    AI_ROE_ADVISORIES,
+                "ml_predictions":    AI_ML_PREDICTIONS,
+                "ml_available":      ai_ml.is_available(),
+                "server_time":       _utc_now_iso(),
+            },
+        })
+
+
+def _schedule_ai_tactical() -> bool:
+    """
+    Rate-limited scheduler for the tactical background task. Called from
+    /ingest. Never blocks: at most it spawns an asyncio task and returns.
+
+    Returns True if a task was scheduled this call, False if skipped due
+    to rate limit.
     """
     import time as _time
     global _ai_tactical_last
@@ -934,78 +1103,7 @@ def _ai_run_tactical() -> bool:
     if now - _ai_tactical_last < _AI_TACTICAL_INTERVAL:
         return False
     _ai_tactical_last = now
-
-    # Swarm detection
-    swarm_anomalies = ai_anomaly.detect_swarms(STATE["tracks"])
-    if swarm_anomalies:
-        AI_ANOMALIES.extend(swarm_anomalies)
-        if len(AI_ANOMALIES) > AI_ANOMALY_MAX:
-            del AI_ANOMALIES[: len(AI_ANOMALIES) - AI_ANOMALY_MAX]
-
-    # Tactical recommendations
-    recs = ai_tactical.generate_recommendations(
-        tracks=STATE["tracks"],
-        threats=STATE["threats"],
-        assets=STATE["assets"],
-        zones=STATE["zones"],
-        anomalies=AI_ANOMALIES,
-        predictions=AI_PREDICTIONS,
-    )
-    AI_RECOMMENDATIONS.clear()
-    AI_RECOMMENDATIONS.extend(recs)
-
-    # Predictive zone breach detection
-    breaches = ai_zone_breach.check_predictive_breaches(
-        predictions=AI_PREDICTIONS,
-        zones=STATE["zones"],
-    )
-    AI_PRED_BREACHES.clear()
-    AI_PRED_BREACHES.extend(breaches)
-
-    # Uncertainty cones for frontend
-    cones = ai_zone_breach.build_uncertainty_cones(AI_PREDICTIONS)
-    AI_UNCERTAINTY_CONES.clear()
-    AI_UNCERTAINTY_CONES.update(cones)
-
-    # Coordinated attack detection
-    coord_attacks = ai_coord_attack.detect_coordinated_attacks(
-        tracks=STATE["tracks"],
-        predictions=AI_PREDICTIONS,
-        zones=STATE["zones"],
-        assets=STATE["assets"],
-    )
-    AI_COORD_ATTACKS.clear()
-    AI_COORD_ATTACKS.extend(coord_attacks)
-    # AAR: record coordinated attacks
-    for ca in coord_attacks:
-        ai_aar.record_coord_attack(ca)
-
-    # ML threat scoring
-    if ai_ml.is_available():
-        ml_preds = ai_ml.predict_batch(
-            tracks=STATE["tracks"],
-            threats=STATE["threats"],
-            assets=STATE["assets"],
-            zones=STATE["zones"],
-            prev_tracks=AI_ML_PREV_TRACKS,
-            dt=_AI_TACTICAL_INTERVAL,
-        )
-        AI_ML_PREDICTIONS.clear()
-        AI_ML_PREDICTIONS.update(ml_preds)
-        AI_ML_PREV_TRACKS.clear()
-        AI_ML_PREV_TRACKS.update({k: dict(v) for k, v in STATE["tracks"].items()})
-
-    # ROE: engagement advisories
-    roe_advs = ai_roe.evaluate_all(
-        tracks=STATE["tracks"],
-        threats=STATE["threats"],
-        zones=STATE["zones"],
-        assets=STATE["assets"],
-        coord_attacks=coord_attacks,
-    )
-    AI_ROE_ADVISORIES.clear()
-    AI_ROE_ADVISORIES.extend(roe_advs)
-
+    asyncio.create_task(_ai_tactical_background_task())
     return True
 
 
