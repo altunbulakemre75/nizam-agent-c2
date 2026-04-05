@@ -100,8 +100,10 @@ def translate_track_update(payload: Dict[str, Any], origin_lat: float, origin_lo
     """
     track.update payload → cop.track payload.
 
-    Adds lat/lon converted from kinematics.range_m + kinematics.az_deg.
-    Falls back to origin coords if kinematics are missing.
+    Accepts either:
+      - Direct lat/lon in payload (real sensor adapters)
+      - kinematics.range_m + kinematics.az_deg (simulated agents, polar→WGS-84)
+    Falls back to origin coords if neither is present.
     """
     gid = (
         payload.get("global_track_id")
@@ -114,7 +116,13 @@ def translate_track_update(payload: Dict[str, Any], origin_lat: float, origin_lo
     range_m: Optional[float] = kin.get("range_m")
     az_deg: Optional[float] = kin.get("az_deg")
 
-    if range_m is not None and az_deg is not None:
+    # Real sensor adapters provide lat/lon directly — prefer these
+    direct_lat = payload.get("lat")
+    direct_lon = payload.get("lon")
+
+    if direct_lat is not None and direct_lon is not None:
+        lat, lon = float(direct_lat), float(direct_lon)
+    elif range_m is not None and az_deg is not None:
         lat, lon = polar_to_latlon(float(range_m), float(az_deg), origin_lat, origin_lon)
     else:
         lat, lon = origin_lat, origin_lon
