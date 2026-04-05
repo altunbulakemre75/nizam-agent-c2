@@ -24,7 +24,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import queue
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -178,6 +180,93 @@ def translate_threat_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Worker pool (decouples stdin reader from HTTP POST)
+# ---------------------------------------------------------------------------
+#
+# Rationale: a naive synchronous POST loop blocks the stdin reader whenever
+# the COP server is slow (heavy AI tick, WebSocket fan-out, etc.). Upstream
+# pipeline processes then block writing to the pipe and the whole chain
+# deadlocks. We fix this by putting a bounded in-memory queue between the
+# stdin reader and a pool of HTTP worker threads, with a drop-oldest policy
+# when the queue is full so the reader NEVER blocks on the network.
+
+class _Metrics:
+    """Thread-safe counters shared between reader and workers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.sent = 0
+        self.failed = 0
+        self.dropped = 0
+        self.skipped = 0
+
+    def inc(self, field: str, n: int = 1) -> None:
+        with self._lock:
+            setattr(self, field, getattr(self, field) + n)
+
+    def snapshot(self) -> Dict[str, int]:
+        with self._lock:
+            return {
+                "sent": self.sent,
+                "failed": self.failed,
+                "dropped": self.dropped,
+                "skipped": self.skipped,
+            }
+
+
+_STOP_SENTINEL: Dict[str, Any] = {"__stop__": True}
+
+
+def _worker_loop(
+    q: "queue.Queue[Dict[str, Any]]",
+    ingest_url: str,
+    metrics: _Metrics,
+    retry_delay: float,
+) -> None:
+    """Pull bodies off the queue and POST them until sentinel is received."""
+    while True:
+        body = q.get()
+        try:
+            if body.get("__stop__"):
+                return
+            ok = post_json(ingest_url, body, timeout=3.0)
+            if ok:
+                metrics.inc("sent")
+            else:
+                metrics.inc("failed")
+                # Soft backoff so we don't hammer a downed server; the bounded
+                # queue's drop-oldest policy handles the real pressure.
+                time.sleep(retry_delay)
+        finally:
+            q.task_done()
+
+
+def _enqueue_drop_oldest(
+    q: "queue.Queue[Dict[str, Any]]",
+    body: Dict[str, Any],
+    metrics: _Metrics,
+) -> None:
+    """
+    Non-blocking enqueue. If the queue is full, discard the oldest item so
+    the newest sensor state always reaches the COP. In a live operational
+    picture, newer data is strictly more valuable than stale data.
+    """
+    try:
+        q.put_nowait(body)
+    except queue.Full:
+        try:
+            q.get_nowait()
+            q.task_done()
+            metrics.inc("dropped")
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(body)
+        except queue.Full:
+            metrics.inc("dropped")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="NIZAM pipeline → COP bridge: reads track/threat events from stdin, POSTs to COP /ingest"
@@ -185,15 +274,20 @@ def main() -> None:
     ap.add_argument("--cop_url", default="http://127.0.0.1:8100", help="COP server base URL")
     ap.add_argument("--origin_lat", type=float, default=41.015, help="Sensor origin latitude (WGS-84)")
     ap.add_argument("--origin_lon", type=float, default=28.979, help="Sensor origin longitude (WGS-84)")
-    ap.add_argument("--retry_delay", type=float, default=0.5, help="Seconds to wait before retrying a failed POST")
+    ap.add_argument("--retry_delay", type=float, default=0.5, help="Seconds to wait after a failed POST")
     ap.add_argument("--passthrough", action="store_true", help="Echo each input line to stdout (for chaining)")
     ap.add_argument("--orchestrator_url", default="http://127.0.0.1:8200", help="Orchestrator base URL")
     ap.add_argument("--log_out", default=None, help="Save all COP ingest events to this JSONL file for replay")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="Number of HTTP worker threads (parallel POSTs to /ingest)")
+    ap.add_argument("--queue_size", type=int, default=1000,
+                    help="Bounded outbound queue size (drops oldest on overflow)")
     args = ap.parse_args()
 
     ingest_url = args.cop_url.rstrip("/") + "/ingest"
     print(f"[cop_publisher] Starting. Ingesting to: {ingest_url}", file=sys.stderr)
     print(f"[cop_publisher] Origin: lat={args.origin_lat}, lon={args.origin_lon}", file=sys.stderr)
+    print(f"[cop_publisher] Workers: {args.workers}  Queue size: {args.queue_size}", file=sys.stderr)
 
     log_file = None
     if args.log_out:
@@ -210,9 +304,24 @@ def main() -> None:
     )
     hb.start()
 
-    sent = 0
-    skipped = 0
+    # ── Worker pool setup ────────────────────────────────────────────────
+    metrics = _Metrics()
+    out_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=args.queue_size)
+    workers: list[threading.Thread] = []
+    for i in range(max(1, args.workers)):
+        t = threading.Thread(
+            target=_worker_loop,
+            args=(out_q, ingest_url, metrics, args.retry_delay),
+            name=f"cop-pub-worker-{i}",
+            daemon=True,
+        )
+        t.start()
+        workers.append(t)
 
+    # ── Reader loop (main thread) ────────────────────────────────────────
+    # The reader NEVER blocks on network I/O. It only parses JSON, translates
+    # to COP payload, and enqueues. This keeps the stdin pipe drained so
+    # upstream pipeline stages never back up.
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
         if not raw_line:
@@ -225,7 +334,7 @@ def main() -> None:
             ev = json.loads(raw_line)
         except json.JSONDecodeError as e:
             print(f"[cop_publisher] JSON parse error: {e} | line: {raw_line[:80]}", file=sys.stderr)
-            skipped += 1
+            metrics.inc("skipped")
             continue
 
         event_type: str = ev.get("event_type", "")
@@ -247,14 +356,36 @@ def main() -> None:
             log_file.write(json.dumps(body, ensure_ascii=False) + "\n")
             log_file.flush()
 
-        ok = post_json(ingest_url, body, timeout=3.0)
-        if ok:
-            sent += 1
-            if sent % 50 == 0:
-                print(f"[cop_publisher] {sent} events sent.", file=sys.stderr)
-                hb.report(events_sent=sent, skipped=skipped)
-        else:
-            time.sleep(args.retry_delay)
+        _enqueue_drop_oldest(out_q, body, metrics)
+
+        snap = metrics.snapshot()
+        total = snap["sent"] + snap["failed"]
+        if total and total % 50 == 0:
+            print(
+                f"[cop_publisher] sent={snap['sent']} failed={snap['failed']} "
+                f"dropped={snap['dropped']} skipped={snap['skipped']} "
+                f"qsize={out_q.qsize()}",
+                file=sys.stderr,
+            )
+            hb.report(**snap, qsize=out_q.qsize())
+
+    # ── Drain + shutdown ─────────────────────────────────────────────────
+    print("[cop_publisher] stdin closed, draining queue...", file=sys.stderr)
+    out_q.join()
+    for _ in workers:
+        out_q.put(_STOP_SENTINEL)
+    for t in workers:
+        t.join(timeout=2.0)
+
+    final = metrics.snapshot()
+    print(
+        f"[cop_publisher] final sent={final['sent']} failed={final['failed']} "
+        f"dropped={final['dropped']} skipped={final['skipped']}",
+        file=sys.stderr,
+    )
+
+    if log_file:
+        log_file.close()
 
 
 if __name__ == "__main__":
