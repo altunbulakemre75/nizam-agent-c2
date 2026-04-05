@@ -156,6 +156,60 @@ CLIENTS_LOCK = asyncio.Lock()
 STATE_LOCK   = asyncio.Lock()
 
 
+# ── Metrics ───────────────────────────────────────────────────────────────────
+#
+# Lightweight runtime counters / timings so the next performance problem can
+# be diagnosed by looking at numbers instead of guessing. Kept in-process:
+# this is a single-server system, no Prometheus dep.
+
+import time as _time_mod
+
+_METRICS_START_TS: float = _time_mod.time()
+
+METRICS: Dict[str, Any] = {
+    # Ingest counters (incremented inside /ingest)
+    "ingest_total":         0,
+    "ingest_by_type":       {},          # {"cop.track": N, "cop.threat": N, ...}
+    "ingest_bad_request":   0,
+    # Tactical engine counters
+    "tactical_scheduled":   0,           # times _schedule_ai_tactical was asked
+    "tactical_rate_skipped": 0,           # skipped because < _AI_TACTICAL_INTERVAL
+    "tactical_ran":         0,           # background task actually ran
+    "tactical_overlap_skipped": 0,       # background task skipped because prev still in flight
+    "tactical_failed":      0,           # executor raised
+    "tactical_last_ms":     0.0,         # duration of the most recent run
+    "tactical_max_ms":      0.0,         # worst-case seen so far
+    "tactical_recent_ms":   [],          # rolling window of last 32 run durations
+    # WebSocket fan-out
+    "ws_clients":           0,           # current count
+    "ws_broadcasts":        0,           # total broadcast calls
+    "ws_messages_sent":     0,           # total individual ws send_json calls
+    "ws_send_failures":     0,           # dead clients dropped
+}
+
+_TACTICAL_RECENT_MAX = 32
+
+
+def _metrics_record_tactical_duration(ms: float) -> None:
+    """Push a tactical run duration into the rolling window and update max."""
+    METRICS["tactical_last_ms"] = round(ms, 2)
+    if ms > METRICS["tactical_max_ms"]:
+        METRICS["tactical_max_ms"] = round(ms, 2)
+    recent: List[float] = METRICS["tactical_recent_ms"]
+    recent.append(round(ms, 2))
+    if len(recent) > _TACTICAL_RECENT_MAX:
+        del recent[: len(recent) - _TACTICAL_RECENT_MAX]
+
+
+def _metrics_percentile(values: List[float], pct: float) -> float:
+    """Nearest-rank percentile. Returns 0.0 on empty input."""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    k = max(0, min(len(s) - 1, int(round((pct / 100.0) * (len(s) - 1)))))
+    return s[k]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _utc_now_iso() -> str:
@@ -175,14 +229,21 @@ def _append_event_tail(ev: Dict[str, Any]) -> None:
 
 async def broadcast(ev: Dict[str, Any]) -> None:
     dead: List[WebSocket] = []
+    sent = 0
     async with CLIENTS_LOCK:
         for ws in list(CLIENTS):
             try:
                 await ws.send_json(ev)
+                sent += 1
             except Exception:
                 dead.append(ws)
         for ws in dead:
             CLIENTS.discard(ws)
+    METRICS["ws_broadcasts"]    += 1
+    METRICS["ws_messages_sent"] += sent
+    if dead:
+        METRICS["ws_send_failures"] += len(dead)
+    METRICS["ws_clients"] = len(CLIENTS)
 
 
 def _point_in_polygon(lat: float, lon: float, coords: List) -> bool:
@@ -809,7 +870,11 @@ async def ingest(req: Request):
     payload    = body.get("payload")
 
     if not event_type or payload is None:
+        METRICS["ingest_bad_request"] += 1
         return JSONResponse({"ok": False, "error": "missing event_type/payload"}, status_code=400)
+
+    METRICS["ingest_total"] += 1
+    METRICS["ingest_by_type"][event_type] = METRICS["ingest_by_type"].get(event_type, 0) + 1
 
     if isinstance(payload, dict) and "server_time" not in payload:
         payload["server_time"] = _utc_now_iso()
@@ -1019,6 +1084,7 @@ async def _ai_tactical_background_task() -> None:
     # Drop this tick if another one is already in flight. Under heavy
     # load this is the right behaviour: no pile-up, always freshest data.
     if _ai_tactical_bg_lock.locked():
+        METRICS["tactical_overlap_skipped"] += 1
         return
     async with _ai_tactical_bg_lock:
         # 1) Snapshot state under STATE_LOCK (brief hold, shallow copies).
@@ -1031,6 +1097,7 @@ async def _ai_tactical_background_task() -> None:
         # 2) Run the heavy compute in a thread pool executor so the event
         #    loop stays free to handle /ingest and WebSocket traffic.
         loop = asyncio.get_running_loop()
+        t_start = _time_mod.perf_counter()
         try:
             result = await loop.run_in_executor(
                 None,
@@ -1038,8 +1105,14 @@ async def _ai_tactical_background_task() -> None:
                 tracks_snap, threats_snap, assets_snap, zones_snap,
             )
         except Exception as exc:
+            METRICS["tactical_failed"] += 1
             log.warning("[cop] tactical compute failed: %s", exc)
             return
+        finally:
+            _metrics_record_tactical_duration(
+                (_time_mod.perf_counter() - t_start) * 1000.0
+            )
+        METRICS["tactical_ran"] += 1
 
         # 3) Apply results to AI_* globals. We're back on the event loop
         #    thread here, so writes are serialized w.r.t. /ingest handlers.
@@ -1099,8 +1172,10 @@ def _schedule_ai_tactical() -> bool:
     """
     import time as _time
     global _ai_tactical_last
+    METRICS["tactical_scheduled"] += 1
     now = _time.time()
     if now - _ai_tactical_last < _AI_TACTICAL_INTERVAL:
+        METRICS["tactical_rate_skipped"] += 1
         return False
     _ai_tactical_last = now
     asyncio.create_task(_ai_tactical_background_task())
@@ -1275,6 +1350,56 @@ async def api_ai_ml_train():
         return JSONResponse({"ok": True, "result": result})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/metrics")
+async def api_metrics():
+    """
+    Runtime performance metrics.
+
+    Exposes ingest counters, tactical engine timings (p50/p95/max),
+    WebSocket fan-out stats. Intended for diagnosing performance
+    regressions and for the CI smoke test to assert sane numbers.
+
+    Not Prometheus format — just JSON. Single-server system, lightweight.
+    """
+    recent: List[float] = list(METRICS["tactical_recent_ms"])
+    uptime_s = _time_mod.time() - _METRICS_START_TS
+    ingest_total = METRICS["ingest_total"]
+    return JSONResponse({
+        "uptime_s": round(uptime_s, 1),
+        "ingest": {
+            "total":        ingest_total,
+            "per_sec":      round(ingest_total / uptime_s, 2) if uptime_s > 0 else 0.0,
+            "by_type":      dict(METRICS["ingest_by_type"]),
+            "bad_request":  METRICS["ingest_bad_request"],
+        },
+        "tactical": {
+            "scheduled":        METRICS["tactical_scheduled"],
+            "ran":              METRICS["tactical_ran"],
+            "rate_skipped":     METRICS["tactical_rate_skipped"],
+            "overlap_skipped":  METRICS["tactical_overlap_skipped"],
+            "failed":           METRICS["tactical_failed"],
+            "last_ms":          METRICS["tactical_last_ms"],
+            "max_ms":           METRICS["tactical_max_ms"],
+            "p50_ms":           round(_metrics_percentile(recent, 50), 2),
+            "p95_ms":           round(_metrics_percentile(recent, 95), 2),
+            "sample_count":     len(recent),
+        },
+        "websocket": {
+            "clients":         len(CLIENTS),
+            "broadcasts":      METRICS["ws_broadcasts"],
+            "messages_sent":   METRICS["ws_messages_sent"],
+            "send_failures":   METRICS["ws_send_failures"],
+        },
+        "state": {
+            "tracks":  len(STATE["tracks"]),
+            "threats": len(STATE["threats"]),
+            "assets":  len(STATE["assets"]),
+            "zones":   len(STATE["zones"]),
+            "tasks":   len(STATE["tasks"]),
+        },
+    })
 
 
 @app.get("/api/ai/status")

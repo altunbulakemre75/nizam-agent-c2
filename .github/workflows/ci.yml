@@ -34,3 +34,29 @@ jobs:
         run: |
           python -c "from ai import anomaly, predictor, roe, tactical, timeline, zone_breach, coordinated_attack, ml_threat"
           python -c "from replay import recorder, player"
+
+  smoke:
+    name: End-to-end smoke test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scikit-learn joblib
+          pip install -r requirements.txt
+
+      - name: Run smoke test
+        # Boots the COP server, runs a 12s single_drone pipeline end-to-end,
+        # and asserts on /api/metrics (ingest_total > 0, tactical.ran > 0,
+        # tactical.failed == 0, no overlap under light load). Catches
+        # regressions the unit tests cannot — e.g. a broken uvicorn path,
+        # a hang in cop_publisher's worker pool, or a dead /ingest route.
+        run: python scripts/smoke_test.py --duration 12
