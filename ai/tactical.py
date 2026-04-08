@@ -317,6 +317,37 @@ def generate_recommendations(
 
     # Sort by priority (1 = highest)
     recs.sort(key=lambda r: r["priority"])
+
+    # Decision lineage: record each recommendation against its target track(s).
+    try:
+        from ai import lineage
+        for rec in recs:
+            tids: List[str] = []
+            if rec.get("track_id"):
+                tids.append(rec["track_id"])
+            if rec.get("track_ids"):
+                tids.extend(rec["track_ids"])
+            for tid in tids:
+                lineage.record(
+                    track_id=tid,
+                    stage="tactical",
+                    summary=f"{rec['type']} (P{rec['priority']}) — {rec.get('message', '')[:120]}",
+                    inputs={
+                        "threat_level": threats.get(tid, {}).get("threat_level"),
+                        "threat_score": threats.get(tid, {}).get("score"),
+                    },
+                    outputs={
+                        "type": rec["type"],
+                        "priority": rec["priority"],
+                        "asset_id": rec.get("asset_id"),
+                        "zone_id": rec.get("zone_id"),
+                        "distance_m": rec.get("distance_m"),
+                    },
+                    rule=f"tactical.{rec['type'].lower()}",
+                )
+    except Exception:
+        pass
+
     return recs
 
 

@@ -350,13 +350,39 @@ def predict_track(
     proba = _model.predict_proba(X)[0]
     predicted_class = int(np.argmax(proba))
 
-    return {
+    result = {
         "ml_level": LABEL_NAMES[predicted_class],
         "ml_probability": round(float(proba[predicted_class]), 3),
         "ml_probabilities": {
             LABEL_NAMES[i]: round(float(p), 3) for i, p in enumerate(proba)
         },
     }
+
+    # Decision lineage: record what the model saw and what it decided.
+    try:
+        from ai import lineage
+        track_id = track.get("id") or track.get("global_track_id")
+        if track_id:
+            top_features = {
+                FEATURE_NAMES[i]: round(float(features[i]), 3)
+                for i in range(min(len(FEATURE_NAMES), len(features)))
+            }
+            lineage.record(
+                track_id=track_id,
+                stage="ml_threat",
+                summary=f"RandomForest → {result['ml_level']} ({result['ml_probability']:.2f})",
+                inputs={"features": top_features},
+                outputs={
+                    "ml_level": result["ml_level"],
+                    "ml_probability": result["ml_probability"],
+                    "ml_probabilities": result["ml_probabilities"],
+                },
+                rule="RandomForestClassifier",
+            )
+    except Exception:
+        pass
+
+    return result
 
 
 def predict_batch(

@@ -266,6 +266,33 @@ def evaluate_track(
         "time": time.time(),
     }
 
+    # Decision lineage: record the ROE advisory chain.
+    try:
+        from ai import lineage
+        lineage.record(
+            track_id=track_id,
+            stage="roe",
+            summary=f"ROE → {engagement} ({urgency}) — {', '.join(reasons[:2])}",
+            inputs={
+                "threat_level": level,
+                "threat_score": score,
+                "intent": intent,
+                "in_kill_zone": in_kill_zone,
+                "in_restricted_zone": in_restricted_zone,
+                "is_coordinated": is_coordinated,
+                "nearest_asset_dist_m": round(min_asset_dist) if min_asset_dist < float("inf") else None,
+            },
+            outputs={
+                "engagement": engagement,
+                "engagement_level": advisory["engagement_level"],
+                "urgency": urgency,
+                "reasons": reasons,
+            },
+            rule="roe.evaluate_track",
+        )
+    except Exception:
+        pass
+
     return advisory
 
 

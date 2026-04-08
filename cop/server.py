@@ -48,6 +48,7 @@ from ai import timeline as ai_timeline
 from ai import aar as ai_aar
 from ai import roe as ai_roe
 from ai import ml_threat as ai_ml
+from ai import lineage as ai_lineage
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -570,6 +571,24 @@ async def _auto_task(threat_id: str, threat_payload: Dict[str, Any]) -> None:
     asyncio.create_task(_db_write(_persist_task(task)))
     ai_aar.record_task(task)
 
+    # Decision lineage: record the auto-task creation against the track.
+    try:
+        ai_lineage.record(
+            track_id=threat_id,
+            stage="task_proposer",
+            summary=f"Auto-proposed {action} (intent={intent}, level={level})",
+            inputs={
+                "threat_level": level,
+                "intent": intent,
+                "score": threat_payload.get("score", 0),
+                "tti_s": threat_payload.get("tti_s"),
+            },
+            outputs={"task_id": task["id"], "action": action, "status": "PENDING"},
+            rule=f"auto_task.{intent}→{action}",
+        )
+    except Exception:
+        pass
+
 
 def _make_snapshot_payload() -> Dict[str, Any]:
     return {
@@ -805,6 +824,19 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
         },
     })
 
+    # Decision lineage: record the fire control decision.
+    try:
+        ai_lineage.record(
+            track_id=target_id,
+            stage="fire_control",
+            summary=f"ENGAGE approved → effector launched (flight time {_EFFECTOR_IMPACT_DELAY_S}s)",
+            inputs={"task_id": task_id, "lat": lat, "lon": lon},
+            outputs={"action": "effector_impact", "delay_s": _EFFECTOR_IMPACT_DELAY_S},
+            rule="fire_control.engage",
+        )
+    except Exception:
+        pass
+
     # 2) Simulate weapon flight time.
     await asyncio.sleep(_EFFECTOR_IMPACT_DELAY_S)
 
@@ -932,6 +964,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_timeline.reset()
         ai_aar.reset()
         ai_roe.reset()
+        ai_lineage.clear()
         ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
@@ -987,6 +1020,26 @@ async def ingest(req: Request):
                 # AAR: record track
                 ai_aar.record_track(str(track_id), len(STATE["tracks"]))
 
+                # Decision lineage: first sighting of this track.
+                try:
+                    sensors = payload.get("supporting_sensors", [])
+                    ai_lineage.record(
+                        track_id=str(track_id),
+                        stage="ingest",
+                        summary=f"Track update — sensors: {', '.join(sensors) if sensors else 'fuser'}",
+                        inputs={
+                            "lat": lat, "lon": lon,
+                            "speed": payload.get("speed"),
+                            "heading": payload.get("heading"),
+                            "classification": payload.get("classification"),
+                            "sensors": sensors,
+                        },
+                        outputs={"state": "tracked"},
+                        rule="cop.ingest",
+                    )
+                except Exception:
+                    pass
+
             asyncio.create_task(_db_write(_persist_track(payload)))
 
         elif event_type == "cop.threat":
@@ -1011,6 +1064,27 @@ async def ingest(req: Request):
                     level=str(payload.get("threat_level", "LOW")),
                     intent=str(payload.get("intent", "unknown")),
                 )
+                # Decision lineage: threat assessment received from fuser/agent.
+                try:
+                    t_level = str(payload.get("threat_level", "LOW"))
+                    t_score = payload.get("score", payload.get("threat_score", 0))
+                    t_intent = str(payload.get("intent", "unknown"))
+                    ai_lineage.record(
+                        track_id=str(threat_id),
+                        stage="threat_assess",
+                        summary=f"Threat → {t_level} (score={t_score}, intent={t_intent})",
+                        inputs={
+                            "threat_level": t_level,
+                            "score": t_score,
+                            "intent": t_intent,
+                            "tti_s": payload.get("tti_s"),
+                            "classification": payload.get("classification"),
+                        },
+                        outputs={"threat_level": t_level, "score": t_score},
+                        rule="cop.threat_ingest",
+                    )
+                except Exception:
+                    pass
             asyncio.create_task(_db_write(_persist_threat(payload)))
 
         elif event_type == "cop.snapshot":
@@ -1295,6 +1369,22 @@ async def api_ai_recommendations():
         "count": len(AI_RECOMMENDATIONS),
         "recommendations": AI_RECOMMENDATIONS,
     })
+
+
+@app.get("/api/ai/lineage/{track_id}")
+async def api_ai_lineage(track_id: str):
+    """Return the full decision lineage chain for a track."""
+    chain = ai_lineage.get_chain(track_id)
+    summary = ai_lineage.get_summary(track_id)
+    return JSONResponse({"track_id": track_id, "summary": summary, "chain": chain})
+
+
+@app.get("/api/ai/lineage")
+async def api_ai_lineage_all():
+    """Return lineage stats and all tracked IDs."""
+    stats = ai_lineage.stats()
+    track_ids = ai_lineage.get_all_track_ids()
+    return JSONResponse({"stats": stats, "track_ids": track_ids})
 
 
 @app.get("/api/ai/briefing")

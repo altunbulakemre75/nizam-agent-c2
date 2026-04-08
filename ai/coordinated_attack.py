@@ -366,6 +366,39 @@ def detect_coordinated_attacks(
     sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
     warnings.sort(key=lambda w: (w["time_to_convergence_s"],
                                   sev_order.get(w["severity"], 9)))
+
+    # Decision lineage: every participating track gets a record pointing at
+    # the coordinated-attack pattern so threat provenance can be reconstructed.
+    if warnings:
+        try:
+            from ai import lineage
+            for w in warnings:
+                for tid in w.get("track_ids", []):
+                    lineage.record(
+                        track_id=tid,
+                        stage="coord_attack",
+                        summary=(
+                            f"{w['subtype']} ({w['severity']}) — "
+                            f"{w['count']} tracks, {w['time_to_convergence_s']}s to convergence"
+                        ),
+                        inputs={
+                            "participants": w["track_ids"],
+                            "angular_spread_deg": w.get("angular_spread_deg"),
+                            "target_type": w.get("target_type"),
+                            "target_id": w.get("target_id"),
+                        },
+                        outputs={
+                            "subtype": w["subtype"],
+                            "severity": w["severity"],
+                            "convergence_lat": w.get("convergence_lat"),
+                            "convergence_lon": w.get("convergence_lon"),
+                            "time_to_convergence_s": w.get("time_to_convergence_s"),
+                        },
+                        rule=f"coord_attack.{w['subtype'].lower()}",
+                    )
+        except Exception:
+            pass
+
     return warnings
 
 

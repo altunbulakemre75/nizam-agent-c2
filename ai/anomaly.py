@@ -144,6 +144,22 @@ def check_track(track_id: str, lat: float, lon: float,
     st.prev_intent = intent
     st.prev_t = now
 
+    # Decision lineage: record each anomaly against the offending track.
+    if anomalies:
+        try:
+            from ai import lineage
+            for a in anomalies:
+                lineage.record(
+                    track_id=track_id,
+                    stage="anomaly",
+                    summary=f"{a['type']} ({a['severity']}) — {a['detail']}",
+                    inputs={"speed": speed, "heading": heading, "intent": intent},
+                    outputs={"type": a["type"], "severity": a["severity"]},
+                    rule=f"anomaly.{a['type'].lower()}",
+                )
+        except Exception:
+            pass
+
     return anomalies
 
 
@@ -207,6 +223,26 @@ def detect_swarms(tracks: Dict[str, Dict]) -> List[Dict[str, Any]]:
                 "lon": round(avg_lon, 6),
                 "time": time.time(),
             })
+
+    # Decision lineage: every track in a swarm gets a record pointing at the
+    # group, so "why is this track a threat?" can trace to the swarm membership.
+    if swarm_anomalies:
+        try:
+            from ai import lineage
+            for swarm in swarm_anomalies:
+                detail = swarm["detail"]
+                count = swarm["count"]
+                for tid in swarm["track_ids"]:
+                    lineage.record(
+                        track_id=tid,
+                        stage="anomaly",
+                        summary=f"SWARM member ({count} tracks) — {detail}",
+                        inputs={"group_size": count, "group": swarm["track_ids"]},
+                        outputs={"type": "SWARM_DETECTED", "severity": "CRITICAL"},
+                        rule="anomaly.swarm_cluster",
+                    )
+        except Exception:
+            pass
 
     return swarm_anomalies
 

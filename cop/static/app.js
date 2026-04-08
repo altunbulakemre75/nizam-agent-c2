@@ -187,6 +187,7 @@ function upsertTrack(track) {
     const m=L.marker(ll,{icon}).addTo(UI.map);
     m.bindTooltip(tip,{permanent:false,direction:"top",opacity:0.95});
     m.on("click", () => openTimeline(id));
+    m.on("contextmenu", (e) => { L.DomEvent.preventDefault(e); openLineage(id); });
     UI.trackMarkers.set(id,m);
   } else { ex.setLatLng(ll); ex.setIcon(icon); ex.setTooltipContent(tip); }
   upsertTrail(track, threat);
@@ -1416,6 +1417,109 @@ function openTimeline(trackId) {
   fetchAndDrawTimeline(trackId);
 }
 
+/* ── Decision Lineage Modal ─────────────────────────────── */
+let lineageModalEl = null;
+
+function mountLineageModal() {
+  lineageModalEl = el("div", { id:"lineage-modal", style:{
+    display:"none", position:"fixed", top:"50%", left:"50%",
+    transform:"translate(-50%,-50%)", zIndex:"10002",
+    background:"rgba(10,10,25,0.96)", color:"white",
+    padding:"16px 20px", borderRadius:"12px",
+    fontFamily:"ui-monospace,SFMono-Regular,monospace", fontSize:"11px",
+    border:"1px solid rgba(100,255,150,0.4)",
+    boxShadow:"0 8px 40px rgba(0,0,0,0.8)",
+    minWidth:"520px", maxWidth:"680px", maxHeight:"70vh",
+    overflowY:"auto",
+  }});
+  lineageModalEl.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <b id="lin-title" style="color:#4fc3f7;font-size:13px">Decision Lineage</b>
+      <span id="lin-close" style="cursor:pointer;opacity:.6;font-size:16px">\u2715</span>
+    </div>
+    <div id="lin-body" style="line-height:1.6"></div>
+  `;
+  document.body.appendChild(lineageModalEl);
+  document.getElementById("lin-close").addEventListener("click", () => {
+    lineageModalEl.style.display = "none";
+  });
+}
+
+const _stageColors = {
+  ingest:       "#78909c",
+  threat_assess:"#ff9800",
+  ml_threat:    "#e040fb",
+  anomaly:      "#f44336",
+  coord_attack: "#ff1744",
+  tactical:     "#ffeb3b",
+  roe:          "#4fc3f7",
+  task_proposer:"#66bb6a",
+  fire_control: "#ff5252",
+};
+
+function _stageIcon(stage) {
+  const icons = {
+    ingest:"\u{1F4E1}", threat_assess:"\u26A0\uFE0F", ml_threat:"\u{1F9E0}",
+    anomaly:"\u{1F6A8}", coord_attack:"\u{1F3AF}", tactical:"\u2694\uFE0F",
+    roe:"\u{1F6E1}\uFE0F", task_proposer:"\u{1F4CB}", fire_control:"\u{1F4A5}",
+  };
+  return icons[stage] || "\u{1F50D}";
+}
+
+async function openLineage(trackId) {
+  if(!lineageModalEl) return;
+  document.getElementById("lin-title").textContent = `Decision Lineage: ${trackId}`;
+  document.getElementById("lin-body").innerHTML = '<span style="opacity:.5">Loading...</span>';
+  lineageModalEl.style.display = "block";
+
+  try {
+    const resp = await fetch(`/api/ai/lineage/${encodeURIComponent(trackId)}`).then(r=>r.json());
+    const chain = resp.chain || [];
+    if(chain.length === 0) {
+      document.getElementById("lin-body").innerHTML = '<span style="opacity:.5">No lineage records for this track.</span>';
+      return;
+    }
+
+    // Group by stage for a cleaner display, but show chronologically
+    let html = '<div style="border-left:2px solid rgba(100,255,150,0.3);padding-left:12px">';
+    for(const rec of chain) {
+      const color = _stageColors[rec.stage] || "#aaa";
+      const icon = _stageIcon(rec.stage);
+      const time = rec.timestamp ? rec.timestamp.split("T")[1]?.replace("Z","") || "" : "";
+      html += `<div style="margin-bottom:8px;padding:6px 8px;background:rgba(255,255,255,0.04);border-radius:6px;border-left:3px solid ${color}">`;
+      html += `<div style="display:flex;justify-content:space-between;align-items:center">`;
+      html += `<span>${icon} <b style="color:${color}">${rec.stage.toUpperCase()}</b></span>`;
+      html += `<span style="opacity:.4;font-size:9px">${time}</span>`;
+      html += `</div>`;
+      html += `<div style="margin-top:3px;opacity:.85">${_esc(rec.summary)}</div>`;
+
+      // Show key inputs/outputs compactly
+      const details = [];
+      if(rec.outputs && Object.keys(rec.outputs).length > 0) {
+        const pairs = Object.entries(rec.outputs)
+          .filter(([,v]) => v !== null && v !== undefined)
+          .slice(0, 5)
+          .map(([k,v]) => `<span style="color:${color}">${k}</span>=${typeof v === "object" ? JSON.stringify(v) : v}`);
+        if(pairs.length) details.push(pairs.join(" \u2502 "));
+      }
+      if(rec.rule) details.push(`<span style="opacity:.4">rule: ${_esc(rec.rule)}</span>`);
+      if(details.length) {
+        html += `<div style="margin-top:2px;font-size:10px;opacity:.7">${details.join(" \u2022 ")}</div>`;
+      }
+      html += `</div>`;
+    }
+    html += '</div>';
+    html += `<div style="margin-top:8px;opacity:.35;font-size:9px;text-align:right">${chain.length} decision records</div>`;
+    document.getElementById("lin-body").innerHTML = html;
+  } catch(e) {
+    document.getElementById("lin-body").innerHTML = `<span style="color:#f55">Error: ${e.message}</span>`;
+  }
+}
+
+function _esc(s) {
+  const d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML;
+}
+
 async function fetchAndDrawTimeline(trackId) {
   try {
     const resp = await fetch(`/api/ai/timeline?track_id=${encodeURIComponent(trackId)}`).then(r=>r.json());
@@ -2104,6 +2208,7 @@ function boot(){
   mountAnomalyPanel();
   mountTacticalPanel();
   mountTimelinePopup();
+  mountLineageModal();
   mountChatPanel();
   mountChatToggle();
   mountAARModal();
