@@ -21,6 +21,18 @@ function el(tag, attrs = {}, children = []) {
 function safeJsonParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
 /* ── Global state ───────────────────────────────────────── */
+// Multi-operator: my identity + shared state
+const MY_OPERATOR_ID = (() => {
+  let id = sessionStorage.getItem("nizam_operator_id");
+  if (!id) {
+    id = "OPS-" + Math.random().toString(36).slice(2,8).toUpperCase();
+    sessionStorage.setItem("nizam_operator_id", id);
+  }
+  return id;
+})();
+let OPERATORS_STATE = {};   // {operator_id: {joined_at, claimed_tracks}}
+let TRACK_CLAIMS    = {};   // {track_id: operator_id}
+
 const UI = {
   mode: "LIVE", ws: null, wsConnected: false,
   buffer: [], bufferMax: 1000,
@@ -187,7 +199,16 @@ function upsertTrack(track) {
     const m=L.marker(ll,{icon}).addTo(UI.map);
     m.bindTooltip(tip,{permanent:false,direction:"top",opacity:0.95});
     m.on("click", () => openTimeline(id));
-    m.on("contextmenu", (e) => { L.DomEvent.preventDefault(e); openLineage(id); });
+    m.on("contextmenu", (e) => {
+      L.DomEvent.preventDefault(e);
+      const owner = TRACK_CLAIMS[id];
+      if (owner && owner !== MY_OPERATOR_ID) {
+        openLineage(id);  // locked by someone else → just show lineage
+      } else {
+        // Show mini context menu: lineage OR claim/release
+        showTrackContextMenu(e.originalEvent, id);
+      }
+    });
     UI.trackMarkers.set(id,m);
   } else { ex.setLatLng(ll); ex.setIcon(icon); ex.setTooltipContent(tip); }
   upsertTrail(track, threat);
@@ -395,6 +416,18 @@ function applySnapshot(payload) {
   (payload?.waypoints ?? []).forEach(w => upsertWaypoint(w));
   (payload?.tasks     ?? []).forEach(t => pushTask(t));
 
+  // Multi-operator state (if present in the snapshot)
+  if (payload?.operators) {
+    OPERATORS_STATE = {};
+    payload.operators.forEach(op => { OPERATORS_STATE[op.operator_id] = op; });
+  }
+  if (payload?.claims) {
+    TRACK_CLAIMS = {...(payload.claims)};
+    // Re-render any task cards that may be locked
+    refreshTaskClaimUI();
+  }
+  renderOperatorPanel();
+
   // AI state (if present in the snapshot payload)
   if (payload && (payload.predictions || payload.recommendations
       || payload.roe_advisories || payload.ml_predictions)) {
@@ -498,16 +531,22 @@ function _renderTaskPanel() {
     const c=ACTION_COLORS[t.action]??"#aaa";
     const tti=t.tti_s!=null?` TTI:${t.tti_s}s`:"";
     const intent=INTENT_META[t.intent]?.label??t.intent??"?";
-    html+=`<div style="border-left:3px solid ${c};padding-left:6px;margin-bottom:6px">
+    const owner=TRACK_CLAIMS[t.track_id];
+    const locked=owner && owner!==MY_OPERATOR_ID;
+    const claimBadge=owner?`<span style="font-size:9px;color:${_opColor(owner)};margin-left:4px">${locked?'🔒':''} ${owner}</span>`:"";
+    html+=`<div data-task-id="${t.id}" data-track-id="${t.track_id||''}"
+      style="border-left:3px solid ${c};padding-left:6px;margin-bottom:6px">
       <span style="color:${c};font-weight:bold">${t.action}</span>
-      &nbsp;<b>${t.track_id}</b><br>
+      &nbsp;<b>${t.track_id}</b>${claimBadge}<br>
       <span style="opacity:.7">${t.threat_level} | ${intent}${tti} | score:${t.score}</span><br>
-      <button data-id="${t.id}" data-act="approve"
-        style="background:#27ae60;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;margin-right:4px;font-size:10px">
+      <button data-id="${t.id}" data-act="approve" data-action="approve"
+        ${locked?"disabled":""} title="${locked?`Claimed by ${owner}`:''}"
+        style="background:#27ae60;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:${locked?'not-allowed':'pointer'};margin-right:4px;font-size:10px;opacity:${locked?'0.35':'1'}">
         Approve
       </button>
-      <button data-id="${t.id}" data-act="reject"
-        style="background:#e74c3c;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px">
+      <button data-id="${t.id}" data-act="reject" data-action="reject"
+        ${locked?"disabled":""} title="${locked?`Claimed by ${owner}`:''}"
+        style="background:#e74c3c;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:${locked?'not-allowed':'pointer'};font-size:10px;opacity:${locked?'0.35':'1'}">
         Reject
       </button>
     </div>`;
@@ -517,9 +556,11 @@ function _renderTaskPanel() {
   // Attach button handlers
   taskPanelEl.querySelectorAll("button[data-id]").forEach(btn => {
     btn.addEventListener("click", async () => {
+      if(btn.disabled) return;
       const tid=btn.dataset.id, act=btn.dataset.act;
       await fetch(`/api/tasks/${tid}/${act}`,{method:"POST",
-        headers:{"Content-Type":"application/json"},body:JSON.stringify({operator:"operator"})});
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({operator: MY_OPERATOR_ID, operator_id: MY_OPERATOR_ID})});
     });
   });
 }
@@ -659,8 +700,12 @@ const CopEngine = (() => {
       case "cop.asset_removed":   return removeAsset(ev.payload?.id);
       case "cop.task":            return pushTask(ev.payload);
       case "cop.task_update":     return updateTask(ev.payload);
-      case "cop.effector_impact": return playEffectorImpact(ev.payload);
-      case "cop.track_removed":   return removeTrack(ev.payload?.id);
+      case "cop.effector_impact":  return playEffectorImpact(ev.payload);
+      case "cop.track_removed":    return removeTrack(ev.payload?.id);
+      case "cop.operator_joined":  return applyOperatorJoined(ev.payload);
+      case "cop.operator_left":    return applyOperatorLeft(ev.payload);
+      case "cop.track_claimed":    return applyTrackClaimed(ev.payload);
+      case "cop.track_released":   return applyTrackReleased(ev.payload);
       case "cop.waypoint":        return upsertWaypoint(ev.payload);
       case "cop.waypoint_removed":return removeWaypoint(ev.payload?.id);
       case "cop.waypoints_cleared":return clearWaypoints();
@@ -701,13 +746,13 @@ async function hardReset(){
 /* ── WebSocket ────────────────────────────────────────────── */
 function connectWS(){
   const proto=location.protocol==="https:"?"wss":"ws";
-  const url=`${proto}://${location.host}/ws`;
+  const url=`${proto}://${location.host}/ws?operator_id=${encodeURIComponent(MY_OPERATOR_ID)}`;
   setStatus(`WS: connecting ${url}`);
   let ws;
   try{ws=new WebSocket(url);}
   catch(e){setStatus(`WS: failed (${e})`);setTimeout(connectWS,1200);return;}
   UI.ws=ws;
-  ws.onopen =()=>{UI.wsConnected=true; setStatus("WS: connected (live)");};
+  ws.onopen =()=>{UI.wsConnected=true; setStatus(`WS: connected (live) · ${MY_OPERATOR_ID}`);};
   ws.onclose=()=>{UI.wsConnected=false;setStatus("WS: closed (reconnecting...)");setTimeout(connectWS,1200);};
   ws.onerror=()=>{};
   ws.onmessage=msg=>{const ev=safeJsonParse(msg.data);if(ev)CopEngine.onEvent(ev);};
@@ -1520,6 +1565,184 @@ function _esc(s) {
   const d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML;
 }
 
+/* ── Multi-operator ─────────────────────────────────────── */
+
+let operatorPanelEl = null;
+
+// Assign stable colors to operator IDs
+const _OP_COLORS = ["#4fc3f7","#a5d6a7","#ffcc80","#ef9a9a","#ce93d8","#80cbc4","#fff176"];
+const _opColorCache = {};
+function _opColor(opId) {
+  if (!_opColorCache[opId]) {
+    const idx = Object.keys(_opColorCache).length % _OP_COLORS.length;
+    _opColorCache[opId] = _OP_COLORS[idx];
+  }
+  return _opColorCache[opId];
+}
+
+function showTrackContextMenu(mouseEvent, trackId) {
+  document.querySelectorAll(".track-ctx-menu").forEach(m => m.remove());
+  const owner = TRACK_CLAIMS[trackId];
+  const isMine = owner === MY_OPERATOR_ID;
+  const menu = el("div", {class:"track-ctx-menu", style:{
+    position:"fixed", left: mouseEvent.clientX+"px", top: mouseEvent.clientY+"px",
+    zIndex:"10010", background:"rgba(10,10,25,0.96)", color:"white",
+    borderRadius:"8px", border:"1px solid rgba(100,200,255,0.3)",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    boxShadow:"0 4px 16px rgba(0,0,0,0.6)", minWidth:"160px", overflow:"hidden",
+  }});
+  const items = [
+    {label: "🔍 Decision Lineage", action: () => openLineage(trackId)},
+    {label: isMine ? "🔓 Release Claim" : "🔒 Claim Track", action: () => claimTrack(trackId)},
+  ];
+  items.forEach(item => {
+    const row = el("div", {style:{
+      padding:"8px 14px", cursor:"pointer",
+      borderBottom:"1px solid rgba(255,255,255,0.07)",
+    }}, [item.label]);
+    row.addEventListener("mouseenter", () => row.style.background="rgba(255,255,255,0.08)");
+    row.addEventListener("mouseleave", () => row.style.background="");
+    row.addEventListener("click", () => { menu.remove(); item.action(); });
+    menu.appendChild(row);
+  });
+  document.body.appendChild(menu);
+  // Auto-close on click outside
+  setTimeout(() => {
+    document.addEventListener("click", () => menu.remove(), {once:true});
+  }, 10);
+}
+
+function mountOperatorPanel() {
+  operatorPanelEl = el("div", { id:"operator-panel", style:{
+    position:"fixed", bottom:"12px", left:"12px", zIndex:"9998",
+    background:"rgba(10,10,25,0.88)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
+    border:"1px solid rgba(100,200,255,0.25)",
+    minWidth:"160px", maxWidth:"220px",
+  }});
+  document.body.appendChild(operatorPanelEl);
+  renderOperatorPanel();
+}
+
+function renderOperatorPanel() {
+  if (!operatorPanelEl) return;
+  const ops = Object.values(OPERATORS_STATE);
+  let html = `<div style="font-weight:bold;margin-bottom:5px;opacity:.7;font-size:10px">OPERATORS (${ops.length})</div>`;
+  for (const op of ops) {
+    const color = _opColor(op.operator_id);
+    const isMe = op.operator_id === MY_OPERATOR_ID;
+    const claimed = Object.entries(TRACK_CLAIMS).filter(([,oid]) => oid === op.operator_id).length;
+    html += `<div style="margin-bottom:3px;display:flex;align-items:center;gap:6px">`;
+    html += `<span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;flex-shrink:0"></span>`;
+    html += `<span style="color:${color};font-weight:${isMe?'bold':'normal'}">${_esc(op.operator_id)}${isMe?' (me)':''}</span>`;
+    if (claimed) html += `<span style="opacity:.5;font-size:9px">${claimed}✓</span>`;
+    html += `</div>`;
+  }
+  if (ops.length === 0) html += `<div style="opacity:.4">No operators</div>`;
+  operatorPanelEl.innerHTML = html;
+}
+
+function applyOperatorJoined(payload) {
+  if (payload?.operators) {
+    OPERATORS_STATE = {};
+    payload.operators.forEach(op => { OPERATORS_STATE[op.operator_id] = op; });
+  }
+  if (payload?.claims) TRACK_CLAIMS = {...payload.claims};
+  renderOperatorPanel();
+}
+
+function applyOperatorLeft(payload) {
+  if (payload?.operator_id) delete OPERATORS_STATE[payload.operator_id];
+  if (payload?.released_tracks) {
+    payload.released_tracks.forEach(tid => {
+      delete TRACK_CLAIMS[tid];
+      refreshMarkerClaim(tid);
+    });
+  }
+  renderOperatorPanel();
+}
+
+function applyTrackClaimed(payload) {
+  if (!payload?.track_id) return;
+  TRACK_CLAIMS[payload.track_id] = payload.operator_id;
+  refreshMarkerClaim(payload.track_id);
+  refreshTaskClaimUI();
+  renderOperatorPanel();
+}
+
+function applyTrackReleased(payload) {
+  if (!payload?.track_id) return;
+  delete TRACK_CLAIMS[payload.track_id];
+  refreshMarkerClaim(payload.track_id);
+  refreshTaskClaimUI();
+  renderOperatorPanel();
+}
+
+function refreshMarkerClaim(trackId) {
+  const marker = UI.trackMarkers.get(String(trackId));
+  if (!marker) return;
+  const owner = TRACK_CLAIMS[trackId];
+  if (owner) {
+    const color = _opColor(owner);
+    marker.getElement()?.style.setProperty("outline", `2px solid ${color}`, "important");
+    marker.getElement()?.style.setProperty("border-radius", "50%");
+  } else {
+    marker.getElement()?.style.removeProperty("outline");
+  }
+}
+
+async function claimTrack(trackId) {
+  const owner = TRACK_CLAIMS[trackId];
+  if (owner && owner !== MY_OPERATOR_ID) {
+    alert(`Track ${trackId} already claimed by ${owner}`); return;
+  }
+  if (owner === MY_OPERATOR_ID) {
+    // Release
+    await fetch(`/api/tracks/${encodeURIComponent(trackId)}/claim`, {
+      method:"DELETE", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({operator_id: MY_OPERATOR_ID}),
+    });
+  } else {
+    // Claim
+    await fetch(`/api/tracks/${encodeURIComponent(trackId)}/claim`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({operator_id: MY_OPERATOR_ID}),
+    });
+  }
+}
+
+// Refresh Approve/Reject button states based on current claims
+function refreshTaskClaimUI() {
+  // Re-render task panels to reflect claim state
+  document.querySelectorAll("[data-task-id]").forEach(card => {
+    const taskId = card.dataset.taskId;
+    const trackId = card.dataset.trackId;
+    if (!trackId) return;
+    const owner = TRACK_CLAIMS[trackId];
+    const locked = owner && owner !== MY_OPERATOR_ID;
+    card.querySelectorAll("button[data-action]").forEach(btn => {
+      btn.disabled = locked;
+      btn.title = locked ? `Claimed by ${owner}` : "";
+      btn.style.opacity = locked ? "0.35" : "1";
+      btn.style.cursor = locked ? "not-allowed" : "pointer";
+    });
+    if (locked) {
+      let badge = card.querySelector(".claim-badge");
+      if (!badge) {
+        badge = el("span", {class:"claim-badge", style:{
+          fontSize:"9px", background:"rgba(255,200,0,0.2)",
+          color:"#ffcc00", borderRadius:"4px", padding:"1px 4px", marginLeft:"4px",
+        }}, []);
+        card.querySelector("b")?.appendChild(badge);
+      }
+      badge.textContent = `🔒 ${owner}`;
+    } else {
+      card.querySelector(".claim-badge")?.remove();
+    }
+  });
+}
+
 async function fetchAndDrawTimeline(trackId) {
   try {
     const resp = await fetch(`/api/ai/timeline?track_id=${encodeURIComponent(trackId)}`).then(r=>r.json());
@@ -2209,6 +2432,7 @@ function boot(){
   mountTacticalPanel();
   mountTimelinePopup();
   mountLineageModal();
+  mountOperatorPanel();
   mountChatPanel();
   mountChatToggle();
   mountAARModal();

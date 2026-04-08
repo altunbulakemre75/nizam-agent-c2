@@ -156,6 +156,16 @@ CLIENTS: Set[WebSocket] = set()
 CLIENTS_LOCK = asyncio.Lock()
 STATE_LOCK   = asyncio.Lock()
 
+# ── Multi-operator state ──────────────────────────────────────────────────────
+#
+# OPERATORS  : {operator_id: {joined_at, ws_ref (weakref)}} — active sessions
+# TRACK_CLAIMS: {track_id: operator_id} — claimed tracks (one owner at a time)
+# WS_OPERATORS: {websocket: operator_id} — reverse map for disconnect cleanup
+#
+OPERATORS: Dict[str, Dict] = {}
+TRACK_CLAIMS: Dict[str, str] = {}
+WS_OPERATORS: Dict[int, str] = {}   # id(websocket) → operator_id
+
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 #
@@ -751,13 +761,23 @@ async def api_tasks():
 @app.post("/api/tasks/{task_id}/approve")
 async def api_task_approve(task_id: str, req: Request, _=Depends(require_operator())):
     body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
+    operator_id = body.get("operator", body.get("operator_id", "operator"))
     async with STATE_LOCK:
         task = STATE["tasks"].get(task_id)
         if not task:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        # Claim check: if the track is claimed by another operator, deny.
+        track_id_for_claim = task.get("track_id")
+        async with CLIENTS_LOCK:
+            owner = TRACK_CLAIMS.get(track_id_for_claim) if track_id_for_claim else None
+        if owner and owner != operator_id:
+            return JSONResponse(
+                {"ok": False, "error": f"Track claimed by {owner} — cannot approve"},
+                status_code=409,
+            )
         task["status"]      = "APPROVED"
         task["resolved_at"] = _utc_now_iso()
-        task["resolved_by"] = body.get("operator", "operator")
+        task["resolved_by"] = operator_id
         # Snapshot the action + target while still under the lock
         action    = task.get("action")
         target_id = task.get("track_id")
@@ -865,18 +885,112 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
 @app.post("/api/tasks/{task_id}/reject")
 async def api_task_reject(task_id: str, req: Request, _=Depends(require_operator())):
     body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
+    operator_id = body.get("operator", body.get("operator_id", "operator"))
     async with STATE_LOCK:
         task = STATE["tasks"].get(task_id)
         if not task:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        # Claim check
+        track_id_for_claim = task.get("track_id")
+        async with CLIENTS_LOCK:
+            owner = TRACK_CLAIMS.get(track_id_for_claim) if track_id_for_claim else None
+        if owner and owner != operator_id:
+            return JSONResponse(
+                {"ok": False, "error": f"Track claimed by {owner} — cannot reject"},
+                status_code=409,
+            )
         task["status"]      = "REJECTED"
         task["resolved_at"] = _utc_now_iso()
-        task["resolved_by"] = body.get("operator", "operator")
+        task["resolved_by"] = operator_id
     ev = {"event_type": "cop.task_update", "payload": dict(task)}
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task_update(task)))
     return JSONResponse({"ok": True, "task": task})
+
+
+# ── Multi-operator: track claims ─────────────────────────────
+
+
+@app.get("/api/operators")
+async def api_operators():
+    """List active operator sessions and their claimed tracks."""
+    async with CLIENTS_LOCK:
+        active = {
+            op_id: {
+                "operator_id": op_id,
+                "joined_at":   info["joined_at"],
+                "claimed_tracks": [tid for tid, oid in TRACK_CLAIMS.items() if oid == op_id],
+            }
+            for op_id, info in OPERATORS.items()
+        }
+    return JSONResponse({"operators": list(active.values()), "claims": dict(TRACK_CLAIMS)})
+
+
+@app.post("/api/tracks/{track_id}/claim")
+async def api_track_claim(track_id: str, req: Request, _=Depends(require_operator())):
+    """Claim a track for exclusive task handling. Returns 409 if already claimed."""
+    body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
+    operator_id = body.get("operator_id", "operator")
+
+    async with CLIENTS_LOCK:
+        existing = TRACK_CLAIMS.get(track_id)
+        if existing and existing != operator_id:
+            return JSONResponse(
+                {"ok": False, "error": f"Track already claimed by {existing}"},
+                status_code=409,
+            )
+        TRACK_CLAIMS[track_id] = operator_id
+
+    ev = {
+        "event_type": "cop.track_claimed",
+        "payload": {
+            "track_id":    track_id,
+            "operator_id": operator_id,
+            "server_time": _utc_now_iso(),
+        },
+    }
+    await broadcast(ev)
+    try:
+        ai_lineage.record(
+            track_id=track_id,
+            stage="operator",
+            summary=f"Track claimed by {operator_id}",
+            outputs={"operator_id": operator_id},
+            rule="multi_operator.claim",
+        )
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "track_id": track_id, "operator_id": operator_id})
+
+
+@app.delete("/api/tracks/{track_id}/claim")
+async def api_track_release(track_id: str, req: Request, _=Depends(require_operator())):
+    """Release a track claim. Only the owning operator can release."""
+    body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
+    operator_id = body.get("operator_id", "operator")
+
+    async with CLIENTS_LOCK:
+        existing = TRACK_CLAIMS.get(track_id)
+        if not existing:
+            return JSONResponse({"ok": False, "error": "not claimed"}, status_code=404)
+        if existing != operator_id:
+            return JSONResponse(
+                {"ok": False, "error": f"Claim owned by {existing}, not {operator_id}"},
+                status_code=403,
+            )
+        del TRACK_CLAIMS[track_id]
+
+    ev = {
+        "event_type": "cop.track_released",
+        "payload": {
+            "track_id":    track_id,
+            "operator_id": operator_id,
+            "server_time": _utc_now_iso(),
+        },
+    }
+    await broadcast(ev)
+    return JSONResponse({"ok": True, "track_id": track_id})
 
 
 # ── Waypoints ────────────────────────────────────────────────
@@ -946,6 +1060,7 @@ async def api_reset(_=Depends(require_operator())):
         STATE["tasks"].clear()
         BREACH_STATE.clear()
         TASK_EMITTED.clear()
+        TRACK_CLAIMS.clear()
         AI_PREDICTIONS.clear()
         AI_ANOMALIES.clear()
         AI_RECOMMENDATIONS.clear()
@@ -1774,8 +1889,9 @@ async def api_analytics_alerts(limit: int = Query(100, le=5000)):
 
 @app.websocket("/ws")
 async def ws_endpoint(
-    websocket: WebSocket,
-    token:     Optional[str] = Query(None),
+    websocket:   WebSocket,
+    token:       Optional[str] = Query(None),
+    operator_id: Optional[str] = Query(None),
 ):
     # Auth check for WebSocket (via query param)
     if AUTH_ENABLED:
@@ -1785,13 +1901,37 @@ async def ws_endpoint(
             await websocket.close(code=4001)
             return
 
+    # Resolve operator identity
+    op_id = (operator_id or "").strip() or f"OPS-{_new_id('')[0:6].upper()}"
+
     await websocket.accept()
     async with CLIENTS_LOCK:
         CLIENTS.add(websocket)
+        OPERATORS[op_id] = {"joined_at": _utc_now_iso(), "op_id": op_id}
+        WS_OPERATORS[id(websocket)] = op_id
+
+    # Announce join to all other clients
+    await broadcast({
+        "event_type": "cop.operator_joined",
+        "payload": {
+            "operator_id": op_id,
+            "operators":   [{"operator_id": k, "joined_at": v["joined_at"]}
+                            for k, v in OPERATORS.items()],
+            "claims":      dict(TRACK_CLAIMS),
+            "server_time": _utc_now_iso(),
+        },
+    })
 
     try:
+        # Send full state snapshot to this client
         async with STATE_LOCK:
             snapshot = {"event_type": "cop.snapshot", "payload": _make_snapshot_payload()}
+        # Attach current operator state to snapshot
+        snapshot["payload"]["operators"] = [
+            {"operator_id": k, "joined_at": v["joined_at"]}
+            for k, v in OPERATORS.items()
+        ]
+        snapshot["payload"]["claims"] = dict(TRACK_CLAIMS)
         await websocket.send_json(snapshot)
 
         # Heartbeat: send ping every 10s so dead connections surface quickly.
@@ -1809,3 +1949,28 @@ async def ws_endpoint(
     finally:
         async with CLIENTS_LOCK:
             CLIENTS.discard(websocket)
+            OPERATORS.pop(op_id, None)
+            WS_OPERATORS.pop(id(websocket), None)
+            # Release all claims held by this operator
+            released = [tid for tid, oid in list(TRACK_CLAIMS.items()) if oid == op_id]
+            for tid in released:
+                TRACK_CLAIMS.pop(tid, None)
+
+        if released:
+            for tid in released:
+                await broadcast({
+                    "event_type": "cop.track_released",
+                    "payload": {"track_id": tid, "operator_id": op_id,
+                                "reason": "disconnect", "server_time": _utc_now_iso()},
+                })
+
+        await broadcast({
+            "event_type": "cop.operator_left",
+            "payload": {
+                "operator_id": op_id,
+                "operators":   [{"operator_id": k, "joined_at": v["joined_at"]}
+                                for k, v in OPERATORS.items()],
+                "released_tracks": released,
+                "server_time": _utc_now_iso(),
+            },
+        })
