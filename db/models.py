@@ -24,6 +24,7 @@ from sqlalchemy import (
     Float,
     Integer,
     JSON,
+    PrimaryKeyConstraint,
     String,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -63,8 +64,9 @@ class User(Base):
 class TrackEvent(Base):
     """One row per cop.track event — hypertable on 'time'."""
     __tablename__ = "track_events"
+    __table_args__ = (PrimaryKeyConstraint("id", "time"),)
 
-    id        = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id        = Column(UUID(as_uuid=True), default=uuid.uuid4, nullable=False)
     time      = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
     track_id  = Column(String(64), nullable=False, index=True)
     lat       = Column(Float, nullable=True)
@@ -79,8 +81,9 @@ class TrackEvent(Base):
 class ThreatEvent(Base):
     """One row per cop.threat event — hypertable on 'time'."""
     __tablename__ = "threat_events"
+    __table_args__ = (PrimaryKeyConstraint("id", "time"),)
 
-    id           = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id           = Column(UUID(as_uuid=True), default=uuid.uuid4, nullable=False)
     time         = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
     track_id     = Column(String(64), nullable=False, index=True)
     threat_level = Column(String(16), nullable=True)
@@ -93,8 +96,9 @@ class ThreatEvent(Base):
 class AlertRecord(Base):
     """Zone-breach alerts — hypertable on 'time'."""
     __tablename__ = "alert_records"
+    __table_args__ = (PrimaryKeyConstraint("id", "time"),)
 
-    id        = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id        = Column(UUID(as_uuid=True), default=uuid.uuid4, nullable=False)
     time      = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
     track_id  = Column(String(64), nullable=False)
     zone_id   = Column(String(64), nullable=True)

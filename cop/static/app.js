@@ -90,6 +90,20 @@ function mountControls() {
   panel.appendChild(statusEl);
   panel.appendChild(bufEl);
   panel.appendChild(el("div",{style:{marginTop:"8px",opacity:"0.7"}},["P=Pause  R=Resume"]));
+  const logoutBtn = el("button", {
+    id: "logout-btn",
+    style: { marginTop:"8px", cursor:"pointer", display:"none", fontSize:"11px",
+      background:"rgba(231,76,60,0.3)", border:"1px solid rgba(231,76,60,0.5)",
+      color:"#e74c3c", borderRadius:"4px", padding:"2px 8px" },
+    onclick: () => {
+      AUTH_TOKEN = null; localStorage.removeItem("nizam_jwt"); showLoginModal();
+    },
+  }, ["⏏ Logout"]);
+  panel.appendChild(logoutBtn);
+  // Show logout btn only when auth is enabled
+  fetch("/auth/status").then(r=>r.json()).then(d => {
+    if (d.auth_enabled) logoutBtn.style.display = "block";
+  }).catch(()=>{});
   document.body.appendChild(panel);
   window.addEventListener("keydown", e => {
     if(e.key==="p"||e.key==="P") CopEngine.pause();
@@ -466,15 +480,13 @@ const alertsLog  = [];
 
 function mountAlertPanel() {
   alertPanelEl = el("div", { id:"alert-panel", style: {
-    position:"fixed", bottom:"12px", right:"12px", zIndex:"9999",
     background:"rgba(0,0,0,0.72)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
-    lineHeight:"1.5", minWidth:"200px", maxWidth:"280px",
-    maxHeight:"160px", overflowY:"auto",
+    lineHeight:"1.5", maxHeight:"220px", overflowY:"auto",
   }});
   alertPanelEl.innerHTML = "<b>Zone Alerts</b><br><span style='opacity:.5'>No breaches yet</span>";
-  document.body.appendChild(alertPanelEl);
+  RIGHT_TABS.alerts.appendChild(alertPanelEl);
 }
 
 function pushAlert(p) {
@@ -591,11 +603,10 @@ let assetPlacingType=null;
 
 function mountAssetPanel() {
   assetPanelEl = el("div", { id:"asset-panel", style:{
-    position:"fixed", top:"200px", right:"12px", zIndex:"9999",
     background:"rgba(0,0,0,0.68)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    lineHeight:"1.5", minWidth:"170px",
+    lineHeight:"1.5",
   }});
 
   const mkBtn=(label,type,color)=>el("button",{
@@ -611,7 +622,7 @@ function mountAssetPanel() {
   assetPanelEl.appendChild(mkBtn("+ Place Unknown","unknown","#7f8c8d"));
   const hint=el("div",{style:{marginTop:"4px",opacity:"0.65",fontSize:"10px"}},["Click map to place"]);
   assetPanelEl.appendChild(hint);
-  document.body.appendChild(assetPanelEl);
+  RIGHT_TABS.assets.appendChild(assetPanelEl);
 
   // Map click → place asset
   UI.map.on("click", async e => {
@@ -638,11 +649,10 @@ let missionPanelEl=null, missionDrawing=false, missionOrder=0;
 
 function mountMissionPanel() {
   missionPanelEl = el("div",{id:"mission-panel",style:{
-    position:"fixed", top:"360px", right:"12px", zIndex:"9999",
     background:"rgba(0,0,0,0.68)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    lineHeight:"1.5", minWidth:"170px",
+    lineHeight:"1.5",
   }});
 
   const hint=el("div",{style:{marginTop:"4px",opacity:"0.65",fontSize:"10px"}},["Click map to add waypoints"]);
@@ -656,7 +666,7 @@ function mountMissionPanel() {
   missionPanelEl.appendChild(el("br"));
   missionPanelEl.appendChild(el("div",{},[btnStart,btnDone,btnClear]));
   missionPanelEl.appendChild(hint);
-  document.body.appendChild(missionPanelEl);
+  RIGHT_TABS.assets.appendChild(missionPanelEl);
 
   UI.map.on("click", async e => {
     if(!missionDrawing) return;
@@ -762,11 +772,10 @@ function connectWS(){
 let zoneDrawPoints=[],zoneDrawMarkers=[],zoneDrawing=false;
 function mountZonePanel(){
   const panel=el("div",{style:{
-    position:"fixed",top:"12px",right:"12px",zIndex:"9999",
     background:"rgba(0,0,0,0.65)",color:"white",
     padding:"8px 12px",borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial",fontSize:"12px",
-    lineHeight:"1.5",minWidth:"180px",
+    lineHeight:"1.5",
   }});
   const typeSelect=el("select",{style:{marginBottom:"4px",width:"100%",borderRadius:"4px",padding:"2px"}});
   ["restricted","kill","friendly"].forEach(t=>typeSelect.appendChild(el("option",{value:t},[t])));
@@ -793,7 +802,7 @@ function mountZonePanel(){
   panel.appendChild(el("b",{},["Zones"]));panel.appendChild(el("br"));
   panel.appendChild(nameInput);panel.appendChild(typeSelect);
   panel.appendChild(el("div",{},[btnDraw,btnSave,btnCancel]));panel.appendChild(hint);
-  document.body.appendChild(panel);
+  RIGHT_TABS.zones.appendChild(panel);
   UI.map.on("click",e=>{
     if(!zoneDrawing||assetPlacingType||missionDrawing) return;
     const{lat,lng}=e.latlng;
@@ -930,16 +939,14 @@ let breachPanelEl = null;
 
 function mountBreachPanel() {
   breachPanelEl = el("div", { id:"breach-panel", style:{
-    position:"fixed", bottom:"390px", right:"12px", zIndex:"9999",
     background:"rgba(40,0,0,0.82)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", minWidth:"230px", maxWidth:"300px",
-    maxHeight:"180px", overflowY:"auto",
+    lineHeight:"1.4", maxHeight:"180px", overflowY:"auto",
     border:"1px solid rgba(231,76,60,0.4)",
   }});
   breachPanelEl.innerHTML = "<b>\u26A0 Predictive Breach</b><br><span style='opacity:.5'>No predicted breaches</span>";
-  document.body.appendChild(breachPanelEl);
+  RIGHT_TABS.threats.appendChild(breachPanelEl);
 }
 
 function renderBreachPanel(breaches) {
@@ -974,16 +981,14 @@ let mlModelAvailable = false;
 
 function mountMLPanel() {
   mlPanelEl = el("div", { id:"ml-panel", style:{
-    position:"fixed", top:"12px", right:"330px", zIndex:"9999",
     background:"rgba(15,10,50,0.88)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
-    lineHeight:"1.5", minWidth:"200px", maxWidth:"260px",
-    maxHeight:"180px", overflowY:"auto",
+    lineHeight:"1.5", maxHeight:"220px", overflowY:"auto",
     border:"1px solid rgba(99,102,241,0.4)",
   }});
   mlPanelEl.innerHTML = '<b style="color:#818cf8">ML Model</b><br><span style="opacity:.5">Bekleniyor...</span>';
-  document.body.appendChild(mlPanelEl);
+  RIGHT_TABS.threats.appendChild(mlPanelEl);
 }
 
 function renderMLPanel(preds) {
@@ -1031,16 +1036,14 @@ const ROE_LABELS = {
 
 function mountROEPanel() {
   roePanelEl = el("div", { id:"roe-panel", style:{
-    position:"fixed", bottom:"770px", right:"12px", zIndex:"9999",
     background:"rgba(20,10,40,0.88)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", minWidth:"250px", maxWidth:"330px",
-    maxHeight:"180px", overflowY:"auto",
+    lineHeight:"1.4", maxHeight:"200px", overflowY:"auto",
     border:"1px solid rgba(155,89,182,0.4)",
   }});
   roePanelEl.innerHTML = "<b>\u2694 ROE Advisory</b><br><span style='opacity:.5'>No engagements</span>";
-  document.body.appendChild(roePanelEl);
+  RIGHT_TABS.threats.appendChild(roePanelEl);
 }
 
 function renderROEPanel(advisories) {
@@ -1086,16 +1089,14 @@ const convergenceLines   = new Map(); // key -> [L.polyline, ...]
 
 function mountCoordPanel() {
   coordPanelEl = el("div", { id:"coord-panel", style:{
-    position:"fixed", bottom:"580px", right:"12px", zIndex:"9999",
     background:"rgba(80,0,40,0.85)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", minWidth:"240px", maxWidth:"320px",
-    maxHeight:"180px", overflowY:"auto",
+    lineHeight:"1.4", maxHeight:"180px", overflowY:"auto",
     border:"1px solid rgba(255,0,80,0.4)",
   }});
   coordPanelEl.innerHTML = "<b>\u2694 Coordinated Attack</b><br><span style='opacity:.5'>No coordinated threats</span>";
-  document.body.appendChild(coordPanelEl);
+  RIGHT_TABS.threats.appendChild(coordPanelEl);
 }
 
 function renderCoordPanel(attacks) {
@@ -1199,15 +1200,13 @@ const ANOMALY_COLORS = {
 
 function mountAnomalyPanel() {
   anomalyPanelEl = el("div", { id:"anomaly-panel", style:{
-    position:"fixed", bottom:"180px", right:"12px", zIndex:"9999",
     background:"rgba(0,0,0,0.75)", color:"white",
     padding:"8px 12px", borderRadius:"10px",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", minWidth:"220px", maxWidth:"290px",
-    maxHeight:"200px", overflowY:"auto",
+    lineHeight:"1.4", maxHeight:"200px", overflowY:"auto",
   }});
   anomalyPanelEl.innerHTML = "<b>AI Anomalies</b><br><span style='opacity:.5'>No anomalies</span>";
-  document.body.appendChild(anomalyPanelEl);
+  RIGHT_TABS.threats.appendChild(anomalyPanelEl);
 }
 
 function renderAnomalyPanel() {
@@ -2412,11 +2411,150 @@ function fmtTime(s) {
   return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
 }
 
+/* ── Auth: JWT login ─────────────────────────────────────── */
+
+let AUTH_TOKEN = localStorage.getItem("nizam_jwt") || null;
+
+function authHeaders() {
+  return AUTH_TOKEN
+    ? { "Content-Type": "application/json", "Authorization": `Bearer ${AUTH_TOKEN}` }
+    : { "Content-Type": "application/json" };
+}
+
+async function authFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, authHeaders(), opts.headers || {});
+  const r = await fetch(url, opts);
+  if (r.status === 401) { AUTH_TOKEN = null; localStorage.removeItem("nizam_jwt"); showLoginModal(); }
+  return r;
+}
+
+function showLoginModal(msg = "") {
+  const existing = document.getElementById("login-modal");
+  if (existing) { existing.querySelector(".login-msg").textContent = msg; return; }
+
+  const overlay = el("div", { id: "login-modal", style: {
+    position: "fixed", inset: "0", zIndex: "99999",
+    background: "rgba(0,0,0,0.7)", display: "flex",
+    alignItems: "center", justifyContent: "center",
+  }});
+  const box = el("div", { style: {
+    background: "#1a1a2e", color: "white", padding: "28px 32px",
+    borderRadius: "12px", minWidth: "280px", fontFamily: "ui-sans-serif,system-ui,Arial",
+    border: "1px solid rgba(255,255,255,0.15)",
+  }});
+  const title = el("div", { style: { fontSize: "16px", fontWeight: "bold", marginBottom: "16px" }}, ["🔐 NIZAM Login"]);
+  const msgEl = el("div", { class: "login-msg", style: { color: "#e74c3c", fontSize: "12px", minHeight: "16px", marginBottom: "8px" }}, [msg]);
+  const userInput = el("input", { type: "text", placeholder: "Username",
+    style: { width: "100%", padding: "7px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.2)",
+      background: "rgba(255,255,255,0.08)", color: "white", boxSizing: "border-box", marginBottom: "8px" }});
+  const passInput = el("input", { type: "password", placeholder: "Password",
+    style: { width: "100%", padding: "7px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.2)",
+      background: "rgba(255,255,255,0.08)", color: "white", boxSizing: "border-box", marginBottom: "12px" }});
+  const loginBtn = el("button", {
+    style: { width: "100%", padding: "8px", background: "#2980b9", color: "white",
+      border: "none", borderRadius: "6px", cursor: "pointer", fontWeight: "bold" },
+    onclick: async () => {
+      const resp = await fetch("/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: userInput.value, password: passInput.value }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        AUTH_TOKEN = data.access_token;
+        localStorage.setItem("nizam_jwt", AUTH_TOKEN);
+        overlay.remove();
+      } else {
+        msgEl.textContent = "Geçersiz kullanıcı adı veya şifre";
+      }
+    },
+  }, ["Giriş Yap"]);
+
+  passInput.addEventListener("keydown", e => { if (e.key === "Enter") loginBtn.click(); });
+  box.append(title, msgEl, userInput, passInput, loginBtn);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  setTimeout(() => userInput.focus(), 100);
+}
+
+async function checkAuth() {
+  try {
+    const r = await fetch("/auth/status");
+    const d = await r.json();
+    if (d.auth_enabled && !AUTH_TOKEN) showLoginModal();
+  } catch { /* auth endpoint not available */ }
+}
+
+/* ── Right-side tab container ────────────────────────────── */
+
+const RIGHT_TABS = {};
+
+function mountRightTabContainer() {
+  const TAB_DEFS = [
+    { id: "threats", label: "⚡ Threats" },
+    { id: "zones",   label: "📍 Zones"   },
+    { id: "assets",  label: "🔵 Assets"  },
+    { id: "alerts",  label: "🔔 Alerts"  },
+  ];
+  const activeTabId = { v: "threats" };
+
+  const container = el("div", { id: "right-sidebar", style: {
+    position: "fixed", top: "12px", right: "12px", zIndex: "9998",
+    width: "295px", maxHeight: "calc(100vh - 24px)",
+    display: "flex", flexDirection: "column",
+    fontFamily: "ui-sans-serif,system-ui,Arial",
+    pointerEvents: "none",
+  }});
+
+  const tabBar = el("div", { style: {
+    display: "flex", gap: "3px", marginBottom: "6px", pointerEvents: "auto",
+  }});
+
+  const contentMap = {};
+
+  function switchTab(tabId) {
+    TAB_DEFS.forEach(t => {
+      contentMap[t.id].style.display = t.id === tabId ? "flex" : "none";
+      const btn = document.getElementById(`rtab-${t.id}`);
+      if (btn) btn.style.background = t.id === tabId
+        ? "rgba(255,255,255,0.20)" : "rgba(0,0,0,0.60)";
+    });
+    activeTabId.v = tabId;
+  }
+
+  TAB_DEFS.forEach(tab => {
+    const content = el("div", { id: `rtab-content-${tab.id}`, style: {
+      display: tab.id === activeTabId.v ? "flex" : "none",
+      flexDirection: "column", gap: "6px",
+      overflowY: "auto", maxHeight: "calc(100vh - 56px)",
+      pointerEvents: "auto",
+    }});
+    contentMap[tab.id] = content;
+    RIGHT_TABS[tab.id] = content;
+    container.appendChild(content);
+
+    const btn = el("button", {
+      id: `rtab-${tab.id}`,
+      style: {
+        flex: "1", padding: "5px 2px", cursor: "pointer",
+        background: tab.id === activeTabId.v ? "rgba(255,255,255,0.20)" : "rgba(0,0,0,0.60)",
+        color: "white", border: "1px solid rgba(255,255,255,0.15)",
+        borderRadius: "6px", fontSize: "10px", fontFamily: "inherit",
+      },
+      onclick: () => switchTab(tab.id),
+    }, [tab.label]);
+    tabBar.appendChild(btn);
+  });
+
+  container.insertBefore(tabBar, container.firstChild);
+  document.body.appendChild(container);
+}
+
 /* ── Boot ────────────────────────────────────────────────── */
 
 function boot(){
   initMap();
   mountControls();
+  mountRightTabContainer();
   mountZonePanel();
   mountAgentPanel();
   mountAlertPanel();
@@ -2447,6 +2585,7 @@ function boot(){
   // AI data now streams via WebSocket (cop.ai_update).
   // Keep slow polling as a safety net for when the socket drops.
   setInterval(refreshAI, 15000);
+  checkAuth();
 }
 document.addEventListener("DOMContentLoaded", () => {
   try { boot(); }
