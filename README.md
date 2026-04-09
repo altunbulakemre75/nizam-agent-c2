@@ -1,10 +1,10 @@
-# NIZAM
+# NIZAM COP
 
 **Real-Time Command & Control (C2) / Common Operational Picture (COP) System**
 
-NIZAM is an open-source, production-grade C2/COP prototype inspired by Anduril Lattice and Palantir Gotham. It demonstrates the core architectural concepts used in modern command & control, ISR, and aerospace ground-segment software: event-driven data flow, multi-sensor fusion, AI-assisted decision support, decision lineage, and operator-centric situational awareness.
+NIZAM is an open-source C2/COP prototype inspired by Anduril Lattice and Palantir Gotham. It demonstrates the core architectural concepts used in modern command & control, ISR, and aerospace ground-segment software: event-driven sensor fusion, multi-layer AI decision support, cryptographically-linked decision provenance, LSTM trajectory prediction, and operator-centric situational awareness.
 
-No external services are required to run it end-to-end.
+Runs fully offline. No cloud services required.
 
 ---
 
@@ -12,13 +12,17 @@ No external services are required to run it end-to-end.
 
 **Ingests** real and simulated sensor events (radar, RF, ADS-B, AIS, electro-optical, generic REST) through an asynchronous agent pipeline.
 
-**Fuses** multi-sensor observations into unified tracks with intent classification and ML threat scoring (RandomForest, 94%+ accuracy).
+**Fuses** multi-sensor observations into unified tracks with intent classification and ML threat scoring (RandomForest, 94%+ accuracy on synthetic workloads).
 
-**Reasons** using a layered AI stack: Kalman trajectory prediction, anomaly detection, swarm/coordinated-attack pattern recognition, tactical recommendations, and rules-of-engagement advisories.
+**Predicts** future trajectories using a trained LSTM network (12 steps ahead per track), drawn live on the map alongside Kalman-filter short-term estimates.
 
-**Records** every AI decision — from raw sensor hit to ENGAGE order — in a cryptographically-linked lineage chain that answers *"why is this track a threat?"* with full provenance.
+**Reasons** using a layered AI stack: anomaly detection, swarm/coordinated-attack pattern recognition, tactical recommendations, and rules-of-engagement advisories.
 
-**Broadcasts** live state to a Leaflet browser UI over WebSocket. Operators see tracks, threat levels, predicted trajectories, swarm patterns, fire control, and the complete decision chain for any track.
+**Records** every AI decision in a SHA-256 hash-chained lineage store. Each record carries `hash` and `prev_hash` fields — modifying or deleting any record breaks the chain, detectable by `verify_chain()`.
+
+**Persists** time-series track and threat events to TimescaleDB hypertables (composite primary key `(id, time)` — partition-aware). Zones, assets, tasks, and waypoints survive server restarts.
+
+**Broadcasts** live state to a tabbed Leaflet browser UI over WebSocket with multi-operator support: track claiming, operator presence, and shared task queue.
 
 ---
 
@@ -34,37 +38,43 @@ No external services are required to run it end-to-end.
 - Autonomous task proposal (ENGAGE / OBSERVE) with operator approve / reject workflow
 - Fire control loop: approve ENGAGE → effector impact animation → track removal
 - Pause / resume, reset, JSONL replay with time-slider
+- Multi-operator sessions: track claiming, presence indicators, conflict prevention (409)
 
 ### AI Decision Support
 
-- Kalman-filter trajectory prediction (60 s ahead, 12 future points per track)
+- **LSTM trajectory prediction** — 12-step ahead waypoints per track, drawn as dashed polylines color-coded by threat level
+- Kalman-filter short-term prediction (60 s, 12 future points) + uncertainty cones
 - Anomaly detection: speed spikes, heading reversals, intent shifts
 - Swarm detection: proximity + correlated heading clustering
 - Coordinated attack detection: pincer, convergence, zone-targeted, asset-targeted
-- Predictive zone breach + uncertainty cones
+- Predictive zone breach detection
 - Tactical recommendation engine (intercept, zone warning, escalate, withdraw, monitor, reposition)
 - Rules-of-Engagement (ROE) advisory (WEAPONS_FREE / WEAPONS_TIGHT / WEAPONS_HOLD / TRACK_ONLY)
 - After-Action Report (AAR) generator
-- LLM operator advisor (Claude / OpenAI API, rule-based fallback)
+- LLM operator advisor (Claude / OpenAI API, rule-based fallback when no key set)
 
-### Decision Lineage (Palantir-inspired)
+### Decision Lineage — SHA-256 Hash Chain
 
-Every track carries a full decision provenance chain. Right-click any marker on the map → **Decision Lineage** modal shows every reasoning step:
+Every track carries a full decision provenance chain. Right-click any marker → **Decision Lineage** modal shows every reasoning step with hash integrity status:
 
 ```
 T-R012-A018  →  HIGH (0.94)
-├─ ingest        radar-01 detected range=1200m, az=185° @ T-00:42
-├─ threat_assess HIGH score=92, intent=attack @ T-00:41
-├─ ml_threat     RandomForest → HIGH (0.94) @ T-00:38
-│                features: speed=32, closing=28, alt=150, intent_conf=0.87
-├─ anomaly       INTENT_SHIFT (CRITICAL) loitering→attack @ T-00:36
-├─ coord_attack  PINCER (CRITICAL) 8 tracks, 23s to convergence @ T-00:34
-├─ tactical      ESCALATE P1 — SWARM DETECTED @ T-00:33
-├─ roe           WEAPONS_TIGHT (HIGH urgency) @ T-00:31
-└─ task_proposer ENGAGE proposed, awaiting operator approval @ T-00:30
+├─ ingest        hash=73c17c3d...  radar-01 detected range=1200m, az=185°
+├─ threat_assess hash=e7bba53b...  HIGH score=92, intent=attack
+├─ ml_threat     hash=d98925fa...  RandomForest → HIGH (0.94)
+├─ anomaly       hash=a1b2c3d4...  INTENT_SHIFT (CRITICAL) loitering→attack
+├─ coord_attack  hash=f4e3d2c1...  PINCER (CRITICAL) 8 tracks, 23s to convergence
+├─ tactical      hash=9e8f7a6b...  ESCALATE P1 — SWARM DETECTED
+├─ roe           hash=5c4b3a29...  WEAPONS_TIGHT (HIGH urgency)
+└─ task_proposer hash=1d2e3f40...  ENGAGE proposed, awaiting operator approval
 ```
 
-Stages: `ingest → threat_assess → ml_threat → anomaly → coord_attack → tactical → roe → task_proposer → fire_control`
+Each record contains:
+- `hash` — SHA-256 of record content
+- `prev_hash` — pointer to previous record (`"000...0"` for genesis)
+- `decision_id`, `timestamp`, `stage`, `summary`, `inputs`, `outputs`, `rule`
+
+`verify_chain(track_id)` walks the full chain and returns `{"valid": bool, "broken_at": index}`.
 
 ### Real Sensor Adapters
 
@@ -76,13 +86,11 @@ Stages: `ingest → threat_assess → ml_threat → anomaly → coord_attack →
 
 ### Platform
 
-- PostgreSQL / TimescaleDB persistence (optional)
-- JWT authentication with operator roles (optional)
-- Docker + Docker Compose
-- Kubernetes manifests (namespace, StatefulSet, HPA, Ingress)
+- PostgreSQL / TimescaleDB persistence — hypertables for `track_events`, `threat_events`, `alert_records`
+- JWT authentication with ADMIN / OPERATOR / VIEWER roles (enabled via `AUTH_ENABLED=true`)
+- Docker + Docker Compose (one command: `docker compose up --build`)
 - GitHub Actions CI: 184 pytest tests + end-to-end smoke test
 - Runtime metrics endpoint (`/api/metrics`): ingest rate, tactical p50/p95, WS fan-out
-- Scenario system: 5 built-in scenarios, fully configurable JSON
 
 ---
 
@@ -93,37 +101,42 @@ Stages: `ingest → threat_assess → ml_threat → anomaly → coord_attack →
   world_agent ──┼─  rf_sim    ──┼─► fuser ─► cop_publisher ─► COP /ingest
                  └─  eo_sim   ──┘                                   │
                                                                      ▼
-  Real sensors:                                          ┌───────────────────┐
-    ADS-B adapter ──────────────────────────────────────►│    COP Server     │
-    AIS adapter   ──────────────────────────────────────►│    (FastAPI)      │
-    REST adapter  ──────────────────────────────────────►│                   │
-                                                         │  STATE_LOCK       │
-                                                         │  ├─ ML Threat     │
-                                                         │  ├─ Tactical      │
-                                                         │  ├─ ROE           │
-                                                         │  ├─ Anomaly       │
-                                                         │  ├─ Fire Control  │
-                                                         │  └─ Lineage Store │
-                                                         └────────┬──────────┘
+  Real sensors:                                          ┌─────────────────────┐
+    ADS-B adapter ─────────────────────────────────────►│     COP Server      │
+    AIS adapter   ─────────────────────────────────────►│     (FastAPI)       │
+    REST adapter  ─────────────────────────────────────►│                     │
+                                                         │  ├─ ML Threat      │
+                                                         │  ├─ LSTM Traj.     │
+                                                         │  ├─ Tactical       │
+                                                         │  ├─ ROE            │
+                                                         │  ├─ Anomaly        │
+                                                         │  ├─ Fire Control   │
+                                                         │  └─ Lineage (SHA)  │
+                                                         └────────┬────────────┘
                                                                   │ WebSocket
-                                                                  ▼
-                                                         ┌────────────────┐
-                                                         │  Browser UI    │
-                                                         │  (Leaflet.js)  │
-                                                         │  ├─ Track map  │
-                                                         │  ├─ Threat ML  │
-                                                         │  ├─ Lineage ←  │
-                                                         │  ├─ Task queue │
-                                                         │  └─ AAR report │
-                                                         └────────────────┘
+                                                         ┌────────▼────────────┐
+                                                         │    TimescaleDB      │
+                                                         │  track_events       │
+                                                         │  threat_events      │
+                                                         │  alert_records      │
+                                                         └─────────────────────┘
+                                                                  │
+                                                         ┌────────▼────────────┐
+                                                         │    Browser UI       │
+                                                         │  ├─ Track map       │
+                                                         │  ├─ LSTM lines      │
+                                                         │  ├─ Lineage chain   │
+                                                         │  ├─ Tab panels      │
+                                                         │  └─ Multi-operator  │
+                                                         └─────────────────────┘
 ```
 
 **Key design properties:**
 
-- **Back-pressure proof.** `cop_publisher` uses a bounded queue with drop-oldest eviction + worker thread pool. The pipeline reader never blocks on HTTP.
-- **Event loop never stalls.** The AI engine (swarm, coord-attack, ML, ROE, lineage) runs in a `run_in_executor` thread pool. `/ingest` returns in milliseconds even during 2-second AI passes.
-- **Shallow state snapshots** are handed to the executor — no torn reads under concurrent ingest.
-- **Lineage is append-only.** Each subsystem writes its decision fragment; the chain is never mutated, making it audit-safe.
+- **Event loop never stalls.** The AI engine runs in `run_in_executor` thread pool. `/ingest` returns in milliseconds even during 2-second AI passes.
+- **Back-pressure proof.** `cop_publisher` uses a bounded queue with drop-oldest eviction.
+- **Tamper-evident lineage.** SHA-256 hash chain per track — any modification is detectable.
+- **TimescaleDB native.** `(id, time)` composite primary key enables true time-series partitioning.
 
 ---
 
@@ -132,32 +145,28 @@ Stages: `ingest → threat_assess → ml_threat → anomaly → coord_attack →
 ```
 adapters/         real-world sensor adapters (ADS-B, AIS, REST)
 agents/           sensor simulation + fusion + cop_publisher
-  cop_publisher.py        pipeline → COP REST ingest (thread pool)
-  fuser/                  multi-sensor fusion + intent + ML scoring
-  radar_sim/ eo_sim/ rf_sim/ world/
-ai/               AI decision support
+ai/
   anomaly.py              anomaly + swarm detection
   coordinated_attack.py   pincer / convergence detection
-  lineage.py              decision provenance store           ← NEW
+  lineage.py              SHA-256 hash-chained decision provenance
   llm_advisor.py          Claude / OpenAI operator advisor
   ml_threat.py            RandomForest threat classifier
   predictor.py            Kalman track prediction
   roe.py                  rules-of-engagement advisory
   tactical.py             recommendation engine
   timeline.py             threat score timeline
+  trajectory.py           LSTM 12-step trajectory predictor
+  trajectory_model.pt     trained LSTM weights (829 KB)
   zone_breach.py          predictive breach + uncertainty cones
   aar.py                  after-action report generator
-auth/             JWT + role-based access (optional)
-cop/              FastAPI COP server
-  server.py               ingest, state, WS, AI hooks, metrics, lineage API
-  static/app.js           Leaflet UI + lineage modal + fire control
-db/               SQLAlchemy + TimescaleDB
+auth/             JWT + role-based access
+cop/              FastAPI COP server + Leaflet UI
+db/               SQLAlchemy + TimescaleDB models + migrations
 k8s/              Kubernetes manifests
 orchestrator/     agent registry + heartbeat
 scenarios/        single_drone / swarm / coordinated / multi_axis_attack / decoy
-scripts/          compare_scenarios.py, smoke_test.py
 tests/            184 pytest tests
-run_pipeline.py   pipeline launcher
+train_trajectory.py  synthetic data generator + LSTM training script
 start.py          one-command boot: orchestrator + COP + pipeline
 ```
 
@@ -168,14 +177,31 @@ start.py          one-command boot: orchestrator + COP + pipeline
 ```bash
 pip install -r requirements.txt
 
-# All-in-one (orchestrator + COP server + pipeline):
+# Optional: train LSTM trajectory model (pre-trained weights included)
+python train_trajectory.py --epochs 40 --samples 10000
+
+# All-in-one boot:
 python start.py --scenario scenarios/multi_axis_attack.json
 ```
 
-Open **http://127.0.0.1:8100** — the live Leaflet COP UI.
+Open **http://127.0.0.1:8100**
 
-**Left-click** a track → threat timeline chart  
-**Right-click** a track → Decision Lineage modal (full provenance chain)
+**Left-click** a track → threat timeline  
+**Right-click** a track → Decision Lineage (hash chain) or Claim Track
+
+### With PostgreSQL / TimescaleDB
+
+```bash
+# Start DB container
+docker compose up db -d
+
+# Set connection string
+export DATABASE_URL=postgresql+asyncpg://nizam:nizam@localhost:5432/nizam
+
+python start.py --scenario scenarios/multi_axis_attack.json
+```
+
+Tables are created automatically on first run. TimescaleDB hypertables are enabled if the extension is present.
 
 ### Key Endpoints
 
@@ -183,137 +209,90 @@ Open **http://127.0.0.1:8100** — the live Leaflet COP UI.
 |---|---|
 | `http://127.0.0.1:8100` | COP UI |
 | `/api/metrics` | Runtime metrics (ingest rate, tactical p50/p95, WS) |
-| `/api/ai/lineage/{track_id}` | Decision chain for a track (JSON) |
-| `/api/ai/status` | AI subsystem status |
+| `/api/ai/lineage/{track_id}` | Hash-chained decision provenance for a track |
+| `/api/ai/status` | AI subsystem status (LSTM ready, ML model, LLM) |
 | `/api/ai/aar` | After-action report |
+| `/api/operators` | Active operator sessions |
 | `http://127.0.0.1:8200` | Orchestrator agent health |
 
-### Benchmark Runner
+---
+
+## LSTM Trajectory Training
+
+Pre-trained weights (`ai/trajectory_model.pt`) are included. To retrain:
 
 ```bash
-python scripts/compare_scenarios.py --duration 30
+python train_trajectory.py --epochs 40 --samples 10000
+# epoch  40/40  val=0.00010  (~50m RMSE)
 ```
 
-Runs all 5 scenarios against a live COP server, prints a comparison table, saves full AAR bundle to `reports/`.
-
-### Smoke Test
-
-```bash
-python scripts/smoke_test.py --duration 12
-```
-
-Boots server, runs pipeline, asserts metrics, exits 0 on pass.
+Synthetic trajectory patterns: straight, constant-rate turn, acceleration/deceleration, S-curve, evasive jink. Model input: 20-step history × 5 features (Δx, Δy, speed, sin/cos heading). Output: 12-step predicted (Δx, Δy) offsets.
 
 ---
 
-## Performance
-
-Load tested against `multi_axis_attack` (5 simultaneous drones/helicopters from 4 cardinal directions — 67+ concurrent tracks):
-
-| Fix | Before | After |
-|---|---|---|
-| `cop_publisher` thread pool + drop-oldest queue | pipeline deadlocked at ~207 s | clean exit, 0 dropped, 0 failed |
-| Tactical engine offload to executor | 239 POST timeouts / 60 s | **0 failed** / 60 s |
-
-Tactical engine timing observed on 5-scenario benchmark (1161 ingests, 45 ticks, 150 s wall time):
-
-```
-tactical.p50_ms = 1100.6
-tactical.p95_ms = 1920.3
-tactical.max_ms = 2115.5
-tactical.failed = 0
-tactical.overlap_skipped = 0
-```
-
-A tactical tick takes up to 2.1 s under load. On the event loop, that would freeze `/ingest` for 1–2 s per tick. The executor offload removes this entirely.
-
----
-
-## Running Tests
+## Decision Lineage API
 
 ```bash
-pytest tests/ -v                          # 184 unit tests
-python scripts/smoke_test.py --duration 12  # end-to-end
+curl http://127.0.0.1:8100/api/ai/lineage/T-R012-A018
 ```
 
-CI runs both on every push to `main` (GitHub Actions, Python 3.10 / 3.11 / 3.12).
-
----
-
-## Event Model
-
-**Track ingest** (sensor agent → COP):
-```json
-{
-  "event_type": "cop.track",
-  "payload": {
-    "id": "T-R012-A018",
-    "lat": 41.020, "lon": 28.985,
-    "intent": "attack",
-    "threat_level": "HIGH",
-    "classification": {"label": "drone", "confidence": 0.85},
-    "supporting_sensors": ["radar-01", "rf-01"],
-    "kinematics": {"range_m": 1200.0, "az_deg": 185.0, "speed_mps": 32.0}
-  }
-}
-```
-
-**AI update** (COP → browser, WebSocket):
-```json
-{
-  "event_type": "cop.ai_update",
-  "payload": {
-    "predictions":    {"T-R012-A018": [ ...12 future points... ]},
-    "recommendations": [{"type": "ESCALATE", "priority": 1, "track_ids": [...]}],
-    "coord_attacks":   [{"subtype": "PINCER", "count": 8, "time_to_convergence_s": 23}],
-    "roe_advisories":  [{"engagement": "WEAPONS_TIGHT", "urgency": "HIGH"}],
-    "ml_predictions":  {"T-R012-A018": {"ml_level": "HIGH", "ml_probability": 0.94}}
-  }
-}
-```
-
-**Lineage query** (`GET /api/ai/lineage/T-R012-A018`):
 ```json
 {
   "track_id": "T-R012-A018",
-  "summary": {"count": 9, "stages": ["anomaly","coord_attack","fire_control","ingest",...], "first": "...", "last": "..."},
+  "summary": {"count": 8, "stages": ["anomaly","coord_attack","ingest","ml_threat","roe","tactical"], "first": "...", "last": "..."},
   "chain": [
-    {"stage": "ingest",       "summary": "Track update — sensors: radar-01, rf-01", "timestamp": "..."},
-    {"stage": "threat_assess","summary": "Threat → HIGH (score=92, intent=attack)",  "timestamp": "..."},
-    {"stage": "ml_threat",    "summary": "RandomForest → HIGH (0.94)",               "timestamp": "..."},
-    ...
-    {"stage": "fire_control", "summary": "ENGAGE approved → effector launched",      "timestamp": "..."}
+    {
+      "stage": "ingest",
+      "summary": "Track update — sensors: radar-01, rf-01",
+      "hash": "73c17c3d1bbf3d23...",
+      "prev_hash": "0000000000000000...",
+      "timestamp": "2026-04-09T07:14:22Z"
+    },
+    {
+      "stage": "ml_threat",
+      "summary": "RandomForest → HIGH (0.94)",
+      "hash": "e7bba53b4b30acf6...",
+      "prev_hash": "73c17c3d1bbf3d23...",
+      "timestamp": "2026-04-09T07:14:23Z"
+    }
   ]
 }
 ```
 
 ---
 
-## Aerospace Ground Systems Mission Scenario
+## Performance
 
-NIZAM can serve as a real-time situational awareness and decision-support layer for aerospace ground operations where multiple heterogeneous sensors must be correlated into a single operational picture.
+Load tested against `multi_axis_attack` (67+ concurrent tracks):
 
-**Application domains:**
-- Launch-site and spaceport perimeter security
-- Ground-station monitoring for space missions
-- Autonomous facility surveillance for aerospace infrastructure
-- Pre-launch and post-landing operational awareness
+| Metric | Value |
+|---|---|
+| tactical.p50 | 1100 ms |
+| tactical.p95 | 1920 ms |
+| tactical.failed | 0 |
+| ingest failed | 0 |
+| LSTM inference (per track) | < 5 ms (CPU) |
 
-**Example mission flow:**
-1. Multiple sensors generate track events around a launch facility
-2. NIZAM ingests events via standardized interfaces (radar ASTERIX, ADS-B, AIS, REST)
-3. The system maintains authoritative state: who is where, doing what, with what confidence
-4. A synchronized COP streams to all connected operators in real time
-5. Operators approve or reject AI-generated engagement recommendations
-6. Every decision is recorded in the lineage chain for post-mission audit
+Tactical engine runs in executor thread pool — zero impact on `/ingest` latency.
+
+---
+
+## Running Tests
+
+```bash
+pytest tests/ -v                             # 184 unit tests
+python scripts/smoke_test.py --duration 12   # end-to-end
+```
+
+CI runs on every push to `main` (GitHub Actions, Python 3.10–3.12).
 
 ---
 
 ## Scope and Limitations
 
-This is a technical prototype for demonstration and educational purposes. It does **not** represent an active or deployed military system.
+Technical prototype for demonstration and educational purposes. Does **not** represent an active or deployed military system.
 
-**In scope:** architecture, real-time behavior, AI decision support, multi-sensor fusion, decision lineage, operator-centric COP design, performance hardening.
+**In scope:** architecture, real-time behavior, AI decision support, multi-sensor fusion, cryptographically-linked decision provenance, LSTM trajectory prediction, TimescaleDB persistence, multi-operator coordination.
 
 **Out of scope:** classified data handling, fielded-grade security, production key management, live effector integration.
 
@@ -329,4 +308,4 @@ Focus areas: Command & Control Systems, Real-Time Operational Software, COP / IS
 
 ## Keywords
 
-Common Operational Picture · C2 · ISR · Defense Software · Real-Time Systems · Event-Driven Architecture · Multi-Sensor Fusion · AI Decision Support · Decision Lineage · Decision Provenance · Aerospace Ground Systems · Anduril Lattice · Palantir Gotham · FastAPI · WebSocket · Leaflet
+Common Operational Picture · C2 · ISR · Defense Software · Real-Time Systems · Event-Driven Architecture · Multi-Sensor Fusion · AI Decision Support · Decision Lineage · SHA-256 Hash Chain · LSTM Trajectory Prediction · TimescaleDB · Multi-Operator · Anduril Lattice · Palantir Gotham · FastAPI · WebSocket · Leaflet
