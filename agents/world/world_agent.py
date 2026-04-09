@@ -2,21 +2,13 @@
 import json
 import math
 import time
-import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+from shared.utils import utc_now_iso, wrap_deg, make_envelope
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
-def wrap_deg(a: float) -> float:
-    # wrap to [-180, 180)
-    a = (a + 180.0) % 360.0 - 180.0
-    return a
 
 @dataclass
 class Entity:
@@ -52,21 +44,6 @@ class Entity:
             omega = (v_tan / self.range_m)            # rad/s
             self.az_deg = wrap_deg(self.az_deg + math.degrees(omega) * dt)
 
-def make_envelope(event_type: str, source_agent: str, instance_id: str, host: str,
-                  correlation_id: str, payload: dict, ts: Optional[str] = None) -> dict:
-    return {
-        "schema_version": "1.1",
-        "event_id": str(uuid.uuid4()),
-        "event_type": event_type,
-        "timestamp": ts or utc_now_iso(),
-        "source": {
-            "agent_id": source_agent,
-            "instance_id": instance_id,
-            "host": host
-        },
-        "correlation_id": correlation_id,
-        "payload": payload
-    }
 
 def default_entities() -> List[Entity]:
     # Drone: approaching the origin

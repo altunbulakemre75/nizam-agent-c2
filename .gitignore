@@ -25,6 +25,9 @@ Thumbs.db
 # Docker
 *.tar
 
+# Test cache
+.pytest_cache/
+
 # Alembic
 alembic/versions/*.pyc
 

@@ -1,11 +1,9 @@
 ﻿import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+from shared.utils import utc_now_iso
 
 def ensure_dir(p: Path):
     p.parent.mkdir(parents=True, exist_ok=True)

@@ -1,14 +1,10 @@
 ﻿import argparse
 import json
 import time
-from datetime import datetime
 
 import httpx
 
-def parse_ts(ts: str) -> float:
-    if ts.endswith("Z"):
-        ts = ts[:-1] + "+00:00"
-    return datetime.fromisoformat(ts).timestamp()
+from shared.utils import parse_ts
 
 def main():
     ap = argparse.ArgumentParser(description="Push JSONL events to COP /ingest endpoint.")

@@ -2,23 +2,8 @@
 import json
 import random
 import sys
-import uuid
-from datetime import datetime, timezone
-from typing import Optional
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-def make_envelope(event_type, source_agent, instance_id, host, correlation_id, payload, ts=None):
-    return {
-        "schema_version": "1.1",
-        "event_id": str(uuid.uuid4()),
-        "event_type": event_type,
-        "timestamp": ts or utc_now_iso(),
-        "source": {"agent_id": source_agent, "instance_id": instance_id, "host": host},
-        "correlation_id": correlation_id,
-        "payload": payload
-    }
+from shared.utils import utc_now_iso, make_envelope
 
 def main():
     ap = argparse.ArgumentParser(description="RF sim agent: takes radar detections and emits RF detections (bearing).")

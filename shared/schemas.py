@@ -5,7 +5,6 @@ from typing import Dict, Any
 
 class AgentName(str, Enum):
     camera = "camera"
-    machine = "machine"
 
 
 class TaskRequest(BaseModel):

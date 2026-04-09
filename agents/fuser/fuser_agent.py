@@ -15,41 +15,17 @@ import io
 import json
 import math
 import sys
-import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # Force UTF-8 output on Windows (avoids cp1254 encode errors)
 if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def wrap_deg(a: float) -> float:
-    return (a + 180.0) % 360.0 - 180.0
+from shared.utils import utc_now_iso, wrap_deg, make_envelope
 
 
 def ang_diff_deg(a: float, b: float) -> float:
     return abs(wrap_deg(a - b))
-
-
-def make_envelope(event_type, source_agent, instance_id, host, correlation_id, payload, ts=None):
-    return {
-        "schema_version": "1.1",
-        "event_id": str(uuid.uuid4()),
-        "event_type": event_type,
-        "timestamp": ts or utc_now_iso(),
-        "source": {"agent_id": source_agent, "instance_id": instance_id, "host": host},
-        "correlation_id": correlation_id,
-        "payload": payload,
-    }
 
 
 # ---------------------------------------------------------------------------

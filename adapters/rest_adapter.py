@@ -47,16 +47,9 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+from shared.utils import utc_now_iso
 
 
 def dot_get(obj: Dict, path: str) -> Any:
