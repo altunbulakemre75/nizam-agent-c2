@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from shared.utils import utc_now_iso
 
 def ensure_dir(p: Path):

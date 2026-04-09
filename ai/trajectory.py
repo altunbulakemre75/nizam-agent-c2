@@ -30,7 +30,8 @@ except ImportError:
     log.warning("[trajectory] PyTorch/NumPy not installed — LSTM disabled")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-SEQ_LEN     = 20      # input window (timesteps)
+SEQ_LEN     = 8       # min observations before predicting (lowered for track-ID churn)
+MODEL_SEQ   = 20      # model was trained with 20-step input — pad shorter sequences
 PRED_STEPS  = 12      # future steps to predict
 HIDDEN      = 128
 LAYERS      = 2
@@ -125,7 +126,8 @@ class _TrajectoryPredictor:
         if len(hist) < SEQ_LEN:
             return None
 
-        hist = hist[-SEQ_LEN:]
+        # Use up to MODEL_SEQ most recent points
+        hist = hist[-MODEL_SEQ:]
         lat0, lon0 = hist[-1]["lat"], hist[-1]["lon"]
 
         # Build normalised feature sequence
@@ -141,9 +143,13 @@ class _TrajectoryPredictor:
                 math.cos(hdg_r),
             ])
 
+        # Pad to MODEL_SEQ by repeating the first observation
+        while len(seq) < MODEL_SEQ:
+            seq.insert(0, seq[0])
+
         with torch.no_grad():
-            x_t   = torch.tensor([seq], dtype=torch.float32)   # [1,SEQ,5]
-            preds  = self._model(x_t).squeeze(0).numpy()        # [PRED,2]
+            x_t   = torch.tensor([seq], dtype=torch.float32)   # [1, MODEL_SEQ, 5]
+            preds  = self._model(x_t).squeeze(0).numpy()        # [PRED, 2]
 
         # Denormalise
         preds *= POS_SCALE

@@ -136,6 +136,17 @@ def translate_track_update(payload: Dict[str, Any], origin_lat: float, origin_lo
             hlat, hlon = polar_to_latlon(float(hr), float(haz), origin_lat, origin_lon)
             history_latlon.append({"lat": hlat, "lon": hlon, "ts": h.get("ts", "")})
 
+    # Derive speed & heading from kinematics for LSTM trajectory predictor
+    vr = float(kin.get("radial_velocity_mps") or 0.0)
+    ak = float(kin.get("az_deg") or 0.0)
+    speed = abs(vr)  # radial speed magnitude
+    # heading: if approaching (vr<0) heading ≈ az + 180 (toward origin),
+    #          if receding  (vr>0) heading ≈ az (away from origin)
+    if vr < 0:
+        heading = (ak + 180.0) % 360.0
+    else:
+        heading = ak % 360.0
+
     return {
         # Keys for COP server state store
         "global_track_id": gid,
@@ -143,6 +154,9 @@ def translate_track_update(payload: Dict[str, Any], origin_lat: float, origin_lo
         # Keys for Leaflet map rendering
         "lat": lat,
         "lon": lon,
+        # Speed & heading (for LSTM trajectory predictor)
+        "speed": round(speed, 2),
+        "heading": round(heading, 2),
         # Passthrough fields
         "status": payload.get("status", "TENTATIVE"),
         "classification": payload.get("classification", {}),

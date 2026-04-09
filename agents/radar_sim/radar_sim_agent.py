@@ -6,6 +6,8 @@ import sys
 import uuid
 from typing import Dict, Any, List
 
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from shared.utils import utc_now_iso, wrap_deg, make_envelope
 
 def main():
