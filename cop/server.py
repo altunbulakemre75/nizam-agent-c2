@@ -50,6 +50,7 @@ from ai import roe as ai_roe
 from ai import ml_threat as ai_ml
 from ai import lineage as ai_lineage
 from ai import trajectory as ai_trajectory
+from ai import track_fsm
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -201,6 +202,31 @@ METRICS: Dict[str, Any] = {
 }
 
 _TACTICAL_RECENT_MAX = 32
+
+
+# ── Rate limiter (token bucket per IP) ──────────────────────────────────────
+_RATE_LIMIT_RPS    = 200        # max requests per second per IP
+_RATE_LIMIT_BURST  = 500        # burst capacity
+_rate_buckets: Dict[str, list]  = {}    # {ip: [tokens, last_refill_time]}
+
+def _rate_limit_check(ip: str) -> bool:
+    """Return True if request is allowed, False if rate-limited."""
+    now = _time_mod.monotonic()
+    bucket = _rate_buckets.get(ip)
+    if bucket is None:
+        _rate_buckets[ip] = [_RATE_LIMIT_BURST - 1, now]
+        return True
+    tokens, last = bucket
+    # Refill tokens
+    elapsed = now - last
+    tokens = min(_RATE_LIMIT_BURST, tokens + elapsed * _RATE_LIMIT_RPS)
+    if tokens < 1.0:
+        bucket[0] = tokens
+        bucket[1] = now
+        return False
+    bucket[0] = tokens - 1
+    bucket[1] = now
+    return True
 
 
 def _metrics_record_tactical_duration(ms: float) -> None:
@@ -814,24 +840,26 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
     Background task: resolve an ENGAGE order against a track.
 
     Sequence:
-      1) Broadcast cop.effector_impact{target, lat, lon, delay_s}.
+      1) FSM transition → ENGAGING.
+      2) Broadcast cop.effector_impact{target, lat, lon, delay_s}.
          The UI uses this to start the expanding-circle animation.
-      2) Sleep _EFFECTOR_IMPACT_DELAY_S to simulate weapon flight time.
-      3) Remove the track and its threat from STATE under the lock.
-      4) Broadcast cop.track_removed so the UI drops the marker.
+      3) Sleep _EFFECTOR_IMPACT_DELAY_S to simulate weapon flight time.
+      4) FSM transition → DESTROYED. Remove the track from STATE.
+      5) Broadcast cop.track_removed so the UI drops the marker.
 
     If the target disappears mid-flight (e.g. fusion lost it), we still
     broadcast track_removed with whatever id we had so the UI cleans up
     the animation gracefully.
     """
-    # 1) Look up the target's current position for the impact event.
+    # 1) FSM → ENGAGING + look up the target's current position.
+    track_fsm.on_engage(target_id)
     async with STATE_LOCK:
         target = STATE["tracks"].get(target_id)
         if not target:
-            # Track already gone — nothing to engage, quietly stop.
             log.info("[fire] engage %s: target %s not found, aborting",
                      task_id, target_id)
             return
+        target["track_state"] = "ENGAGING"
         lat = target.get("lat")
         lon = target.get("lon")
 
@@ -863,12 +891,11 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
     # 2) Simulate weapon flight time.
     await asyncio.sleep(_EFFECTOR_IMPACT_DELAY_S)
 
-    # 3) Remove target from state (track + threat).
+    # 3) FSM → DESTROYED. Remove target from state.
+    track_fsm.on_destroyed(target_id)
     async with STATE_LOCK:
         STATE["tracks"].pop(target_id, None)
         STATE["threats"].pop(target_id, None)
-        # Also clean up the AI prediction cache for this track so the
-        # tactical engine doesn't keep reasoning about a dead target.
         AI_PREDICTIONS.pop(target_id, None)
         AI_TRAJECTORIES.pop(target_id, None)
         ai_trajectory.drop_track(target_id)
@@ -1071,6 +1098,7 @@ async def api_reset(_=Depends(require_operator())):
         AI_ANOMALIES.clear()
         AI_RECOMMENDATIONS.clear()
         ai_trajectory.clear()
+        track_fsm.clear()
         AI_PRED_BREACHES.clear()
         AI_UNCERTAINTY_CONES.clear()
         AI_COORD_ATTACKS.clear()
@@ -1104,13 +1132,36 @@ async def api_reset(_=Depends(require_operator())):
 
 @app.post("/ingest")
 async def ingest(req: Request):
-    body       = await req.json()
+    # Rate limiting
+    client_ip = req.client.host if req.client else "unknown"
+    if not _rate_limit_check(client_ip):
+        METRICS["ingest_bad_request"] += 1
+        return JSONResponse({"ok": False, "error": "rate limited"}, status_code=429)
+
+    # Size guard — reject payloads > 256 KB
+    content_length = req.headers.get("content-length")
+    if content_length and int(content_length) > 262_144:
+        METRICS["ingest_bad_request"] += 1
+        return JSONResponse({"ok": False, "error": "payload too large"}, status_code=413)
+
+    try:
+        body = await req.json()
+    except Exception:
+        METRICS["ingest_bad_request"] += 1
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
     event_type = body.get("event_type")
     payload    = body.get("payload")
 
     if not event_type or payload is None:
         METRICS["ingest_bad_request"] += 1
         return JSONResponse({"ok": False, "error": "missing event_type/payload"}, status_code=400)
+
+    # Validate event_type whitelist
+    _VALID_EVENT_TYPES = {"cop.track", "cop.threat", "cop.zone", "cop.alert",
+                          "cop.asset", "cop.task", "cop.waypoint"}
+    if event_type not in _VALID_EVENT_TYPES:
+        METRICS["ingest_bad_request"] += 1
+        return JSONResponse({"ok": False, "error": f"unknown event_type: {event_type}"}, status_code=400)
 
     METRICS["ingest_total"] += 1
     METRICS["ingest_by_type"][event_type] = METRICS["ingest_by_type"].get(event_type, 0) + 1
@@ -1129,6 +1180,11 @@ async def ingest(req: Request):
                 or payload.get("global_track_id") or payload.get("gid")
             )
             if track_id is not None:
+                # Track FSM: update lifecycle state
+                sensors = payload.get("supporting_sensors", [])
+                fsm_state = track_fsm.on_update(str(track_id), sensors)
+                payload["track_state"] = fsm_state.value
+
                 STATE["tracks"][str(track_id)] = payload
                 lat = payload.get("lat")
                 lon = payload.get("lon")
@@ -1144,7 +1200,6 @@ async def ingest(req: Request):
 
                 # Decision lineage: first sighting of this track.
                 try:
-                    sensors = payload.get("supporting_sensors", [])
                     ai_lineage.record(
                         track_id=str(track_id),
                         stage="ingest",
@@ -1156,7 +1211,7 @@ async def ingest(req: Request):
                             "classification": payload.get("classification"),
                             "sensors": sensors,
                         },
-                        outputs={"state": "tracked"},
+                        outputs={"state": fsm_state.value},
                         rule="cop.ingest",
                     )
                 except Exception:
@@ -1741,6 +1796,8 @@ async def api_ai_status():
         "ml_model": ai_ml.get_model_info(),
         "llm_enabled": ai_llm.LLM_ENABLED,
         "llm_provider": ai_llm.LLM_PROVIDER if ai_llm.LLM_ENABLED else None,
+        "track_fsm": track_fsm.stats(),
+        "lstm_trajectory": ai_trajectory.stats(),
     })
 
 

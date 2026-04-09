@@ -443,8 +443,9 @@ function applySnapshot(payload) {
   renderOperatorPanel();
 
   // AI state (if present in the snapshot payload)
-  if (payload && (payload.predictions || payload.recommendations
-      || payload.roe_advisories || payload.ml_predictions)) {
+  if (payload && (payload.predictions || payload.trajectories
+      || payload.recommendations || payload.roe_advisories
+      || payload.ml_predictions)) {
     applyAIUpdate(payload);
   }
 }
