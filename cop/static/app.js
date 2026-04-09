@@ -453,6 +453,7 @@ function applySnapshot(payload) {
 function applyAIUpdate(payload) {
   if (!payload) return;
   drawPredictions(payload.predictions || {});
+  drawTrajectories(payload.trajectories || {});
   drawUncertaintyCones(payload.uncertainty_cones || {});
   renderBreachPanel(payload.pred_breaches || []);
   renderCoordPanel(payload.coord_attacks || []);
@@ -886,6 +887,50 @@ function drawPredictions(predictions) {
       predictionLines.set(tid, pl);
     } else {
       ex.setLatLngs(lls);
+    }
+  }
+}
+
+/* ── AI: LSTM Trajectory predictions ───────────────────── */
+const trajectoryLines = new Map();  // track_id -> L.polyline
+
+function drawTrajectories(trajectories) {
+  // trajectories: {track_id: [{lat,lon,step,t}, ...]}
+  if (!trajectories || !UI.map) return;
+
+  // Remove stale lines
+  for (const [id, pl] of trajectoryLines) {
+    if (!trajectories[id]) { try { pl.remove(); } catch {} trajectoryLines.delete(id); }
+  }
+
+  for (const [tid, pts] of Object.entries(trajectories)) {
+    if (!pts || !pts.length) continue;
+    const track = UI.tracks.get(tid);
+    if (!track) continue;
+    const trackLL = getLL(track);
+    if (!trackLL) continue;
+
+    const threat = UI.threats.get(tid);
+    const level  = threat?.threat_level ?? track.threat_level ?? "LOW";
+    const baseColor = THREAT_COLORS[level] ?? "#2980b9";
+
+    // Build gradient-fading segments (full line + faded tip)
+    const lls = [trackLL, ...pts.map(p => [p.lat, p.lon])];
+
+    const ex = trajectoryLines.get(tid);
+    if (!ex) {
+      const pl = L.polyline(lls, {
+        color: baseColor, weight: 2.5, opacity: 0.55,
+        dashArray: "6 4",
+      }).addTo(UI.map);
+      pl.bindTooltip(
+        `LSTM Trajectory: ${tid}<br>${pts.length} steps ahead`,
+        { sticky: true, opacity: 0.85 }
+      );
+      trajectoryLines.set(tid, pl);
+    } else {
+      ex.setLatLngs(lls);
+      ex.setStyle({ color: baseColor });
     }
   }
 }
@@ -2383,6 +2428,7 @@ function applyReplayFrame(state) {
   applySnapshot(state);
   // Also apply AI overlay data if present
   if (state.predictions) drawPredictions(state.predictions);
+  if (state.trajectories) drawTrajectories(state.trajectories);
   if (state.uncertainty_cones) drawUncertaintyCones(state.uncertainty_cones);
   if (state.pred_breaches) renderBreachPanel(state.pred_breaches);
   if (state.coord_attacks) renderCoordPanel(state.coord_attacks);

@@ -49,6 +49,7 @@ from ai import aar as ai_aar
 from ai import roe as ai_roe
 from ai import ml_threat as ai_ml
 from ai import lineage as ai_lineage
+from ai import trajectory as ai_trajectory
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -141,7 +142,8 @@ TASK_EMITTED: Dict[str, Set[str]] = {}
 EVENT_TAIL_MAX = 500
 
 # Phase 5 — AI state
-AI_PREDICTIONS: Dict[str, List[Dict]] = {}   # {track_id: [predicted points]}
+AI_PREDICTIONS: Dict[str, List[Dict]] = {}   # {track_id: [Kalman predicted points]}
+AI_TRAJECTORIES: Dict[str, List[Dict]] = {}  # {track_id: [LSTM predicted waypoints]}
 AI_ANOMALIES: List[Dict] = []                # recent anomalies (max 100)
 AI_RECOMMENDATIONS: List[Dict] = []           # latest tactical recommendations
 AI_PRED_BREACHES: List[Dict] = []             # predictive zone breach warnings
@@ -609,6 +611,7 @@ def _make_snapshot_payload() -> Dict[str, Any]:
         "tasks":     [t for t in STATE["tasks"].values() if t["status"] == "PENDING"],
         "waypoints": list(STATE["waypoints"].values()),
         "predictions":       AI_PREDICTIONS,
+        "trajectories":      AI_TRAJECTORIES,
         "anomalies":         AI_ANOMALIES[-20:],
         "recommendations":   AI_RECOMMENDATIONS,
         "pred_breaches":     AI_PRED_BREACHES,
@@ -867,6 +870,8 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
         # Also clean up the AI prediction cache for this track so the
         # tactical engine doesn't keep reasoning about a dead target.
         AI_PREDICTIONS.pop(target_id, None)
+        AI_TRAJECTORIES.pop(target_id, None)
+        ai_trajectory.drop_track(target_id)
         AI_ML_PREDICTIONS.pop(target_id, None)
 
     # 4) Tell the UI to drop the marker.
@@ -1062,8 +1067,10 @@ async def api_reset(_=Depends(require_operator())):
         TASK_EMITTED.clear()
         TRACK_CLAIMS.clear()
         AI_PREDICTIONS.clear()
+        AI_TRAJECTORIES.clear()
         AI_ANOMALIES.clear()
         AI_RECOMMENDATIONS.clear()
+        ai_trajectory.clear()
         AI_PRED_BREACHES.clear()
         AI_UNCERTAINTY_CONES.clear()
         AI_COORD_ATTACKS.clear()
@@ -1244,13 +1251,23 @@ _ai_tactical_bg_lock = asyncio.Lock()
 
 
 def _ai_process_track(track_id: str, lat: float, lon: float, intent: str) -> None:
-    """Run predictor + anomaly detection on a single track update."""
+    """Run predictor + anomaly detection + LSTM trajectory on a single track update."""
+    track = STATE["tracks"].get(track_id, {})
+    speed   = float(track.get("speed") or track.get("kinematics", {}).get("speed_mps") or 0.0)
+    heading = float(track.get("heading") or track.get("kinematics", {}).get("heading_deg") or 0.0)
+
     # 1) Kalman filter prediction
     preds = ai_predictor.update_track(track_id, lat, lon)
     if preds:
         AI_PREDICTIONS[track_id] = preds
 
-    # 2) Anomaly detection
+    # 2) LSTM trajectory prediction
+    ai_trajectory.update(track_id, lat, lon, speed=speed, heading=heading)
+    traj = ai_trajectory.predict(track_id)
+    if traj:
+        AI_TRAJECTORIES[track_id] = traj
+
+    # 3) Anomaly detection
     anomalies = ai_anomaly.check_track(track_id, lat, lon, intent=intent)
     if anomalies:
         AI_ANOMALIES.extend(anomalies)
@@ -1459,13 +1476,30 @@ def _schedule_ai_tactical() -> bool:
 
 @app.get("/api/ai/predictions")
 async def api_ai_predictions(track_id: Optional[str] = Query(None)):
-    """Get predicted future positions for tracks."""
+    """Get Kalman predicted future positions for tracks."""
     if track_id:
         return JSONResponse({
             "track_id": track_id,
             "predictions": AI_PREDICTIONS.get(track_id, []),
         })
     return JSONResponse({"predictions": {k: v for k, v in AI_PREDICTIONS.items()}})
+
+
+@app.get("/api/ai/trajectories")
+async def api_ai_trajectories(track_id: Optional[str] = Query(None)):
+    """Get LSTM trajectory predictions for tracks."""
+    stats = ai_trajectory.stats()
+    if track_id:
+        return JSONResponse({
+            "track_id":   track_id,
+            "trajectory": AI_TRAJECTORIES.get(track_id, []),
+            "model":      stats,
+        })
+    return JSONResponse({
+        "count":       len(AI_TRAJECTORIES),
+        "model":       stats,
+        "trajectories": AI_TRAJECTORIES,
+    })
 
 
 @app.get("/api/ai/anomalies")
