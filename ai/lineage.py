@@ -1,5 +1,5 @@
 """
-ai/lineage.py  —  Decision lineage store for NIZAM
+ai/lineage.py  —  Cryptographically-linked decision lineage for NIZAM
 
 Records the chain of decisions that led to a track's current state.
 Answers the question: "why is this track classified as HIGH threat?"
@@ -9,14 +9,21 @@ appends a LineageRecord to the track's chain when it makes a decision.
 The COP server exposes the chain via GET /api/lineage/{track_id} and the
 browser UI renders it as a timeline when the operator right-clicks a track.
 
+Each record carries a SHA-256 hash of its content and a `prev_hash` pointer
+to the preceding record.  This makes the chain tamper-evident: modifying or
+deleting any record breaks the hash chain, detectable by `verify_chain()`.
+
 Design:
   - Thread-safe (called from both sync AI code and the async server task)
   - Bounded: ring buffer per track + eviction of oldest tracks at capacity
-  - Zero external deps, O(1) append, O(n) read per track
+  - SHA-256 hash chain per track — append-only, tamper-evident
+  - Zero external deps, O(1) append, O(n) read/verify per track
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import uuid
 from collections import defaultdict, deque
@@ -47,6 +54,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _hash_record(record_obj: Dict[str, Any]) -> str:
+    """Deterministic SHA-256 hash of a record's content fields."""
+    canonical = json.dumps(
+        {k: v for k, v in record_obj.items() if k not in ("hash", "prev_hash")},
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -61,6 +77,9 @@ def record(
 ) -> None:
     """
     Record a single decision step in a track's lineage.
+
+    Each record is SHA-256 hashed and linked to the previous record's hash,
+    forming a tamper-evident chain per track.
 
     Parameters
     ----------
@@ -94,7 +113,17 @@ def record(
 
     with _lock:
         is_new = track_id not in _store
-        _store[track_id].append(record_obj)
+        chain = _store[track_id]
+
+        # Link to previous record's hash (genesis record has prev_hash "0"*64)
+        if chain:
+            record_obj["prev_hash"] = chain[-1].get("hash", "0" * 64)
+        else:
+            record_obj["prev_hash"] = "0" * 64
+
+        record_obj["hash"] = _hash_record(record_obj)
+
+        chain.append(record_obj)
         if is_new:
             _track_order.append(track_id)
             while len(_track_order) > _MAX_TRACKS:
@@ -129,6 +158,38 @@ def get_summary(track_id: str) -> Dict[str, Any]:
         "first": chain[0]["timestamp"],
         "last": chain[-1]["timestamp"],
     }
+
+
+def verify_chain(track_id: str) -> Dict[str, Any]:
+    """
+    Verify the hash chain integrity for a track.
+
+    Returns {"valid": True/False, "records": N, "broken_at": index or None}.
+    """
+    with _lock:
+        chain = list(_store.get(track_id, []))
+
+    if not chain:
+        return {"valid": True, "records": 0, "broken_at": None}
+
+    for i, rec in enumerate(chain):
+        # Verify own hash
+        expected = _hash_record(rec)
+        if rec.get("hash") != expected:
+            return {"valid": False, "records": len(chain), "broken_at": i,
+                    "reason": "hash mismatch"}
+
+        # Verify prev_hash linkage
+        if i == 0:
+            if rec.get("prev_hash") != "0" * 64:
+                return {"valid": False, "records": len(chain), "broken_at": 0,
+                        "reason": "genesis prev_hash invalid"}
+        else:
+            if rec.get("prev_hash") != chain[i - 1].get("hash"):
+                return {"valid": False, "records": len(chain), "broken_at": i,
+                        "reason": "prev_hash linkage broken"}
+
+    return {"valid": True, "records": len(chain), "broken_at": None}
 
 
 def get_all_track_ids() -> List[str]:
