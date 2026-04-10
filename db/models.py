@@ -110,7 +110,15 @@ class AlertRecord(Base):
 
 
 class AuditLog(Base):
-    """Operator write-action audit trail — hypertable on 'time'."""
+    """
+    Operator write-action audit trail — hypertable on 'time'.
+
+    Tamper evidence: each row carries an entry_hash computed as
+        SHA-256(canonical_json || prev_hash)
+    where prev_hash is the entry_hash of the immediately preceding row.
+    Altering or deleting any past row breaks the chain on every row after it,
+    so a compliance verifier can replay the log and detect tampering.
+    """
     __tablename__ = "audit_logs"
     __table_args__ = (PrimaryKeyConstraint("id", "time"),)
 
@@ -124,6 +132,8 @@ class AuditLog(Base):
     detail        = Column(JSON, nullable=True)
     ip            = Column(String(64), nullable=True)
     success       = Column(Integer, default=1)
+    prev_hash     = Column(String(64), nullable=True)   # entry_hash of previous row
+    entry_hash    = Column(String(64), nullable=True)   # sha256 over canonical repr
 
 
 # ---------------------------------------------------------------------------

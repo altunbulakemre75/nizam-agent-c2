@@ -10,9 +10,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import jwt
 from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,7 +45,7 @@ def _decode_token(token: str) -> Optional[str]:
         payload  = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         return username if isinstance(username, str) else None
-    except JWTError:
+    except jwt.PyJWTError:
         return None
 
 

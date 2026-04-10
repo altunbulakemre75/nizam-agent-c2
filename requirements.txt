@@ -11,7 +11,8 @@ asyncpg==0.30.0
 alembic==1.13.3
 
 # Auth (JWT + password hashing)
-python-jose[cryptography]==3.3.0
+# PyJWT (maintained, timezone-aware) replaced python-jose which used utcnow()
+PyJWT>=2.9.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.12
 

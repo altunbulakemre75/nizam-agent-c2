@@ -1559,6 +1559,7 @@ async def api_reset(_=Depends(require_operator())):
         AI_ML_PREDICTIONS.clear()
         AI_ML_PREV_TRACKS.clear()
         ai_ml.clear_feature_cache()
+        cop_audit.reset_chain_cache()
         ai_predictor.reset()
         ai_anomaly.reset()
         ai_tactical.reset()
@@ -3050,10 +3051,58 @@ async def api_audit(
             "detail":        r.detail,
             "ip":            r.ip,
             "success":       bool(r.success),
+            "prev_hash":     r.prev_hash,
+            "entry_hash":    r.entry_hash,
         }
         for r in rows
     ]
     return JSONResponse({"records": records, "total": total, "offset": offset, "limit": limit})
+
+
+@app.get("/api/audit/verify", tags=["system"])
+async def api_audit_verify(
+    _=Depends(require_admin()),
+    db=Depends(get_db),
+):
+    """
+    Admin-only: replay the audit hash chain in time order and report whether
+    the chain is intact. Use this to prove to an auditor that the log has not
+    been silently mutated.
+    """
+    if db is None:
+        return JSONResponse({"ok": False, "error": "DB not configured"}, status_code=503)
+
+    from sqlalchemy import select
+    from db.models import AuditLog
+
+    rows = (await db.execute(
+        select(AuditLog).order_by(AuditLog.time.asc(), AuditLog.id.asc())
+    )).scalars().all()
+
+    records = [
+        {
+            "time":          r.time,
+            "username":      r.username,
+            "role":          r.role,
+            "action":        r.action,
+            "resource_type": r.resource_type,
+            "resource_id":   r.resource_id,
+            "detail":        r.detail,
+            "ip":            r.ip,
+            "success":       bool(r.success),
+            "prev_hash":     r.prev_hash,
+            "entry_hash":    r.entry_hash,
+        }
+        for r in rows
+    ]
+
+    ok, bad_index, message = cop_audit.verify_chain(records)
+    return JSONResponse({
+        "ok":          ok,
+        "message":     message,
+        "total":       len(records),
+        "first_bad":   bad_index,
+    })
 
 
 # ── Kill Chain ──────────────────────────────────────────────────────────────────
