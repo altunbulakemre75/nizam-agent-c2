@@ -1,19 +1,23 @@
 """
-ai/llm_advisor.py  —  LLM-powered tactical advisor (Claude / OpenAI)
+ai/llm_advisor.py  —  LLM-powered tactical advisor (Claude / OpenAI / Ollama)
 
 Provides:
   - Situation briefing: natural-language summary of current COP state
   - Operator chat: answer questions about the tactical situation
   - Command parsing: translate natural-language orders into API calls
 
-Supports Claude (Anthropic) and OpenAI APIs via httpx.
-Falls back to a rule-based summarizer when no API key is configured.
+Supports Claude (Anthropic), OpenAI, and Ollama (local, free) via httpx.
+Falls back to a rule-based summarizer when no provider is configured.
 
 ENV:
-  LLM_PROVIDER        anthropic | openai  (default: anthropic)
+  LLM_PROVIDER        anthropic | openai | ollama  (default: anthropic)
   ANTHROPIC_API_KEY    sk-ant-...
   OPENAI_API_KEY       sk-...
-  LLM_MODEL            model id override (default: claude-sonnet-4-20250514 / gpt-4o)
+  OLLAMA_URL           http://localhost:11434  (default)
+  LLM_MODEL            model id override
+                         anthropic default: claude-sonnet-4-20250514
+                         openai default:    gpt-4o
+                         ollama default:    llama3.2
 """
 from __future__ import annotations
 
@@ -30,10 +34,15 @@ log = logging.getLogger("nizam.ai.llm")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic").lower()
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "")
 
-LLM_ENABLED = bool(ANTHROPIC_API_KEY or OPENAI_API_KEY)
+LLM_ENABLED = bool(
+    (LLM_PROVIDER == "ollama") or
+    ANTHROPIC_API_KEY or
+    OPENAI_API_KEY
+)
 
 # System prompt for the tactical advisor
 SYSTEM_PROMPT = """Sen NIZAM COP sisteminin taktik danismanisin. Gorevlerin:
@@ -215,8 +224,31 @@ async def _call_openai(messages: List[Dict], system: str) -> str:
         return data["choices"][0]["message"]["content"]
 
 
+async def _call_ollama(messages: List[Dict], system: str) -> str:
+    """Call local Ollama instance (OpenAI-compatible endpoint)."""
+    import httpx
+
+    model = LLM_MODEL or "llama3.2"
+    all_messages = [{"role": "system", "content": system}] + messages
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{OLLAMA_URL}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": all_messages,
+                "stream": False,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
 async def _call_llm(messages: List[Dict], system: str) -> str:
     """Route to configured LLM provider."""
+    if LLM_PROVIDER == "ollama":
+        return await _call_ollama(messages, system)
     if LLM_PROVIDER == "openai" and OPENAI_API_KEY:
         return await _call_openai(messages, system)
     elif ANTHROPIC_API_KEY:
