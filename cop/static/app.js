@@ -1684,56 +1684,103 @@ function renderTacticalPanel(recs) {
 }
 
 /* ── AI: LLM Chat panel ───────────────────────────────────── */
-let chatPanelEl = null;
 const chatHistory = [];
 
-function mountChatPanel() {
-  chatPanelEl = el("div", { id:"chat-panel", style:{
-    position:"fixed", top:"12px", left:"50%", transform:"translateX(-50%)",
-    zIndex:"9998", background:"rgba(0,0,0,0.85)", color:"white",
-    padding:"10px 14px", borderRadius:"12px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    lineHeight:"1.5", width:"420px", maxHeight:"400px",
-    display:"none", flexDirection:"column",
-  }});
+function mountAIAdvisorPanel() {
+  const container = el("div", { style: { width:"100%", display:"flex", flexDirection:"column", gap:"6px" } });
 
-  const header = el("div", {style:{display:"flex",justifyContent:"space-between",marginBottom:"6px"}}, [
-    el("b", {}, ["AI Advisor"]),
-    el("button", {style:{background:"none",border:"none",color:"#aaa",cursor:"pointer",fontSize:"14px"},
-      onclick:()=>{ chatPanelEl.style.display="none"; }}, ["\u2715"]),
+  // ── Briefing section ──────────────────────────────────────
+  const briefSection = el("div", { class:"nz-card", style:{ padding:"8px 10px" } });
+  const briefHeader = el("div", { style:{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"6px" } }, [
+    el("span", { class:"nz-section", style:{ margin:0 } }, ["DURUM BRIFINGi"]),
+    el("button", { class:"nz-btn", style:{ fontSize:"10px", padding:"3px 10px" },
+      onclick: () => getBriefing(briefText) }, ["Al"]),
   ]);
-
-  const msgArea = el("div", {id:"chat-messages", style:{
-    flex:"1", overflowY:"auto", maxHeight:"280px", marginBottom:"8px",
-    padding:"4px", fontSize:"11px", lineHeight:"1.5",
+  const briefText = el("div", { id:"ai-brief-text", style:{
+    fontSize:"11px", lineHeight:"1.6", color:"var(--text-2)",
+    maxHeight:"120px", overflowY:"auto", whiteSpace:"pre-wrap",
+    fontFamily:"var(--mono)",
   }});
-  msgArea.innerHTML = "<span style='opacity:.5'>AI danismana soru sorun...</span>";
+  briefText.textContent = "Brifing almak icin \"Al\" butonuna basin.";
+  briefSection.appendChild(briefHeader);
+  briefSection.appendChild(briefText);
 
-  const inputRow = el("div", {style:{display:"flex",gap:"6px"}});
-  const input = el("input", {type:"text", placeholder:"Soru sorun veya komut verin...",
-    style:{flex:"1",padding:"5px 8px",borderRadius:"6px",border:"1px solid #555",
-           background:"#222",color:"#fff",fontSize:"12px"}});
-  const sendBtn = el("button", {style:{background:"#2980b9",color:"#fff",border:"none",
-    borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px"},
-    onclick:()=>sendChat(input, msgArea)}, ["Gonder"]);
+  // ── Chat section ──────────────────────────────────────────
+  const chatSection = el("div", { class:"nz-card", style:{ padding:"8px 10px", flex:"1" } });
+  const chatLabel = el("div", { class:"nz-section", style:{ margin:"0 0 6px 0" } }, ["OPERATOR CHAT"]);
 
-  input.addEventListener("keydown", e => {
-    if(e.key === "Enter") sendChat(input, msgArea);
-  });
+  const msgArea = el("div", { id:"chat-messages", style:{
+    fontSize:"11px", lineHeight:"1.5", maxHeight:"200px", overflowY:"auto",
+    marginBottom:"8px", display:"flex", flexDirection:"column", gap:"4px",
+  }});
+  msgArea.innerHTML = "<span style='color:var(--text-3)'>AI danismana soru sorun...</span>";
 
-  // Briefing button
-  const briefBtn = el("button", {style:{background:"#8e44ad",color:"#fff",border:"none",
-    borderRadius:"6px",padding:"5px 10px",cursor:"pointer",fontSize:"10px",marginRight:"4px"},
-    onclick:()=>getBriefing(msgArea)}, ["Brifing"]);
+  const inputRow = el("div", { style:{ display:"flex", gap:"4px" } });
+  const chatInput = el("input", { type:"text", class:"nz-input",
+    placeholder:"Soru veya komut...",
+    style:{ flex:"1", fontSize:"11px", padding:"5px 8px" } });
+  const sendBtn = el("button", { class:"nz-btn", style:{ fontSize:"10px", padding:"5px 10px", whiteSpace:"nowrap" },
+    onclick: () => sendChat(chatInput, msgArea) }, ["Gonder"]);
 
-  inputRow.appendChild(input);
-  inputRow.appendChild(briefBtn);
+  chatInput.addEventListener("keydown", e => { if (e.key === "Enter") sendChat(chatInput, msgArea); });
+
+  inputRow.appendChild(chatInput);
   inputRow.appendChild(sendBtn);
-  chatPanelEl.appendChild(header);
-  chatPanelEl.appendChild(msgArea);
-  chatPanelEl.appendChild(inputRow);
-  document.body.appendChild(chatPanelEl);
+  chatSection.appendChild(chatLabel);
+  chatSection.appendChild(msgArea);
+  chatSection.appendChild(inputRow);
+
+  // ── Command parsing section ───────────────────────────────
+  const cmdSection = el("div", { class:"nz-card", style:{ padding:"8px 10px" } });
+  const cmdLabel = el("div", { class:"nz-section", style:{ margin:"0 0 6px 0" } }, ["DOGAL DIL KOMUT"]);
+  const cmdResult = el("div", { id:"ai-cmd-result", style:{
+    fontSize:"10px", lineHeight:"1.5", color:"var(--text-2)",
+    maxHeight:"80px", overflowY:"auto", marginBottom:"6px",
+    fontFamily:"var(--mono)", whiteSpace:"pre-wrap", display:"none",
+  }});
+  const cmdRow = el("div", { style:{ display:"flex", gap:"4px" } });
+  const cmdInput = el("input", { type:"text", class:"nz-input",
+    placeholder:"Ornek: Tum hostile assetleri observe et",
+    style:{ flex:"1", fontSize:"11px", padding:"5px 8px" } });
+  const cmdBtn = el("button", { class:"nz-btn", style:{ fontSize:"10px", padding:"5px 10px", whiteSpace:"nowrap" },
+    onclick: () => parseCommand(cmdInput, cmdResult) }, ["Calistir"]);
+
+  cmdInput.addEventListener("keydown", e => { if (e.key === "Enter") parseCommand(cmdInput, cmdResult); });
+
+  cmdRow.appendChild(cmdInput);
+  cmdRow.appendChild(cmdBtn);
+  cmdSection.appendChild(cmdLabel);
+  cmdSection.appendChild(cmdResult);
+  cmdSection.appendChild(cmdRow);
+
+  // ── LLM status indicator ──────────────────────────────────
+  const statusBar = el("div", { id:"ai-llm-status", style:{
+    fontSize:"10px", color:"var(--text-3)", textAlign:"center", paddingTop:"2px",
+  }}, ["LLM: kontrol ediliyor..."]);
+  checkLLMStatus(statusBar);
+
+  container.appendChild(briefSection);
+  container.appendChild(chatSection);
+  container.appendChild(cmdSection);
+  container.appendChild(statusBar);
+  RIGHT_TABS.ai.appendChild(container);
 }
+
+async function checkLLMStatus(el) {
+  try {
+    const r = await fetch("/api/metrics");
+    const d = await r.json();
+    if (d.llm_enabled) {
+      el.textContent = `LLM: AKTIF (${d.llm_provider || "?"})`;
+      el.style.color = "var(--ok)";
+    } else {
+      el.textContent = "LLM: API KEY yok — kural tabanli mod";
+      el.style.color = "var(--warn)";
+    }
+  } catch { el.textContent = "LLM: durum alinamadi"; }
+}
+
+function mountChatPanel() { /* replaced by mountAIAdvisorPanel */ }
 
 async function sendChat(input, msgArea) {
   const q = input.value.trim();
@@ -1759,34 +1806,68 @@ async function sendChat(input, msgArea) {
   renderChatMessages(msgArea);
 }
 
-async function getBriefing(msgArea) {
-  chatHistory.push({role:"user", text:"[Durum Brifing Istegi]"});
-  renderChatMessages(msgArea);
+async function getBriefing(briefTextEl) {
+  briefTextEl.textContent = "Aliyor...";
+  briefTextEl.style.color = "var(--text-3)";
   try {
     const resp = await fetch("/api/ai/briefing");
     const data = await resp.json();
     const badge = data.llm_used ? " [LLM]" : " [LOCAL]";
-    chatHistory.push({role:"ai", text: (data.briefing || "Brifing alinamadi.") + badge});
+    briefTextEl.textContent = (data.briefing || "Brifing alinamadi.") + badge;
+    briefTextEl.style.color = "var(--text-1)";
   } catch(e) {
-    chatHistory.push({role:"ai", text:"Hata: " + e.message});
+    briefTextEl.textContent = "Hata: " + e.message;
+    briefTextEl.style.color = "var(--danger)";
   }
-  renderChatMessages(msgArea);
+}
+
+async function parseCommand(cmdInput, cmdResult) {
+  const cmd = cmdInput.value.trim();
+  if (!cmd) return;
+  cmdInput.value = "";
+  cmdResult.style.display = "block";
+  cmdResult.style.color = "var(--text-3)";
+  cmdResult.textContent = "Isliyor...";
+  try {
+    const resp = await fetch("/api/ai/command", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: cmd }),
+    });
+    const data = await resp.json();
+    if (data.llm_used) {
+      const actions = data.actions || [];
+      if (actions.length > 0) {
+        cmdResult.style.color = "var(--ok)";
+        cmdResult.textContent = `[LLM] ${actions.length} aksiyon:\n` +
+          actions.map(a => `  ${a.action} ${JSON.stringify(a.params || {})}`).join("\n");
+      } else {
+        cmdResult.style.color = "var(--warn)";
+        cmdResult.textContent = "[LLM] Aksiyon ayristirilamadi:\n" + (data.explanation || "").slice(0, 200);
+      }
+    } else {
+      cmdResult.style.color = "var(--warn)";
+      cmdResult.textContent = data.explanation || "LLM API key yapilandirilmamis.";
+    }
+  } catch(e) {
+    cmdResult.style.color = "var(--danger)";
+    cmdResult.textContent = "Hata: " + e.message;
+  }
 }
 
 function renderChatMessages(area) {
   let html = "";
   chatHistory.slice(-20).forEach(m => {
-    if(m.role === "user") {
-      html += `<div style="text-align:right;margin:3px 0">
-        <span style="background:#2c3e50;padding:3px 8px;border-radius:8px;display:inline-block;max-width:85%">${escHtml(m.text)}</span>
+    if (m.role === "user") {
+      html += `<div style="text-align:right">
+        <span style="background:var(--bg-3);color:var(--text-1);padding:4px 8px;border-radius:8px;display:inline-block;max-width:90%;font-size:11px">${escHtml(m.text)}</span>
       </div>`;
     } else {
-      html += `<div style="text-align:left;margin:3px 0">
-        <span style="background:#1a252f;padding:3px 8px;border-radius:8px;display:inline-block;max-width:85%;white-space:pre-wrap">${escHtml(m.text)}</span>
+      html += `<div style="text-align:left">
+        <span style="background:var(--bg-2);color:var(--text-2);padding:4px 8px;border-radius:8px;display:inline-block;max-width:90%;font-size:11px;white-space:pre-wrap;border:1px solid var(--border)">${escHtml(m.text)}</span>
       </div>`;
     }
   });
-  area.innerHTML = html;
+  area.innerHTML = html || "<span style='color:var(--text-3)'>AI danismana soru sorun...</span>";
   area.scrollTop = area.scrollHeight;
 }
 
@@ -1795,19 +1876,7 @@ function escHtml(s) {
 }
 
 /* ── AI: toggle chat button (floating) ─────────────────── */
-function mountChatToggle() {
-  const btn = el("div", {style:{
-    position:"fixed", top:"60px", left:"50%", transform:"translateX(-50%)",
-    zIndex:"9999", background:"#8e44ad", color:"#fff",
-    padding:"5px 14px", borderRadius:"20px", cursor:"pointer",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    boxShadow:"0 2px 8px rgba(0,0,0,0.4)",
-  }, onclick:()=>{
-    if(!chatPanelEl) return;
-    chatPanelEl.style.display = chatPanelEl.style.display === "none" ? "flex" : "none";
-  }}, ["AI Advisor"]);
-  document.body.appendChild(btn);
-}
+function mountChatToggle() { /* replaced by AI sidebar tab */ }
 
 /* ── AI: Threat Timeline chart (canvas popup) ──────────── */
 let timelinePopupEl = null;
@@ -2897,6 +2966,7 @@ function mountRightTabContainer() {
     { id: "alerts",  label: "Alerts"  },
     { id: "ew",      label: "EW"      },
     { id: "metrics", label: "Metrics" },
+    { id: "ai",      label: "AI"      },
   ];
   const activeTabId = { v: "threats" };
 
@@ -3008,6 +3078,7 @@ function boot(){
   mountTimelinePopup();
   mountLineageModal();
   mountOperatorPanel();
+  mountAIAdvisorPanel();
   mountChatPanel();
   mountChatToggle();
   mountAARModal();
