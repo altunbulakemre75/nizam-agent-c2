@@ -57,8 +57,10 @@ jobs:
       - name: Check core imports
         run: |
           python -c "from ai import anomaly, predictor, roe, tactical, timeline, zone_breach, coordinated_attack, ml_threat, track_fsm"
+          python -c "from ai import fusion"
           python -c "from replay import recorder, player"
           python -c "from cop import server"
+          python -c "from adapters import cot_adapter, sensor_adapter_base"
 
   # ── Lint ──────────────────────────────────────────────────────────────────
   lint:

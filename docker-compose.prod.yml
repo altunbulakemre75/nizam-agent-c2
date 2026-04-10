@@ -1,0 +1,259 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  NIZAM COP — Production Docker Compose
+#
+#  Differences from docker-compose.yml (dev):
+#    ✓ nginx reverse proxy — TLS termination, security headers, WS proxy
+#    ✓ mosquitto MQTT broker — CoT/sensor adapters connect here
+#    ✓ cot_adapter service — receives CoT SA from ATAK/TAK Server
+#    ✓ No direct port exposure for COP or DB (only nginx on 80/443)
+#    ✓ TimescaleDB password from secret / env (not hardcoded)
+#    ✓ Resource limits on all services
+#    ✓ Structured logging (json-file driver, 50 MB cap)
+#    ✓ Health-check gate on every dependency
+#
+#  Quick start (on-premise, air-gapped):
+#    1. cp .env.prod.example .env
+#    2. Edit .env — set strong JWT_SECRET, DB password, INGEST_API_KEY
+#    3. Generate TLS cert:
+#         mkdir -p nginx/certs
+#         openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+#           -keyout nginx/certs/nizam.key \
+#           -out    nginx/certs/nizam.crt \
+#           -subj "/CN=nizam-cop"
+#    4. docker compose -f docker-compose.prod.yml up -d --build
+#    5. Open https://<host>/ in browser (accept self-signed cert)
+#
+#  To use a proper CA cert (Let's Encrypt, internal PKI):
+#    Replace nginx/certs/nizam.key + nizam.crt with your cert pair.
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  DATABASE_URL:        ${DATABASE_URL}
+  AUTH_ENABLED:        "true"
+  JWT_SECRET:          ${JWT_SECRET}
+  JWT_EXPIRE_MINUTES:  ${JWT_EXPIRE_MINUTES:-480}
+  INGEST_API_KEY:      ${INGEST_API_KEY}
+  ORCHESTRATOR_URL:    http://orchestrator:8200
+  WEBHOOK_URL:         ${WEBHOOK_URL:-}
+  LLM_PROVIDER:        ${LLM_PROVIDER:-ollama}
+  ANTHROPIC_API_KEY:   ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY:      ${OPENAI_API_KEY:-}
+  OLLAMA_URL:          ${OLLAMA_URL:-http://host.docker.internal:11434}
+  LLM_MODEL:           ${LLM_MODEL:-llama3.2}
+  NODE_ID:             ${NODE_ID:-cop-node-01}
+
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+
+  # ── Database (TimescaleDB) ────────────────────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg15
+    restart: always
+    environment:
+      POSTGRES_USER:     ${DB_USER:-nizam}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB:       ${DB_NAME:-nizam}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # DB not exposed to host in production — only internal network
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-nizam} -d ${DB_NAME:-nizam}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  # ── MQTT Broker (Mosquitto) ───────────────────────────────────────────────
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: always
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+    ports:
+      - "1883:1883"    # plain MQTT (LAN sensors — restrict firewall to LAN)
+      - "8883:8883"    # MQTT over TLS (external sensors)
+    networks:
+      - internal
+      - sensors
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -i healthcheck --quiet -W 3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  # ── Orchestrator ─────────────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    restart: always
+    environment:
+      <<: *common-env
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8200/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ── COP Server ────────────────────────────────────────────────────────────
+  cop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      <<: *common-env
+      COP_PORT: "8100"
+      RATE_LIMIT_WRITES: ${RATE_LIMIT_WRITES:-200}
+      RATE_LIMIT_WINDOW_S: ${RATE_LIMIT_WINDOW_S:-60}
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/api/tracks')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # ── CoT / TAK Adapter ─────────────────────────────────────────────────────
+  cot_adapter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    command:
+      - python
+      - adapters/cot_adapter.py
+      - --source
+      - udp
+      - --mcast_group
+      - ${COT_MCAST_GROUP:-239.2.3.1}
+      - --udp_port
+      - ${COT_UDP_PORT:-4242}
+      - --cop_url
+      - http://cop:8100
+      - --api_key
+      - ${INGEST_API_KEY}
+    network_mode: host        # UDP multicast requires host networking
+    depends_on:
+      cop:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # ── MQTT → COP Adapter ────────────────────────────────────────────────────
+  mqtt_adapter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    command:
+      - python
+      - adapters/mqtt_adapter.py
+      - --broker
+      - mqtt
+      - --port
+      - "1883"
+      - --topic
+      - ${MQTT_TOPIC:-nizam/tracks}
+      - --cop_url
+      - http://cop:8100
+      - --api_key
+      - ${INGEST_API_KEY}
+    networks:
+      - internal
+    depends_on:
+      cop:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # ── nginx Reverse Proxy (TLS + WS) ───────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - internal
+      - public
+    depends_on:
+      cop:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/api/tracks || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+networks:
+  internal:
+    driver: bridge
+    internal: true          # no direct internet access for backend services
+  public:
+    driver: bridge          # nginx only
+  sensors:
+    driver: bridge          # MQTT + sensor adapters
+
+volumes:
+  db_data:
+    driver: local
+  mqtt_data:
+    driver: local
+  mqtt_log:
+    driver: local

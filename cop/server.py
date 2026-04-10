@@ -63,6 +63,8 @@ from ai import trajectory as ai_trajectory
 from ai import track_fsm
 from ai import deconfliction as ai_deconfliction
 from ai import ew_detector as ai_ew
+from ai import fusion as ai_fusion
+from ai.fusion import SensorMeasurement as FusionMeasurement
 from cop import sync as cop_sync
 from replay import recorder as replay_recorder
 from replay import player as replay_player
@@ -1398,8 +1400,48 @@ async def ingest(req: Request):
 
                 track_id = canonical_id
 
-                # Track FSM: update lifecycle state
+                # ── Multi-sensor fusion ──────────────────────────────────────
+                # Feed this measurement into the fusion engine.  If multiple
+                # sensors are reporting the same physical target, the engine
+                # returns a covariance-weighted fused state.  We overwrite
+                # lat/lon/speed/heading in the payload so the rest of the
+                # pipeline (zone breach, EW, tactical, WS broadcast) always
+                # sees the best-estimate position.
                 sensors = payload.get("supporting_sensors", [])
+                lat_raw = payload.get("lat")
+                lon_raw = payload.get("lon")
+                if lat_raw is not None and lon_raw is not None:
+                    _sensor_id = sensors[0] if sensors else "unknown"
+                    _meas = FusionMeasurement(
+                        sensor_id   = _sensor_id,
+                        track_hint  = str(track_id),
+                        lat         = float(lat_raw),
+                        lon         = float(lon_raw),
+                        alt_m       = float((payload.get("kinematics") or {}).get("altitude_m") or
+                                            payload.get("altitude_m") or 0.0),
+                        speed_mps   = float((payload.get("kinematics") or {}).get("speed_mps") or
+                                            payload.get("speed_mps") or 0.0),
+                        heading_deg = float((payload.get("kinematics") or {}).get("heading_deg") or
+                                            payload.get("heading_deg") or 0.0),
+                        timestamp   = payload.get("server_time", _utc_now_iso()),
+                    )
+                    _fused = ai_fusion.engine.update(_meas)
+                    # Overwrite payload position with fused best-estimate
+                    payload["lat"] = _fused.lat
+                    payload["lon"] = _fused.lon
+                    payload["_fusion"] = {
+                        "fused_id":             _fused.id,
+                        "contributing_sensors": _fused.contributing_sensors,
+                        "pos_std_m":            round(_fused.pos_std_m, 1),
+                        "speed_std_mps":        round(_fused.speed_std_mps, 2),
+                        "sensor_count":         len(_fused.contributing_sensors),
+                    }
+                    if payload.get("kinematics"):
+                        payload["kinematics"]["altitude_m"]  = _fused.alt_m
+                        payload["kinematics"]["speed_mps"]   = _fused.speed_mps
+                        payload["kinematics"]["heading_deg"] = _fused.heading_deg
+
+                # Track FSM: update lifecycle state
                 fsm_state = track_fsm.on_update(str(track_id), sensors)
                 payload["track_state"] = fsm_state.value
 
@@ -2603,6 +2645,16 @@ async def api_analytics_audit(hours: int = Query(24, ge=1, le=168), db=Depends(g
 
 
 # ── Webhooks ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/fusion/tracks", tags=["system"])
+async def api_fusion_tracks(_=Depends(require_viewer())):
+    """Return all currently active fused tracks from the fusion engine."""
+    return JSONResponse({
+        "fused_tracks": [t.to_dict() for t in ai_fusion.engine.all_tracks()],
+        "stats":        ai_fusion.engine.stats(),
+        "server_time":  _utc_now_iso(),
+    })
+
 
 @app.get("/api/webhooks", tags=["system"])
 async def api_webhooks_list(_=Depends(require_operator())):

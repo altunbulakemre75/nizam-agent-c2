@@ -1,0 +1,6 @@
+# TLS certs go here (not committed).
+# Generate with:
+#   openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+#     -keyout nginx/certs/nizam.key \
+#     -out    nginx/certs/nizam.crt \
+#     -subj "/CN=nizam-cop"

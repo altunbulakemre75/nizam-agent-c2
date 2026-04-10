@@ -34,3 +34,9 @@ alembic/versions/*.pyc
 # Generated runtime artefacts
 recordings/
 reports/
+
+# TLS certs (never commit private keys)
+nginx/certs/*.key
+nginx/certs/*.crt
+nginx/certs/*.pem
+mosquitto/certs/
