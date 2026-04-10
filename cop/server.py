@@ -1227,6 +1227,7 @@ async def ingest(req: Request):
                             "score": score,
                         }
                         ai_deconfliction.record_merge(raw_id, matched_id)
+                        ai_aar.record_deconfliction_merge(raw_id, matched_id)
                         canonical_id = matched_id
                         # Broadcast merge event so UI can remove the duplicate marker
                         asyncio.create_task(broadcast({
@@ -1259,6 +1260,7 @@ async def ingest(req: Request):
                         sensors=sensors,
                     )
                     for alert in ew_alerts:
+                        ai_aar.record_ew_alert(alert)
                         asyncio.create_task(broadcast({
                             "event_type": "cop.ew_alert",
                             "payload":    {**alert, "server_time": _utc_now_iso()},
@@ -1590,6 +1592,7 @@ async def _ai_tactical_background_task() -> None:
 
         # Broadcast EW jamming alerts individually
         for ew_alert in result.get("ew_alerts", []):
+            ai_aar.record_ew_alert(ew_alert)
             await broadcast({
                 "event_type": "cop.ew_alert",
                 "payload":    {**ew_alert, "server_time": _utc_now_iso()},

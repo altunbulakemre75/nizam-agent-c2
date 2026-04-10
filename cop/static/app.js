@@ -415,9 +415,73 @@ function upsertThreat(threat) {
     if(pl) pl.setStyle({color:THREAT_COLORS[level]??"#2980b9"});
   }
   _scheduleRenderThreatList();
+  updateThreatIntelCard();
 }
 
 /* ── Threat list panel (1.3) ─────────────────────────────── */
+/* ── 2.4 Threat Intelligence Card ───────────────────────── */
+let intelCardEl = null;
+// Running signal counters updated by each subsystem
+const _intel = { high: 0, med: 0, ew: 0, anom: 0, coord: 0 };
+
+function mountThreatIntelCard() {
+  intelCardEl = el("div", { id:"threat-intel-card", class:"nz-card", style:{
+    padding:"8px 10px", marginBottom:"6px", width:"100%",
+  }});
+  intelCardEl.innerHTML = `<div class="nz-section" style="margin:0 0 6px 0">TEHDIT ZEKASI</div>
+    <div style="color:var(--text-3);font-size:10px">Sinyal bekleniyor...</div>`;
+  RIGHT_TABS.threats.insertBefore(intelCardEl, RIGHT_TABS.threats.firstChild);
+}
+
+function updateThreatIntelCard() {
+  if (!intelCardEl) return;
+
+  // Recalculate from live data
+  let high = 0, med = 0;
+  UI.threats.forEach(t => {
+    if (t.threat_level === "HIGH") high++;
+    else if (t.threat_level === "MEDIUM") med++;
+  });
+  _intel.high  = high;
+  _intel.med   = med;
+  _intel.ew    = ewLog.length;
+  _intel.anom  = anomalyLog.filter(a => a.severity === "CRITICAL" || a.severity === "HIGH").length;
+
+  // Overall risk level
+  let risk = "LOW", riskColor = "var(--ok)";
+  if (_intel.coord > 0 || ewLog.some(e => e.severity === "CRITICAL")) {
+    risk = "CRITICAL"; riskColor = "var(--danger)";
+  } else if (_intel.high > 0 || _intel.ew > 0) {
+    risk = "HIGH"; riskColor = "var(--warn)";
+  } else if (_intel.med > 0 || _intel.anom > 0) {
+    risk = "MEDIUM"; riskColor = "#f1c40f";
+  }
+
+  const sig = (label, val, color) => val > 0
+    ? `<div style="text-align:center;flex:1">
+        <div style="font-size:14px;font-weight:700;color:${color};font-family:var(--mono)">${val}</div>
+        <div style="font-size:8px;color:var(--text-3);letter-spacing:.04em">${label}</div>
+       </div>`
+    : `<div style="text-align:center;flex:1;opacity:.35">
+        <div style="font-size:14px;font-weight:700;font-family:var(--mono)">0</div>
+        <div style="font-size:8px;color:var(--text-3);letter-spacing:.04em">${label}</div>
+       </div>`;
+
+  intelCardEl.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px">
+      <span class="nz-section" style="margin:0">TEHDIT ZEKASI</span>
+      <span style="font-size:9px;font-weight:700;color:${riskColor};letter-spacing:.06em;
+        background:${riskColor}1a;padding:2px 7px;border-radius:8px;border:1px solid ${riskColor}44">${risk}</span>
+    </div>
+    <div style="display:flex;gap:2px">
+      ${sig("HIGH", _intel.high, "var(--danger)")}
+      ${sig("MEDIUM", _intel.med, "var(--warn)")}
+      ${sig("EW", _intel.ew, "var(--purple)")}
+      ${sig("ANOM", _intel.anom, "#f1c40f")}
+      ${sig("COORD", _intel.coord, "#ff0050")}
+    </div>`;
+}
+
 let threatListEl = null;
 let _threatListTimer = null;
 function _scheduleRenderThreatList() {
@@ -426,9 +490,10 @@ function _scheduleRenderThreatList() {
 }
 
 function mountThreatList() {
+  mountThreatIntelCard();
   threatListEl = el("div", { id:"threat-list" });
   threatListEl.innerHTML = `<div style="color:var(--text-3);font-size:11px;padding:8px 0">No threats assessed yet</div>`;
-  RIGHT_TABS.threats.insertBefore(threatListEl, RIGHT_TABS.threats.firstChild);
+  RIGHT_TABS.threats.insertBefore(threatListEl, intelCardEl ? intelCardEl.nextSibling : RIGHT_TABS.threats.firstChild);
 }
 
 function renderThreatList() {
@@ -706,6 +771,7 @@ function pushEWAlert(p) {
   const t = p.server_time ? new Date(p.server_time).toLocaleTimeString() : now.toLocaleTimeString();
   ewLog.unshift({ t, type: p.type, severity: p.severity, track_id: p.track_id, detail: p.detail });
   if (ewLog.length > MAX_EW_ALERTS) ewLog.pop();
+  updateThreatIntelCard();
 
   const SEV_COLOR = { CRITICAL:"var(--danger)", HIGH:"var(--warn)", MEDIUM:"#f1c40f", LOW:"var(--ok)" };
   const SEV_BG    = { CRITICAL:"rgba(240,64,64,0.1)", HIGH:"rgba(240,128,48,0.1)", MEDIUM:"rgba(241,196,15,0.08)", LOW:"rgba(48,192,96,0.08)" };
@@ -1456,6 +1522,8 @@ function renderCoordPanel(attacks) {
   }
 
   coordPanelEl.innerHTML = html;
+  _intel.coord = attacks.length;
+  updateThreatIntelCard();
   // Flash border on new attacks
   coordPanelEl.style.borderColor = "#ff0050";
   setTimeout(() => { coordPanelEl.style.borderColor = "rgba(255,0,80,0.4)"; }, 1200);
@@ -1474,49 +1542,78 @@ const ANOMALY_COLORS = {
 };
 
 function mountAnomalyPanel() {
-  anomalyPanelEl = el("div", { id:"anomaly-panel", style:{
-    background:"rgba(0,0,0,0.75)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", maxHeight:"200px", overflowY:"auto",
+  const wrap = el("div", { style: { width:"100%" } });
+
+  // Stats header
+  const statsRow = el("div", { id:"anomaly-stats", style:{
+    display:"flex", gap:"4px", flexWrap:"wrap", marginBottom:"6px",
   }});
-  anomalyPanelEl.innerHTML = "<b>AI Anomalies</b><br><span style='opacity:.5'>No anomalies</span>";
-  RIGHT_TABS.threats.appendChild(anomalyPanelEl);
+  statsRow.innerHTML = `<span style="color:var(--text-3);font-size:10px">Anomali bekleniyor...</span>`;
+
+  // Event list
+  anomalyPanelEl = el("div", { id:"anomaly-panel", style:{
+    width:"100%", display:"flex", flexDirection:"column", gap:"3px",
+  }});
+  anomalyPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Anomali yok</span>`;
+
+  wrap.appendChild(statsRow);
+  wrap.appendChild(anomalyPanelEl);
+  RIGHT_TABS.threats.appendChild(wrap);
 }
 
 function renderAnomalyPanel() {
-  if(!anomalyPanelEl) return;
-  if(anomalyLog.length === 0) {
-    anomalyPanelEl.innerHTML = "<b>AI Anomalies</b><br><span style='opacity:.5'>No anomalies</span>";
+  if (!anomalyPanelEl) return;
+
+  // Update stats row
+  const statsEl = document.getElementById("anomaly-stats");
+  if (statsEl && anomalyLog.length > 0) {
+    const counts = {};
+    anomalyLog.forEach(a => { counts[a.severity] = (counts[a.severity] || 0) + 1; });
+    const SEV_COLOR = { CRITICAL:"var(--danger)", HIGH:"var(--warn)", MEDIUM:"#f1c40f", LOW:"var(--ok)" };
+    statsEl.innerHTML = Object.entries(counts).map(([sev, n]) => {
+      const c = SEV_COLOR[sev] || "var(--text-2)";
+      return `<span style="background:rgba(255,255,255,0.05);border:1px solid ${c}44;color:${c};
+        font-size:9px;padding:1px 6px;border-radius:10px;font-weight:600">${sev} ${n}</span>`;
+    }).join("") + `<span style="color:var(--text-3);font-size:9px;margin-left:2px">toplam ${anomalyLog.length}</span>`;
+  } else if (statsEl) {
+    statsEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Anomali yok</span>`;
+  }
+
+  if (anomalyLog.length === 0) {
+    anomalyPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Anomali algilandi yogunda burada gorunecek</span>`;
     return;
   }
-  let html = `<b>AI Anomalies</b> <span style="opacity:.6">${anomalyLog.length}</span><br>`;
-  anomalyLog.slice(0, 15).forEach(a => {
-    const c = ANOMALY_COLORS[a.severity] || "#aaa";
-    const tid = a.track_id || (a.track_ids||[]).join(",") || "?";
-    html += `<div style="border-left:2px solid ${c};padding-left:4px;margin:2px 0">
-      <span style="color:${c};font-weight:bold">${a.type}</span>
-      <span style="opacity:.7"> ${tid}</span><br>
-      <span style="opacity:.6;font-size:9px">${a.detail||a.message||""}</span>
+
+  const TYPE_ICON = { SPEED_SPIKE:"SPD", HEADING_REVERSAL:"HDG", INTENT_SHIFT:"INT", SWARM_DETECTED:"SWM" };
+  const SEV_COLOR = { CRITICAL:"var(--danger)", HIGH:"var(--warn)", MEDIUM:"#f1c40f", LOW:"var(--ok)" };
+  const SEV_BG    = { CRITICAL:"rgba(240,64,64,0.10)", HIGH:"rgba(240,128,48,0.10)", MEDIUM:"rgba(241,196,15,0.07)", LOW:"rgba(48,192,96,0.07)" };
+
+  let html = "";
+  anomalyLog.slice(0, 20).forEach((a, i) => {
+    const c   = SEV_COLOR[a.severity] || "var(--text-2)";
+    const bg  = SEV_BG[a.severity]   || "rgba(255,255,255,0.04)";
+    const ico = TYPE_ICON[a.type]    || a.type.slice(0, 3);
+    const tid = a.track_id || (a.track_ids||[]).join(",") || "";
+    html += `<div style="padding:5px 7px;border-radius:5px;background:${bg};border-left:3px solid ${c}${i===0?";animation:slide-in-right .2s ease":""}">
+      <div style="display:flex;align-items:center;gap:5px">
+        <span style="color:${c};font-size:9px;font-weight:700;letter-spacing:.06em;font-family:var(--mono)">${ico}</span>
+        <span style="color:var(--text-2);font-size:10px;flex:1">${a.type.replace(/_/g," ")}</span>
+        ${tid ? `<span style="color:var(--text-3);font-size:9px">${escHtml(tid)}</span>` : ""}
+        <span style="color:${c};font-size:8px;opacity:.8">${a.severity}</span>
+      </div>
+      <div style="color:var(--text-3);font-size:10px;margin-top:2px;line-height:1.4">${escHtml((a.detail||a.message||"").slice(0,90))}</div>
     </div>`;
   });
   anomalyPanelEl.innerHTML = html;
 }
 
 function pushAnomalies(anomalies) {
-  if(!anomalies || !anomalies.length) return;
-  for(const a of anomalies) {
-    anomalyLog.unshift(a);
-  }
-  while(anomalyLog.length > MAX_ANOMALY_LOG) anomalyLog.pop();
+  if (!anomalies || !anomalies.length) return;
+  for (const a of anomalies) anomalyLog.unshift(a);
+  while (anomalyLog.length > MAX_ANOMALY_LOG) anomalyLog.pop();
   renderAnomalyPanel();
-  // Flash
-  if(anomalyPanelEl) {
-    const sev = anomalies[0]?.severity;
-    const c = ANOMALY_COLORS[sev] || "#e74c3c";
-    anomalyPanelEl.style.outline = `2px solid ${c}`;
-    setTimeout(() => { anomalyPanelEl.style.outline = "none"; }, 800);
-  }
+  updateThreatIntelCard();
+  setTabBadge("threats", anomalyLog.filter(a => a.severity === "CRITICAL" || a.severity === "HIGH").length);
 }
 
 /* ── Metrics panel — live /api/metrics polling ──────────── */
@@ -2418,6 +2515,8 @@ function renderAAR(r) {
   const ex = r.executive_summary || {};
   const ta = r.threat_analysis || {};
   const aa = r.anomaly_analysis || {};
+  const ew = r.ew_analysis || {};
+  const dc = r.deconfliction_summary || {};
   const ca = r.coordinated_attack_analysis || {};
   const za = r.zone_breach_analysis || {};
   const ts = r.task_summary || {};
@@ -2445,6 +2544,8 @@ function renderAAR(r) {
       ${_aarStatCard("Maks. Esanli", ex.max_concurrent_tracks || 0, "#8e44ad")}
       ${_aarStatCard("Zirve Tehdit", ex.peak_threat_score || 0, "#e74c3c")}
       ${_aarStatCard("Anomali", ex.total_anomalies || 0, "#e67e22")}
+      ${_aarStatCard("EW Saldiri", ew.total || 0, "#a060e0")}
+      ${_aarStatCard("Deconflict", dc.total_merges || 0, "#20c0d0")}
       ${_aarStatCard("Koord. Saldiri", ex.total_coord_attacks || 0, "#c0392b")}
       ${_aarStatCard("Bolge Ihlali", ex.total_zone_breaches || 0, "#f39c12")}
       ${_aarStatCard("Gorev", ex.total_tasks || 0, "#2980b9")}
@@ -2489,6 +2590,37 @@ function renderAAR(r) {
           const sc = riskColors[k]||"#aaa";
           return `<div><span style="color:${sc}">\u25CF</span> ${k}: ${v}</div>`;
         }).join("")}
+      </div>
+    </div>`;
+  }
+
+  // ── EW Attack Analysis ──
+  if ((ew.total || 0) > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#a060e0;font-size:14px">Elektronik Harp Saldirilari (${ew.total})</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+        ${ew.gps_spoofing_count   ? `<div style="background:rgba(160,96,224,0.12);border:1px solid rgba(160,96,224,0.3);padding:3px 10px;border-radius:6px">GPS Spoof: <b>${ew.gps_spoofing_count}</b></div>` : ""}
+        ${ew.radar_jamming_count  ? `<div style="background:rgba(240,64,64,0.12);border:1px solid rgba(240,64,64,0.3);padding:3px 10px;border-radius:6px">Radar Jam: <b>${ew.radar_jamming_count}</b></div>` : ""}
+        ${ew.false_injection_count ? `<div style="background:rgba(240,128,48,0.12);border:1px solid rgba(240,128,48,0.3);padding:3px 10px;border-radius:6px">Sahte Enjeksiyon: <b>${ew.false_injection_count}</b></div>` : ""}
+        ${ew.critical_count ? `<div style="background:rgba(240,64,64,0.2);border:1px solid #f04040;padding:3px 10px;border-radius:6px;color:#f04040;font-weight:bold">CRITICAL: ${ew.critical_count}</div>` : ""}
+      </div>
+      ${(ew.recent||[]).map(a => {
+        const ec = a.severity === "CRITICAL" ? "#f04040" : "#f08030";
+        return `<div style="border-left:3px solid ${ec};padding-left:6px;margin:2px 0;font-size:11px">
+          <span style="color:${ec};font-weight:bold">${a.type}</span>
+          ${a.track_id ? `<span style="opacity:.6"> ${escHtml(a.track_id)}</span>` : ""}
+          <span style="opacity:.6;margin-left:4px">${escHtml(a.detail||"").slice(0,80)}</span>
+        </div>`;
+      }).join("")}
+    </div>`;
+  }
+
+  // ── Deconfliction Summary ──
+  if ((dc.total_merges || 0) > 0) {
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#20c0d0;font-size:14px">Iz Deconfliction</h3>
+      <div style="opacity:.9">Birlestirilmis iz sayisi: <b style="color:#20c0d0">${dc.total_merges}</b>
+        <span style="opacity:.6;font-size:11px;margin-left:8px">(cok sensoru tek kanonik ize indirdi)</span>
       </div>
     </div>`;
   }

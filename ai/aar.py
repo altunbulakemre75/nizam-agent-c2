@@ -39,6 +39,8 @@ _coord_attack_events: List[Dict] = []    # coordinated attack warnings
 _zone_breach_events: List[Dict] = []     # zone breach alerts
 _task_events: List[Dict] = []            # tasks created
 _key_events: List[Dict] = []             # important moments (ordered)
+_ew_alert_events: List[Dict] = []        # EW attack alerts
+_deconfliction_merges: int = 0           # track merge count
 
 _peak_threat_score: int = 0
 _peak_threat_track: str = ""
@@ -176,6 +178,33 @@ def record_zone_breach(breach: Dict[str, Any]) -> None:
         severity="HIGH",
         track_id=breach.get("track_id", ""),
     )
+
+
+def record_ew_alert(alert: Dict[str, Any]) -> None:
+    """Record an EW attack alert (GPS spoofing, radar jamming, false injection)."""
+    _ew_alert_events.append({
+        "type":     alert.get("type", "UNKNOWN"),
+        "severity": alert.get("severity", "HIGH"),
+        "track_id": alert.get("track_id", ""),
+        "detail":   alert.get("detail", alert.get("message", "")),
+        "t":        alert.get("time", time.time()),
+    })
+    if len(_ew_alert_events) > _MAX_EVENTS:
+        del _ew_alert_events[:len(_ew_alert_events) - _MAX_EVENTS]
+
+    _add_key_event(
+        "EW_ALERT",
+        f"EW Saldirisi: {alert.get('type', '?')} — {alert.get('severity', '?')} "
+        f"({alert.get('track_id', '')})",
+        severity=alert.get("severity", "HIGH"),
+        track_id=alert.get("track_id", ""),
+    )
+
+
+def record_deconfliction_merge(alias_id: str, canonical_id: str) -> None:
+    """Record a track deconfliction merge event."""
+    global _deconfliction_merges
+    _deconfliction_merges += 1
 
 
 def record_task(task: Dict[str, Any]) -> None:
@@ -371,6 +400,25 @@ def generate_report(
             "elapsed_display": _format_duration(elapsed),
         })
 
+    # ── EW Attack Analysis ──
+    ew_by_type = Counter(e["type"] for e in _ew_alert_events)
+    ew_by_sev  = Counter(e["severity"] for e in _ew_alert_events)
+    ew_analysis = {
+        "total": len(_ew_alert_events),
+        "by_type": dict(ew_by_type),
+        "by_severity": dict(ew_by_sev),
+        "gps_spoofing_count":   ew_by_type.get("GPS_SPOOFING", 0),
+        "radar_jamming_count":  ew_by_type.get("RADAR_JAMMING", 0),
+        "false_injection_count": ew_by_type.get("FALSE_INJECTION", 0),
+        "critical_count": ew_by_sev.get("CRITICAL", 0),
+        "recent": _ew_alert_events[-5:] if _ew_alert_events else [],
+    }
+
+    # ── Deconfliction Summary ──
+    deconfliction_summary = {
+        "total_merges": _deconfliction_merges,
+    }
+
     # ── Risk Assessment ──
     risk_level = "LOW"
     risk_reasons = []
@@ -412,6 +460,8 @@ def generate_report(
         "executive_summary": executive,
         "threat_analysis": threat_analysis,
         "anomaly_analysis": anomaly_analysis,
+        "ew_analysis": ew_analysis,
+        "deconfliction_summary": deconfliction_summary,
         "coordinated_attack_analysis": coord_analysis,
         "zone_breach_analysis": breach_analysis,
         "task_summary": task_summary,
@@ -449,6 +499,8 @@ def get_status() -> Dict[str, Any]:
         "tracks_seen": len(_track_ids_seen),
         "threat_events": len(_threat_events),
         "anomaly_events": len(_anomaly_events),
+        "ew_alerts": len(_ew_alert_events),
+        "deconfliction_merges": _deconfliction_merges,
         "coord_attacks": len(_coord_attack_events),
         "zone_breaches": len(_zone_breach_events),
         "key_events": len(_key_events),
@@ -470,9 +522,13 @@ def reset() -> None:
     _peak_threat_time = 0.0
     _max_concurrent_tracks = 0
 
+    global _deconfliction_merges
+    _deconfliction_merges = 0
+
     _track_ids_seen.clear()
     _threat_events.clear()
     _anomaly_events.clear()
+    _ew_alert_events.clear()
     _coord_attack_events.clear()
     _zone_breach_events.clear()
     _task_events.clear()
