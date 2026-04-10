@@ -16,6 +16,9 @@ import math
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
+from ai._fast_math import pairwise_distances as _np_pairwise
+
 # ── Constants ───────────────────────────────────────────────────────────────
 
 DEG_TO_M = 111_320.0
@@ -128,8 +131,14 @@ def _find_trajectory_convergences(
         if len(step_positions) < MIN_TRACKS_CONVERGE:
             continue
 
-        # Cluster: greedy grouping within CONVERGENCE_RADIUS_M
+        # Numpy-accelerated clustering within CONVERGENCE_RADIUS_M
         n = len(step_positions)
+        _sp_lats = np.array([sp[1] for sp in step_positions], dtype=np.float64)
+        _sp_lons = np.array([sp[2] for sp in step_positions], dtype=np.float64)
+        _dm = _np_pairwise(_sp_lats, _sp_lons)
+        _adj = _dm <= CONVERGENCE_RADIUS_M
+        np.fill_diagonal(_adj, False)
+
         visited: Set[int] = set()
 
         for i in range(n):
@@ -140,14 +149,8 @@ def _find_trajectory_convergences(
             queue = [i]
             while queue:
                 cur = queue.pop(0)
-                for j in range(n):
-                    if j in visited:
-                        continue
-                    dist = _dist_m(
-                        step_positions[cur][1], step_positions[cur][2],
-                        step_positions[j][1], step_positions[j][2],
-                    )
-                    if dist <= CONVERGENCE_RADIUS_M:
+                for j in np.where(_adj[cur])[0].tolist():
+                    if j not in visited:
                         visited.add(j)
                         group.append(j)
                         queue.append(j)

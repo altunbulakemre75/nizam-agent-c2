@@ -17,6 +17,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
+from ai._fast_math import pairwise_distances, heading_diffs
+
 
 # ── Track-level state ───────────────────────────────────────────────────────
 
@@ -182,8 +185,24 @@ def detect_swarms(tracks: Dict[str, Dict]) -> List[Dict[str, Any]]:
     if len(active) < SWARM_MIN_TRACKS:
         return []
 
-    # Adjacency-based clustering: tracks within SWARM_MAX_DIST_M
+    # ── Numpy-accelerated adjacency clustering ───────────────────────
+    # Build coordinate arrays for vectorised distance + heading checks.
+    # numpy releases GIL during C-level compute, enabling true parallel
+    # execution when called from ThreadPoolExecutor.
     n = len(active)
+    _lats = np.array([a[1] for a in active], dtype=np.float64)
+    _lons = np.array([a[2] for a in active], dtype=np.float64)
+    _hdgs = np.array([a[3] for a in active], dtype=np.float64)
+
+    # N×N distance matrix (single numpy call, ~100x faster than Python loop)
+    dist_matrix = pairwise_distances(_lats, _lons)        # N×N float64
+    hdiff_matrix = heading_diffs(_hdgs)                    # N×N float64
+
+    # Adjacency mask: close enough AND heading-aligned
+    adj = (dist_matrix <= SWARM_MAX_DIST_M) & (hdiff_matrix <= SWARM_HEADING_TOL_DEG)
+    np.fill_diagonal(adj, False)  # no self-edges
+
+    # BFS clustering on the adjacency matrix
     visited: Set[int] = set()
     swarm_anomalies: List[Dict[str, Any]] = []
 
@@ -195,16 +214,13 @@ def detect_swarms(tracks: Dict[str, Dict]) -> List[Dict[str, Any]]:
         queue = [i]
         while queue:
             cur = queue.pop(0)
-            for j in range(n):
-                if j in visited:
-                    continue
-                dist = _haversine_m(active[cur][1], active[cur][2],
-                                    active[j][1], active[j][2])
-                hdiff = _angle_diff(active[cur][3], active[j][3])
-                if dist <= SWARM_MAX_DIST_M and hdiff <= SWARM_HEADING_TOL_DEG:
-                    visited.add(j)
-                    group.append(j)
-                    queue.append(j)
+            neighbours = np.where(adj[cur])[0]
+            for j in neighbours:
+                j_int = int(j)
+                if j_int not in visited:
+                    visited.add(j_int)
+                    group.append(j_int)
+                    queue.append(j_int)
 
         if len(group) >= SWARM_MIN_TRACKS:
             track_ids = [active[idx][0] for idx in group]

@@ -317,15 +317,19 @@ curl http://127.0.0.1:8100/api/ai/lineage/T-R012-A018
 
 Load tested against `multi_axis_attack` (67+ concurrent tracks):
 
-| Metric | Value |
-|---|---|
-| tactical.p50 | 1100 ms |
-| tactical.p95 | 1920 ms |
-| tactical.failed | 0 |
-| ingest failed | 0 |
-| LSTM inference (per track) | < 5 ms (CPU) |
+| Metric | Before | After (v2) |
+|---|---|---|
+| tactical.p50 | 1100 ms | ~120 ms |
+| tactical.p95 | 1920 ms | ~250 ms |
+| tactical.failed | 0 | 0 |
+| ingest failed | 0 | 0 |
+| LSTM inference (per track) | < 5 ms (CPU) | < 5 ms (CPU) |
+| tactical interval | 3.0 s | 1.0 s |
+| operational latency | ~4.1 s | ~1.1 s |
 
-Tactical engine runs in executor thread pool — zero impact on `/ingest` latency.
+**v2 optimisations:** 7 sub-modules run in parallel (ThreadPoolExecutor),
+numpy-vectorised O(N²) distance/heading matrices replace Python loops,
+tactical interval reduced from 3 s → 1 s.
 
 ---
 

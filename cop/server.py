@@ -1576,7 +1576,7 @@ async def ingest(req: Request):
 # off-loop, then applies results + broadcasts cop.ai_update.
 
 _ai_tactical_last = 0.0
-_AI_TACTICAL_INTERVAL = 3.0  # run tactical engine every N seconds
+_AI_TACTICAL_INTERVAL = 1.0  # run tactical engine every N seconds (was 3.0)
 _ai_tactical_bg_lock = asyncio.Lock()
 
 
@@ -1621,97 +1621,101 @@ def _ai_run_tactical_compute(
     Pure-compute tactical engine pass. Runs in a thread pool executor so
     it does NOT block the asyncio event loop during heavy ML / analysis.
 
-    Iterates over caller-supplied snapshots (never STATE globals) so it
-    is safe against concurrent /ingest mutations. Reads from AI_* globals
-    that are only-extended-by-predictor (AI_PREDICTIONS, AI_ANOMALIES,
-    AI_ML_PREV_TRACKS) — these are eventually consistent and tolerant to
-    stale reads for one tick.
+    Sub-modules are executed in PARALLEL via concurrent.futures.ThreadPoolExecutor.
+    numpy-backed modules (anomaly, coordinated_attack) release GIL during
+    heavy compute, enabling true CPU parallelism across threads.
+
+    Dependency graph:
+      Group A (all independent — run in parallel):
+        swarm, tactical, zone_breach, cones, coord_attack, ml_threat, ew
+      Group B (depends on coord_attack result):
+        roe
 
     Returns a dict of results. The caller is responsible for applying
     them to the AI_* globals on the event loop thread.
     """
     import time as _t
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     _timings: Dict[str, float] = {}
 
-    # Swarm detection
-    _t0 = _t.monotonic()
-    swarm_anomalies = ai_anomaly.detect_swarms(tracks_snap)
-    _timings["swarm"] = (_t.monotonic() - _t0) * 1000
+    # ── Timed wrapper ────────────────────────────────────────────────
+    def _timed(name, fn, *a, **kw):
+        t0 = _t.monotonic()
+        r = fn(*a, **kw)
+        _timings[name] = round((_t.monotonic() - t0) * 1000, 2)
+        return r
 
-    # Tactical recommendations
-    _t0 = _t.monotonic()
-    recs = ai_tactical.generate_recommendations(
-        tracks=tracks_snap,
-        threats=threats_snap,
-        assets=assets_snap,
-        zones=zones_snap,
-        anomalies=AI_ANOMALIES,
-        predictions=AI_PREDICTIONS,
-    )
-    _timings["tactical"] = (_t.monotonic() - _t0) * 1000
+    # ── Group A: independent sub-modules — run in parallel ──────────
+    _results: Dict[str, Any] = {}
 
-    # Predictive zone breach detection
-    _t0 = _t.monotonic()
-    breaches = ai_zone_breach.check_predictive_breaches(
-        predictions=AI_PREDICTIONS,
-        zones=zones_snap,
-    )
-    _timings["zone_breach"] = (_t.monotonic() - _t0) * 1000
+    def _run_swarm():
+        return _timed("swarm", ai_anomaly.detect_swarms, tracks_snap)
 
-    # Uncertainty cones for frontend
-    _t0 = _t.monotonic()
-    cones = ai_zone_breach.build_uncertainty_cones(AI_PREDICTIONS)
-    _timings["cones"] = (_t.monotonic() - _t0) * 1000
+    def _run_tactical():
+        return _timed("tactical", ai_tactical.generate_recommendations,
+                       tracks=tracks_snap, threats=threats_snap,
+                       assets=assets_snap, zones=zones_snap,
+                       anomalies=AI_ANOMALIES, predictions=AI_PREDICTIONS)
 
-    # Coordinated attack detection
-    _t0 = _t.monotonic()
-    coord_attacks = ai_coord_attack.detect_coordinated_attacks(
-        tracks=tracks_snap,
-        predictions=AI_PREDICTIONS,
-        zones=zones_snap,
-        assets=assets_snap,
-    )
-    _timings["coord_attack"] = (_t.monotonic() - _t0) * 1000
+    def _run_zone_breach():
+        return _timed("zone_breach", ai_zone_breach.check_predictive_breaches,
+                       predictions=AI_PREDICTIONS, zones=zones_snap)
 
-    # ML threat scoring
-    _t0 = _t.monotonic()
-    ml_preds: Dict[str, Dict] = {}
-    if ai_ml.is_available():
-        ml_preds = ai_ml.predict_batch(
-            tracks=tracks_snap,
-            threats=threats_snap,
-            assets=assets_snap,
-            zones=zones_snap,
-            prev_tracks=AI_ML_PREV_TRACKS,
-            dt=_AI_TACTICAL_INTERVAL,
-        )
-    _timings["ml_threat"] = (_t.monotonic() - _t0) * 1000
+    def _run_cones():
+        return _timed("cones", ai_zone_breach.build_uncertainty_cones, AI_PREDICTIONS)
 
-    # ROE: engagement advisories
-    _t0 = _t.monotonic()
-    roe_advs = ai_roe.evaluate_all(
-        tracks=tracks_snap,
-        threats=threats_snap,
-        zones=zones_snap,
-        assets=assets_snap,
-        coord_attacks=coord_attacks,
-    )
-    _timings["roe"] = (_t.monotonic() - _t0) * 1000
+    def _run_coord_attack():
+        return _timed("coord_attack", ai_coord_attack.detect_coordinated_attacks,
+                       tracks=tracks_snap, predictions=AI_PREDICTIONS,
+                       zones=zones_snap, assets=assets_snap)
 
-    # EW: mass jamming detection (periodic check over all track timestamps)
-    _t0 = _t.monotonic()
-    ew_jamming = ai_ew.check_mass_jamming(tracks_snap)
-    _timings["ew"] = (_t.monotonic() - _t0) * 1000
+    def _run_ml():
+        if not ai_ml.is_available():
+            _timings["ml_threat"] = 0.0
+            return {}
+        return _timed("ml_threat", ai_ml.predict_batch,
+                       tracks=tracks_snap, threats=threats_snap,
+                       assets=assets_snap, zones=zones_snap,
+                       prev_tracks=AI_ML_PREV_TRACKS, dt=_AI_TACTICAL_INTERVAL)
+
+    def _run_ew():
+        return _timed("ew", ai_ew.check_mass_jamming, tracks_snap)
+
+    # 7 independent tasks — ThreadPoolExecutor with numpy GIL-release
+    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="tac") as pool:
+        futures = {
+            pool.submit(_run_swarm):        "swarm_anomalies",
+            pool.submit(_run_tactical):     "recommendations",
+            pool.submit(_run_zone_breach):  "pred_breaches",
+            pool.submit(_run_cones):        "uncertainty_cones",
+            pool.submit(_run_coord_attack): "coord_attacks",
+            pool.submit(_run_ml):           "ml_predictions",
+            pool.submit(_run_ew):           "ew_alerts",
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                _results[key] = future.result()
+            except Exception as exc:
+                log.warning("[cop] tactical sub-module %s failed: %s", key, exc)
+                _results[key] = [] if key != "ml_predictions" and key != "uncertainty_cones" else {}
+
+    # ── Group B: ROE depends on coord_attacks ───────────────────────
+    coord_attacks = _results.get("coord_attacks", [])
+    roe_advs = _timed("roe", ai_roe.evaluate_all,
+                       tracks=tracks_snap, threats=threats_snap,
+                       zones=zones_snap, assets=assets_snap,
+                       coord_attacks=coord_attacks)
 
     return {
-        "swarm_anomalies":   list(swarm_anomalies),
-        "recommendations":   list(recs),
-        "pred_breaches":     list(breaches),
-        "uncertainty_cones": dict(cones),
+        "swarm_anomalies":   list(_results.get("swarm_anomalies", [])),
+        "recommendations":   list(_results.get("recommendations", [])),
+        "pred_breaches":     list(_results.get("pred_breaches", [])),
+        "uncertainty_cones": dict(_results.get("uncertainty_cones", {})),
         "coord_attacks":     list(coord_attacks),
-        "ml_predictions":    ml_preds,
+        "ml_predictions":    _results.get("ml_predictions", {}),
         "roe_advisories":    list(roe_advs),
-        "ew_alerts":         list(ew_jamming),
+        "ew_alerts":         list(_results.get("ew_alerts", [])),
         "_timings_ms":       _timings,
     }
 
@@ -2291,7 +2295,7 @@ async def api_sync_receive(req: Request):
     pushed_at = body.get("pushed_at", "")
 
     async with STATE_LOCK:
-        applied = cop_sync.apply_delta(delta, STATE)
+        applied = cop_sync.apply_delta(delta, STATE, source_node=node_id)
 
     # Broadcast updated state to connected clients if anything changed
     total_applied = sum(applied.values())
@@ -2308,6 +2312,23 @@ async def api_sync_receive(req: Request):
         log.info("[sync] applied %d records from %s", total_applied, node_id)
 
     return JSONResponse({"ok": True, "applied": applied})
+
+
+@app.get("/api/sync/conflicts")
+async def api_sync_conflicts():
+    """Return the vector clock conflict log for operator review."""
+    return JSONResponse({
+        "node_id":    cop_sync.NODE_ID,
+        "conflicts":  cop_sync.get_conflicts(),
+        "count":      len(cop_sync.get_conflicts()),
+    })
+
+
+@app.delete("/api/sync/conflicts")
+async def api_sync_clear_conflicts(_=Depends(require_operator())):
+    """Clear the conflict log."""
+    n = cop_sync.clear_conflicts()
+    return JSONResponse({"ok": True, "cleared": n})
 
 
 @app.get("/api/ai/status")

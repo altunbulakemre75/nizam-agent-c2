@@ -262,23 +262,107 @@ function getLL(t) {
   return [lat,lon];
 }
 
-/* ── TTS (Web Speech API) ───────────────────────────────── */
+/* ── TTS (Web Speech API) — Alarm Fatigue Prevention ───── */
 const _TTS = (function() {
-  let _enabled = false;
-  let _voices  = [];
+  let _enabled   = false;
+  let _voices    = [];
+
+  // ── Anti-fatigue: throttle + batching ──────────────────
+  const WINDOW_MS      = 5000;   // 5-second dedup window
+  const MAX_QUEUE      = 3;      // max queued utterances at once
+  const _recentKeys    = new Map();  // key → timestamp (dedup)
+  const _batchBucket   = { high_threat: 0, zone_breach: 0, ew_critical: 0, ew_high: 0 };
+  let   _batchTimer    = null;
+
   if ("speechSynthesis" in window) {
     speechSynthesis.onvoiceschanged = () => { _voices = speechSynthesis.getVoices(); };
   }
-  function speak(text, priority) {
-    if (!_enabled || !("speechSynthesis" in window)) return;
-    if (priority === "high") speechSynthesis.cancel();
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.rate   = 1.1;
+
+  function _utterNow(text) {
+    if (!("speechSynthesis" in window)) return;
+    // Drop if queue already saturated
+    if (speechSynthesis.pending && speechSynthesis.speaking) {
+      const pending = speechSynthesis.pending;
+      if (pending && MAX_QUEUE <= 1) return;
+    }
+    const utt  = new SpeechSynthesisUtterance(text);
+    utt.rate   = 1.15;
     utt.volume = 1.0;
-    const eng = _voices.find(v => v.lang && v.lang.startsWith("en"));
+    const eng  = _voices.find(v => v.lang && v.lang.startsWith("en"));
     if (eng) utt.voice = eng;
     speechSynthesis.speak(utt);
   }
+
+  function _flushBatch() {
+    _batchTimer = null;
+    const parts = [];
+    if (_batchBucket.high_threat > 1)
+      parts.push(`${_batchBucket.high_threat} high threats detected`);
+    else if (_batchBucket.high_threat === 1)
+      parts.push("High threat detected");
+
+    if (_batchBucket.zone_breach > 1)
+      parts.push(`${_batchBucket.zone_breach} zone breaches`);
+    else if (_batchBucket.zone_breach === 1)
+      parts.push("Zone breach");
+
+    if (_batchBucket.ew_critical > 0)
+      parts.push(`Critical EW alert`);
+    if (_batchBucket.ew_high > 0)
+      parts.push(`EW warning`);
+
+    // Reset buckets
+    _batchBucket.high_threat = 0;
+    _batchBucket.zone_breach = 0;
+    _batchBucket.ew_critical = 0;
+    _batchBucket.ew_high     = 0;
+
+    if (parts.length > 0) {
+      speechSynthesis.cancel();  // clear stale queue
+      _utterNow(parts.join(". "));
+    }
+  }
+
+  function _scheduleBatch() {
+    if (_batchTimer) return;  // already scheduled
+    _batchTimer = setTimeout(_flushBatch, 800);  // 800ms collect window
+  }
+
+  /**
+   * speak(text, priority, category)
+   *   priority: "high" | "low"
+   *   category: "high_threat" | "zone_breach" | "ew_critical" | "ew_high"
+   *
+   * Same category within WINDOW_MS is batched into a single announcement.
+   * "20 zone breaches" → one utterance, not 20.
+   */
+  function speak(text, priority, category) {
+    if (!_enabled || !("speechSynthesis" in window)) return;
+
+    // Dedup: same category within window → batch
+    if (category && _batchBucket.hasOwnProperty(category)) {
+      _batchBucket[category]++;
+      _scheduleBatch();
+      return;
+    }
+
+    // Non-categorised: dedup by text within window
+    const now = Date.now();
+    const key = text.slice(0, 60);
+    const last = _recentKeys.get(key);
+    if (last && (now - last) < WINDOW_MS) return;
+    _recentKeys.set(key, now);
+    // Prune old keys
+    if (_recentKeys.size > 50) {
+      for (const [k, ts] of _recentKeys) {
+        if (now - ts > WINDOW_MS * 2) _recentKeys.delete(k);
+      }
+    }
+
+    if (priority === "high") speechSynthesis.cancel();
+    _utterNow(text);
+  }
+
   function toggle() { _enabled = !_enabled; return _enabled; }
   function isEnabled() { return _enabled; }
   return { speak, toggle, isEnabled };
@@ -478,7 +562,7 @@ function upsertThreat(threat) {
     if (level === "HIGH") {
       const prev = UI.threats.get(id);
       if (!prev || prev.threat_level !== "HIGH") {
-        _TTS.speak(`High threat detected. Track ${id}`, "high");
+        _TTS.speak(`High threat detected. Track ${id}`, "high", "high_threat");
       }
     }
   }
@@ -810,7 +894,7 @@ function pushAlert(p) {
   const marker=UI.trackMarkers.get(p.track_id);
   if(marker){ const e=marker.getElement(); if(e){e.style.filter="drop-shadow(0 0 8px red)";setTimeout(()=>{e.style.filter="";},1000);} }
   // TTS: announce zone breach
-  _TTS.speak(`Zone breach. Track ${p.track_id} entered ${p.zone_name ?? "restricted zone"}`, "high");
+  _TTS.speak(`Zone breach. Track ${p.track_id} entered ${p.zone_name ?? "restricted zone"}`, "high", "zone_breach");
 }
 
 /* ── EW alert panel ──────────────────────────────────────── */
@@ -878,10 +962,10 @@ function pushEWAlert(p) {
     const btn = document.getElementById("rtab-ew");
     if (btn) btn.click();
     _ewToast(`EW ALERT: ${p.type} — CRITICAL`, "var(--danger)");
-    _TTS.speak(`Critical EW alert. ${(p.type || "").replace("_", " ")} detected`, "high");
+    _TTS.speak(`Critical EW alert. ${(p.type || "").replace("_", " ")} detected`, "high", "ew_critical");
   } else if (p.severity === "HIGH") {
     _ewToast(`EW: ${p.type}`, "var(--warn)");
-    _TTS.speak(`EW warning. ${(p.type || "").replace("_", " ")}`, "low");
+    _TTS.speak(`EW warning. ${(p.type || "").replace("_", " ")}`, "low", "ew_high");
   }
 
   // Highlight the affected track on map
@@ -4044,7 +4128,11 @@ async function _refreshNodesPanel() {
     let html = `<div class="nz-section">Federation Nodes</div>`;
     html += `<div style="color:var(--text-3);font-size:10px;margin-bottom:6px">`;
     html += `Node: <b style="color:#3498db">${s.node_id ?? "?"}</b> &nbsp;`;
-    html += `Interval: ${s.sync_interval_s ?? 5}s &nbsp; Peers: ${peers.length}</div>`;
+    html += `Interval: ${s.sync_interval_s ?? 5}s &nbsp; Peers: ${peers.length}`;
+    if (s.conflict_count > 0) {
+      html += ` &nbsp;<span style="color:var(--warn);font-weight:bold">Conflicts: ${s.conflict_count}</span>`;
+    }
+    html += `</div>`;
 
     if (peers.length === 0) {
       html += `<div style="color:var(--text-3);font-size:10px;margin-bottom:8px">No peers registered</div>`;
@@ -4054,7 +4142,8 @@ async function _refreshNodesPanel() {
         const ok = ps.ok ?? 0;
         const fail = ps.fail ?? 0;
         const last = ps.last_push_ago_s != null ? `${ps.last_push_ago_s.toFixed(0)}s ago` : "never";
-        const statusColor = fail > 0 ? "var(--warn)" : "var(--ok)";
+        const partitioned = p.partitioned === true;
+        const statusColor = partitioned ? "var(--danger)" : (fail > 0 ? "var(--warn)" : "var(--ok)");
         html += `<div class="nz-card" style="margin-bottom:4px;border-left:3px solid ${statusColor}">
           <div style="display:flex;align-items:center;gap:4px">
             <span style="color:${statusColor};font-size:10px">●</span>
@@ -4064,7 +4153,7 @@ async function _refreshNodesPanel() {
               onclick="_removePeer(${JSON.stringify(p)})">✕</button>
           </div>
           <div style="color:var(--text-3);font-size:9px;margin-top:2px">
-            ok:${ok} fail:${fail} last:${last}
+            ok:${ok} fail:${fail} last:${last}${partitioned ? ` <span style="color:var(--danger);font-weight:bold">PARTITIONED ${p.partition_duration_s ?? "?"}s</span>` : ""}
           </div>
         </div>`;
       });
