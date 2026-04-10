@@ -69,13 +69,13 @@ from replay import player as replay_player
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
-    from db.session import AsyncSessionLocal, engine
+    from db.session import AsyncSessionLocal, engine, get_db
     from db.models import (
         AlertRecord, AssetRecord, TaskRecord,
         TrackEvent, ThreatEvent, WaypointRecord, ZoneRecord,
     )
     from db.init_db import init_db
-    from auth.deps import AUTH_ENABLED, require_operator
+    from auth.deps import AUTH_ENABLED, require_operator, require_admin
     from auth.router import router as auth_router
     _DB_AVAILABLE = True
 except ImportError:
@@ -84,6 +84,11 @@ except ImportError:
     def get_db():   yield None
     def get_current_user(): return None
     def require_operator(): return lambda: None
+    def require_admin():    return lambda: None
+
+from cop import audit as cop_audit
+from cop import analytics as cop_analytics
+from cop.ratelimit import RateLimitMiddleware
 
 DB_ENABLED = _DB_AVAILABLE and bool(os.environ.get("DATABASE_URL"))
 
@@ -165,6 +170,9 @@ app = FastAPI(
 
 if DB_ENABLED and _DB_AVAILABLE:
     app.include_router(auth_router)
+
+# Rate limiting middleware (write endpoints only)
+app.add_middleware(RateLimitMiddleware)
 
 templates = Jinja2Templates(directory="cop/templates")
 app.mount("/static", StaticFiles(directory="cop/static"), name="static")
@@ -747,7 +755,7 @@ async def api_zones():
 
 
 @app.post("/api/zones")
-async def api_zones_create(req: Request, _=Depends(require_operator())):
+async def api_zones_create(req: Request, current_user=Depends(require_operator())):
     body = await req.json()
     zone_id = body.get("id")
     if not zone_id or not body.get("coordinates"):
@@ -766,11 +774,18 @@ async def api_zones_create(req: Request, _=Depends(require_operator())):
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_zone(zone)))
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "anonymous"),
+        role=getattr(current_user, "role", ""),
+        action="CREATE_ZONE", resource_type="zone", resource_id=zone_id,
+        detail={"name": zone.get("name"), "type": zone.get("type")},
+        ip=req.client.host if req.client else "",
+    ))
     return JSONResponse({"ok": True, "zone": zone})
 
 
 @app.delete("/api/zones/{zone_id}")
-async def api_zones_delete(zone_id: str, _=Depends(require_operator())):
+async def api_zones_delete(zone_id: str, req: Request, current_user=Depends(require_operator())):
     async with STATE_LOCK:
         removed = STATE["zones"].pop(zone_id, None)
     if not removed:
@@ -779,6 +794,12 @@ async def api_zones_delete(zone_id: str, _=Depends(require_operator())):
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_delete_zone_db(zone_id)))
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "anonymous"),
+        role=getattr(current_user, "role", ""),
+        action="DELETE_ZONE", resource_type="zone", resource_id=zone_id,
+        ip=req.client.host if req.client else "",
+    ))
     return JSONResponse({"ok": True, "removed": zone_id})
 
 
@@ -790,7 +811,7 @@ async def api_assets():
 
 
 @app.post("/api/assets")
-async def api_assets_create(req: Request, _=Depends(require_operator())):
+async def api_assets_create(req: Request, current_user=Depends(require_operator())):
     body = await req.json()
     if not body.get("lat") or not body.get("lon") or not body.get("type"):
         return JSONResponse({"ok": False, "error": "lat, lon, type required"}, status_code=400)
@@ -810,11 +831,18 @@ async def api_assets_create(req: Request, _=Depends(require_operator())):
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_asset(asset)))
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "anonymous"),
+        role=getattr(current_user, "role", ""),
+        action="CREATE_ASSET", resource_type="asset", resource_id=asset_id,
+        detail={"type": asset.get("type"), "name": asset.get("name")},
+        ip=req.client.host if req.client else "",
+    ))
     return JSONResponse({"ok": True, "asset": asset})
 
 
 @app.delete("/api/assets/{asset_id}")
-async def api_assets_delete(asset_id: str, _=Depends(require_operator())):
+async def api_assets_delete(asset_id: str, req: Request, current_user=Depends(require_operator())):
     async with STATE_LOCK:
         removed = STATE["assets"].pop(asset_id, None)
     if not removed:
@@ -823,6 +851,12 @@ async def api_assets_delete(asset_id: str, _=Depends(require_operator())):
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_delete_asset_db(asset_id)))
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "anonymous"),
+        role=getattr(current_user, "role", ""),
+        action="DELETE_ASSET", resource_type="asset", resource_id=asset_id,
+        ip=req.client.host if req.client else "",
+    ))
     return JSONResponse({"ok": True, "removed": asset_id})
 
 
@@ -834,9 +868,9 @@ async def api_tasks():
 
 
 @app.post("/api/tasks/{task_id}/approve")
-async def api_task_approve(task_id: str, req: Request, _=Depends(require_operator())):
+async def api_task_approve(task_id: str, req: Request, current_user=Depends(require_operator())):
     body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
-    operator_id = body.get("operator", body.get("operator_id", "operator"))
+    operator_id = getattr(current_user, "username", None) or body.get("operator", body.get("operator_id", "operator"))
     async with STATE_LOCK:
         task = STATE["tasks"].get(task_id)
         if not task:
@@ -870,6 +904,13 @@ async def api_task_approve(task_id: str, req: Request, _=Depends(require_operato
     if action == "ENGAGE" and target_id:
         asyncio.create_task(_run_effector_impact(str(target_id), task["id"]))
 
+    asyncio.create_task(cop_audit.log_action(
+        username=operator_id,
+        role=getattr(current_user, "role", ""),
+        action="APPROVE_TASK", resource_type="task", resource_id=task_id,
+        detail={"task_action": action, "track_id": target_id},
+        ip=req.client.host if req.client else "",
+    ))
     return JSONResponse({"ok": True, "task": task})
 
 
@@ -961,9 +1002,9 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
 
 
 @app.post("/api/tasks/{task_id}/reject")
-async def api_task_reject(task_id: str, req: Request, _=Depends(require_operator())):
+async def api_task_reject(task_id: str, req: Request, current_user=Depends(require_operator())):
     body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
-    operator_id = body.get("operator", body.get("operator_id", "operator"))
+    operator_id = getattr(current_user, "username", None) or body.get("operator", body.get("operator_id", "operator"))
     async with STATE_LOCK:
         task = STATE["tasks"].get(task_id)
         if not task:
@@ -984,6 +1025,13 @@ async def api_task_reject(task_id: str, req: Request, _=Depends(require_operator
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task_update(task)))
+    asyncio.create_task(cop_audit.log_action(
+        username=operator_id,
+        role=getattr(current_user, "role", ""),
+        action="REJECT_TASK", resource_type="task", resource_id=task_id,
+        detail={"track_id": task.get("track_id")},
+        ip=req.client.host if req.client else "",
+    ))
     return JSONResponse({"ok": True, "task": task})
 
 
@@ -2326,6 +2374,82 @@ async def api_scenario_delete(name: str, _=Depends(require_operator())):
         return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
     path.unlink()
     return JSONResponse({"ok": True})
+
+
+# ── Audit log ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/audit", tags=["system"])
+async def api_audit(
+    limit:         int = Query(100, ge=1, le=1000),
+    offset:        int = Query(0, ge=0),
+    username:      Optional[str] = Query(None),
+    action:        Optional[str] = Query(None),
+    resource_type: Optional[str] = Query(None),
+    _=Depends(require_admin()),
+    db=Depends(get_db),
+):
+    """Admin-only: paginated audit log with optional filters."""
+    if db is None:
+        return JSONResponse({"records": [], "total": 0, "note": "DB not configured"})
+
+    from sqlalchemy import select, func
+    from db.models import AuditLog
+
+    stmt = select(AuditLog).order_by(AuditLog.time.desc())
+    if username:
+        stmt = stmt.where(AuditLog.username == username)
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    if resource_type:
+        stmt = stmt.where(AuditLog.resource_type == resource_type)
+
+    count_stmt = select(func.count()).select_from(stmt.subquery())
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    stmt = stmt.offset(offset).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+
+    records = [
+        {
+            "time":          r.time.isoformat() if r.time else None,
+            "username":      r.username,
+            "role":          r.role,
+            "action":        r.action,
+            "resource_type": r.resource_type,
+            "resource_id":   r.resource_id,
+            "detail":        r.detail,
+            "ip":            r.ip,
+            "success":       bool(r.success),
+        }
+        for r in rows
+    ]
+    return JSONResponse({"records": records, "total": total, "offset": offset, "limit": limit})
+
+
+# ── Analytics ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/analytics/tracks", tags=["system"])
+async def api_analytics_tracks(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
+    """Track ingest rate per 5-min bucket for the last N hours."""
+    return JSONResponse({"data": await cop_analytics.track_rate(db, hours=hours)})
+
+
+@app.get("/api/analytics/threats", tags=["system"])
+async def api_analytics_threats(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
+    """Threat events per hour per threat_level for the last N hours."""
+    return JSONResponse({"data": await cop_analytics.threat_distribution(db, hours=hours)})
+
+
+@app.get("/api/analytics/alerts", tags=["system"])
+async def api_analytics_alerts(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
+    """Zone breach alert count per hour for the last N hours."""
+    return JSONResponse({"data": await cop_analytics.alert_rate(db, hours=hours)})
+
+
+@app.get("/api/analytics/audit", tags=["system"])
+async def api_analytics_audit(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
+    """Audit action count per hour for the last N hours."""
+    return JSONResponse({"data": await cop_analytics.audit_summary(db, hours=hours)})
 
 
 # ── WebSocket ─────────────────────────────────────────────────

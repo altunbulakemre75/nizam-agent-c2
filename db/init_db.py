@@ -19,6 +19,7 @@ HYPERTABLES = [
     "track_events",
     "threat_events",
     "alert_records",
+    "audit_logs",
 ]
 
 

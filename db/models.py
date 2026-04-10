@@ -6,6 +6,7 @@ Tables:
   track_events   — hypertable: every track update (TimescaleDB)
   threat_events  — hypertable: every threat update (TimescaleDB)
   alert_records  — hypertable: zone breach alerts (TimescaleDB)
+  audit_logs     — hypertable: operator write-action audit trail (TimescaleDB)
   tasks          — operator task records
   zones          — drawn zones (persistent across restarts)
   assets         — placed assets (persistent across restarts)
@@ -106,6 +107,23 @@ class AlertRecord(Base):
     zone_type = Column(String(32), nullable=True)
     lat       = Column(Float, nullable=True)
     lon       = Column(Float, nullable=True)
+
+
+class AuditLog(Base):
+    """Operator write-action audit trail — hypertable on 'time'."""
+    __tablename__ = "audit_logs"
+    __table_args__ = (PrimaryKeyConstraint("id", "time"),)
+
+    id            = Column(UUID(as_uuid=True), default=uuid.uuid4, nullable=False)
+    time          = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+    username      = Column(String(64), nullable=False, index=True)
+    role          = Column(String(16), nullable=True)
+    action        = Column(String(64), nullable=False, index=True)
+    resource_type = Column(String(32), nullable=True)
+    resource_id   = Column(String(64), nullable=True)
+    detail        = Column(JSON, nullable=True)
+    ip            = Column(String(64), nullable=True)
+    success       = Column(Integer, default=1)
 
 
 # ---------------------------------------------------------------------------

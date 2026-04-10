@@ -3051,11 +3051,35 @@ async function openAdminPanel() {
 
   const modal = el("div", { id: "admin-modal" });
   const box   = el("div", { class: "am-box" });
-  const title = el("div", { class: "am-title" }, ["User Management"]);
-  const listEl= el("div", { id: "am-list" });
-  const addSection = el("div", { class: "nz-write-ctrl", style: { marginTop: "14px" } });
+  const title = el("div", { class: "am-title" }, ["Admin Panel"]);
 
-  // New user form
+  // ── Tab bar ──
+  const tabBar = el("div", { style: { display:"flex", gap:"6px", marginBottom:"14px" }});
+  const paneUsers     = el("div", { id:"am-pane-users" });
+  const paneAudit     = el("div", { id:"am-pane-audit",     style:{ display:"none" }});
+  const paneAnalytics = el("div", { id:"am-pane-analytics", style:{ display:"none" }});
+  const panes = { users: paneUsers, audit: paneAudit, analytics: paneAnalytics };
+  const tabBtns = {};
+  ["users","audit","analytics"].forEach(id => {
+    const btn = el("button", {
+      class: id === "users" ? "nz-btn c-ok" : "nz-btn",
+      style: { fontSize:"11px", padding:"4px 10px" },
+      onclick: () => {
+        Object.values(panes).forEach(p => p.style.display = "none");
+        Object.values(tabBtns).forEach(b => b.className = "nz-btn");
+        panes[id].style.display = "";
+        tabBtns[id].className = "nz-btn c-ok";
+        if (id === "audit")     amLoadAudit(paneAudit);
+        if (id === "analytics") amLoadAnalytics(paneAnalytics);
+      },
+    }, [id.charAt(0).toUpperCase() + id.slice(1)]);
+    tabBtns[id] = btn;
+    tabBar.appendChild(btn);
+  });
+
+  // ── Users pane ──
+  const listEl     = el("div", { id: "am-list" });
+  const addSection = el("div", { class: "nz-write-ctrl", style: { marginTop: "14px" } });
   const nuName = el("input", { type:"text", placeholder:"Username", class:"nz-input",
     style:{ marginBottom:"6px" } });
   const nuPass = el("input", { type:"password", placeholder:"Password", class:"nz-input",
@@ -3072,20 +3096,105 @@ async function openAdminPanel() {
       else { const e=await resp.json(); alert(e.detail || "Error"); }
     }
   }, ["+ Add User"]);
-
-  const addHdr = el("div", { class:"nz-section", style:{ marginBottom:"8px" } }, ["Add User"]);
-  addSection.append(addHdr, nuName, nuPass, nuRole, nuBtn);
+  addSection.append(el("div",{class:"nz-section",style:{marginBottom:"8px"}},["Add User"]),
+    nuName, nuPass, nuRole, nuBtn);
+  paneUsers.append(listEl, addSection);
 
   const closeBtn = el("button", {
     class: "nz-btn c-danger", style: { marginTop:"12px", width:"100%" },
     onclick: () => modal.remove(),
   }, ["Close"]);
 
-  box.append(title, listEl, addSection, closeBtn);
+  box.append(title, tabBar, paneUsers, paneAudit, paneAnalytics, closeBtn);
   modal.appendChild(box);
   document.body.appendChild(modal);
   modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
   await amRefresh(listEl);
+}
+
+async function amLoadAudit(pane) {
+  pane.innerHTML = `<div style="color:var(--text-3);font-size:11px;margin-bottom:8px">Last 100 actions</div>`;
+  try {
+    const r = await authFetch("/api/audit?limit=100");
+    if (!r.ok) { pane.innerHTML += "Cannot load audit log."; return; }
+    const { records } = await r.json();
+    if (!records.length) { pane.innerHTML += "No audit records yet."; return; }
+    const tbl = el("div", { style:{ fontSize:"10px", fontFamily:"var(--mono)" }});
+    records.forEach(rec => {
+      const t = rec.time ? rec.time.slice(0, 19).replace("T"," ") : "?";
+      const color = rec.action.startsWith("DELETE") ? "var(--danger)"
+                  : rec.action.startsWith("CREATE") ? "var(--ok)"
+                  : rec.action.startsWith("APPROVE") ? "var(--accent)" : "var(--text-2)";
+      tbl.appendChild(el("div", { style:{
+        display:"flex", gap:"8px", padding:"3px 0",
+        borderBottom:"1px solid var(--border)", alignItems:"baseline",
+      }}, [
+        el("span",{style:{color:"var(--text-3)",minWidth:"110px"}},[t]),
+        el("span",{style:{color:"var(--text-2)",minWidth:"80px"}},[rec.username]),
+        el("span",{style:{color,minWidth:"120px",fontWeight:"600"}},[rec.action]),
+        el("span",{style:{color:"var(--text-3)"}},[`${rec.resource_type}/${rec.resource_id||""}`]),
+      ]));
+    });
+    pane.appendChild(tbl);
+  } catch(e) { pane.innerHTML += "Error: " + e.message; }
+}
+
+async function amLoadAnalytics(pane) {
+  pane.innerHTML = `<div style="color:var(--text-3);font-size:11px;margin-bottom:8px">Last 24 hours</div>`;
+  try {
+    const [tr, thr, al] = await Promise.all([
+      authFetch("/api/analytics/tracks").then(r=>r.json()),
+      authFetch("/api/analytics/threats").then(r=>r.json()),
+      authFetch("/api/analytics/alerts").then(r=>r.json()),
+    ]);
+    pane.appendChild(amSparkCard("Track Ingest Rate", tr.data, d => d.count, "var(--accent)"));
+    pane.appendChild(amSparkCard("Zone Breach Alerts", al.data, d => d.count, "var(--danger)"));
+    // Threat dist summary
+    const threatSumm = el("div", { style:{ marginTop:"10px" }});
+    threatSumm.appendChild(el("div",{class:"nz-section",style:{marginBottom:"6px"}},["Threat Distribution (24h)"]));
+    const byLevel = {};
+    (thr.data||[]).forEach(d => { byLevel[d.threat_level] = (byLevel[d.threat_level]||0) + d.count; });
+    const total = Object.values(byLevel).reduce((a,b)=>a+b, 0) || 1;
+    ["HIGH","MEDIUM","LOW"].forEach(lvl => {
+      const cnt = byLevel[lvl] || 0;
+      const pct = Math.round(cnt/total*100);
+      const color = lvl==="HIGH" ? "var(--danger)" : lvl==="MEDIUM" ? "var(--warn)" : "var(--ok)";
+      const bar = el("div",{style:{marginBottom:"4px"}});
+      bar.innerHTML = `<div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px">
+        <span style="color:${color}">${lvl}</span><span style="color:var(--text-3)">${cnt}</span></div>
+        <div style="height:5px;background:var(--border);border-radius:3px">
+          <div style="height:100%;width:${pct}%;background:${color};border-radius:3px;transition:width .4s"></div></div>`;
+      threatSumm.appendChild(bar);
+    });
+    pane.appendChild(threatSumm);
+  } catch(e) { pane.innerHTML += "Error: " + e.message; }
+}
+
+function amSparkCard(label, data, valFn, color) {
+  const card = el("div", { style:{ marginBottom:"12px" }});
+  card.appendChild(el("div",{class:"nz-section",style:{marginBottom:"4px"}},[label]));
+  if (!data || !data.length) {
+    card.appendChild(el("div",{style:{color:"var(--text-3)",fontSize:"10px"}},["No data"]));
+    return card;
+  }
+  const vals = data.map(valFn);
+  const max = Math.max(...vals, 1);
+  const W = 340, H = 40;
+  const pts = vals.map((v,i) =>
+    `${Math.round(i/(vals.length-1||1)*W)},${Math.round(H - (v/max)*H)}`).join(" ");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("viewBox",`0 0 ${W} ${H}`);
+  svg.setAttribute("width","100%"); svg.setAttribute("height","40");
+  const pl = document.createElementNS("http://www.w3.org/2000/svg","polyline");
+  pl.setAttribute("points", pts);
+  pl.setAttribute("fill","none"); pl.setAttribute("stroke", color);
+  pl.setAttribute("stroke-width","2"); pl.setAttribute("stroke-linejoin","round");
+  svg.appendChild(pl);
+  const total = vals.reduce((a,b)=>a+b,0);
+  card.appendChild(svg);
+  card.appendChild(el("div",{style:{fontSize:"10px",color:"var(--text-3)",textAlign:"right"}},
+    [`total: ${total}`]));
+  return card;
 }
 
 async function amRefresh(listEl) {
