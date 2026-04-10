@@ -1,5 +1,10 @@
 # NIZAM COP
 
+[![CI](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml/badge.svg)](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-226%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Real-Time Command & Control (C2) / Common Operational Picture (COP) System**
 
 NIZAM is an open-source C2/COP prototype inspired by Anduril Lattice and Palantir Gotham. It demonstrates the core architectural concepts used in modern command & control, ISR, and aerospace ground-segment software: event-driven sensor fusion, multi-layer AI decision support, cryptographically-linked decision provenance, LSTM trajectory prediction, and operator-centric situational awareness.

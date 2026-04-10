@@ -4,3 +4,22 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["ai", "cop", "agents"]
+omit = ["*/tests/*", "*/__pycache__/*", "ai/models/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F"]
+ignore = ["E501", "W503", "E402", "F401"]

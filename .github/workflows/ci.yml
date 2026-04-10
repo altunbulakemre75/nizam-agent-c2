@@ -7,11 +7,14 @@ on:
     branches: [main]
 
 jobs:
+  # ── Unit + integration tests ──────────────────────────────────────────────
   test:
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -21,31 +24,103 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scikit-learn joblib pytest
+          pip install numpy scikit-learn joblib pytest pytest-cov
           pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest tests/ -v --tb=short
-
-      - name: Check imports
+      - name: Run tests with coverage
         run: |
-          python -c "from ai import anomaly, predictor, roe, tactical, timeline, zone_breach, coordinated_attack, ml_threat"
-          python -c "from replay import recorder, player"
+          pytest tests/ -v --tb=short \
+            --cov=ai --cov=cop --cov=agents \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=60
 
-  smoke:
-    name: End-to-end smoke test
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+      - name: Check core imports
+        run: |
+          python -c "from ai import anomaly, predictor, roe, tactical, timeline, zone_breach, coordinated_attack, ml_threat, track_fsm"
+          python -c "from replay import recorder, player"
+          python -c "from cop import server"
+
+  # ── Lint ──────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ruff)
     runs-on: ubuntu-latest
-    needs: test
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: |
+          ruff check ai/ cop/ agents/ adapters/ tests/ \
+            --select E,W,F \
+            --ignore E501,W503,E402,F401 \
+            --output-format=github
+
+  # ── Security scan ─────────────────────────────────────────────────────────
+  security:
+    name: Security (bandit)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit
+        run: |
+          bandit -r ai/ cop/ agents/ adapters/ \
+            -ll \
+            --skip B101,B311,B314,B320,B403,B404,B603,B607 \
+            -f github
+
+  # ── End-to-end smoke test ─────────────────────────────────────────────────
+  smoke:
+    name: E2E smoke test
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-3.12-${{ hashFiles('requirements.txt') }}
 
       - name: Install dependencies
         run: |
@@ -56,7 +131,5 @@ jobs:
       - name: Run smoke test
         # Boots the COP server, runs a 12s single_drone pipeline end-to-end,
         # and asserts on /api/metrics (ingest_total > 0, tactical.ran > 0,
-        # tactical.failed == 0, no overlap under light load). Catches
-        # regressions the unit tests cannot — e.g. a broken uvicorn path,
-        # a hang in cop_publisher's worker pool, or a dead /ingest route.
+        # tactical.failed == 0, no overlap under light load).
         run: python scripts/smoke_test.py --duration 12
