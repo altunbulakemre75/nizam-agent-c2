@@ -1290,6 +1290,138 @@ function pushAnomalies(anomalies) {
   }
 }
 
+/* ── Metrics panel — live /api/metrics polling ──────────── */
+let metricsPanelEl = null;
+let metricsTimer  = null;
+
+function _fmtMs(v)  { return (v == null ? "—" : (+v).toFixed(0) + " ms"); }
+function _fmtNum(v) { return (v == null ? "—" : (+v).toLocaleString()); }
+
+function _metricsBar(label, val, max, color) {
+  const pct = Math.max(0, Math.min(100, (val / max) * 100));
+  return `<div style="margin:3px 0">
+    <div style="display:flex;justify-content:space-between;font-size:9px;opacity:.8">
+      <span>${label}</span><span>${val == null ? "—" : (+val).toFixed(0)} ms</span>
+    </div>
+    <div style="background:rgba(255,255,255,0.08);height:5px;border-radius:3px;overflow:hidden">
+      <div style="background:${color};height:100%;width:${pct}%;transition:width .3s"></div>
+    </div>
+  </div>`;
+}
+
+function mountMetricsPanel() {
+  metricsPanelEl = el("div", { id:"metrics-panel", style:{
+    background:"rgba(0,0,0,0.78)", color:"white",
+    padding:"10px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
+    lineHeight:"1.5",
+  }});
+  metricsPanelEl.innerHTML = "<b>📊 Server Metrics</b><br><span style='opacity:.5'>Loading…</span>";
+  RIGHT_TABS.metrics.appendChild(metricsPanelEl);
+
+  // Start polling
+  refreshMetrics();
+  metricsTimer = setInterval(refreshMetrics, 2000);
+}
+
+async function refreshMetrics() {
+  if (!metricsPanelEl) return;
+  try {
+    const r = await fetch("/api/metrics", {
+      headers: AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {},
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const m = await r.json();
+    renderMetricsPanel(m);
+  } catch (e) {
+    metricsPanelEl.innerHTML = `<b>📊 Server Metrics</b><br>
+      <span style='color:#e74c3c;font-size:9px'>fetch failed: ${e.message}</span>`;
+  }
+}
+
+function renderMetricsPanel(m) {
+  if (!metricsPanelEl) return;
+  const ing  = m.ingest    || {};
+  const tac  = m.tactical  || {};
+  const ws   = m.websocket || {};
+  const st   = m.state     || {};
+
+  const upMin = ((m.uptime_s || 0) / 60).toFixed(1);
+  const rps   = (+ing.per_sec || 0).toFixed(1);
+
+  // p95 health: <500ms green, <2000ms amber, >=2000ms red
+  const p95 = +tac.p95_ms || 0;
+  const p95Color = p95 < 500 ? "#27ae60" : p95 < 2000 ? "#f39c12" : "#e74c3c";
+  const p50 = +tac.p50_ms || 0;
+  const p50Color = p50 < 500 ? "#27ae60" : p50 < 2000 ? "#f39c12" : "#e74c3c";
+
+  let typesHtml = "";
+  for (const [k, v] of Object.entries(ing.by_type || {})) {
+    typesHtml += `<div style="display:flex;justify-content:space-between;opacity:.75">
+      <span>${k}</span><span>${_fmtNum(v)}</span></div>`;
+  }
+  if (!typesHtml) typesHtml = "<div style='opacity:.5'>—</div>";
+
+  metricsPanelEl.innerHTML = `
+    <b>📊 Server Metrics</b>
+    <span style="opacity:.5;float:right">${upMin}m up</span>
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
+
+    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">Ingest</div>
+    <div style="display:flex;justify-content:space-between">
+      <span>total</span><span>${_fmtNum(ing.total)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between">
+      <span>per second</span><span style="color:#3498db">${rps}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.7">
+      <span>bad request</span><span>${_fmtNum(ing.bad_request)}</span>
+    </div>
+    <div style="margin-top:3px;font-size:9px">${typesHtml}</div>
+
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
+    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">Tactical Engine</div>
+    ${_metricsBar("p50", tac.p50_ms, 3000, p50Color)}
+    ${_metricsBar("p95", tac.p95_ms, 3000, p95Color)}
+    <div style="display:flex;justify-content:space-between;opacity:.75">
+      <span>last / max</span>
+      <span>${_fmtMs(tac.last_ms)} / ${_fmtMs(tac.max_ms)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.75">
+      <span>ran / scheduled</span>
+      <span>${_fmtNum(tac.ran)} / ${_fmtNum(tac.scheduled)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.65;font-size:9px">
+      <span>skipped (rate/overlap/fail)</span>
+      <span>${_fmtNum(tac.rate_skipped)} / ${_fmtNum(tac.overlap_skipped)} / ${_fmtNum(tac.failed)}</span>
+    </div>
+
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
+    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">WebSocket</div>
+    <div style="display:flex;justify-content:space-between">
+      <span>clients</span><span style="color:#9b59b6">${_fmtNum(ws.clients)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.75">
+      <span>broadcasts / sent</span>
+      <span>${_fmtNum(ws.broadcasts)} / ${_fmtNum(ws.messages_sent)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.65;font-size:9px">
+      <span>send failures</span><span>${_fmtNum(ws.send_failures)}</span>
+    </div>
+
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
+    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">State</div>
+    <div style="display:flex;justify-content:space-between">
+      <span>tracks / threats</span>
+      <span>${_fmtNum(st.tracks)} / ${_fmtNum(st.threats)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.75">
+      <span>assets / zones / tasks</span>
+      <span>${_fmtNum(st.assets)} / ${_fmtNum(st.zones)} / ${_fmtNum(st.tasks)}</span>
+    </div>
+  `;
+}
+
 /* ── AI: Tactical recommendations panel ─────────────────── */
 let tacPanelEl = null;
 
@@ -2541,6 +2673,7 @@ function mountRightTabContainer() {
     { id: "zones",   label: "📍 Zones"   },
     { id: "assets",  label: "🔵 Assets"  },
     { id: "alerts",  label: "🔔 Alerts"  },
+    { id: "metrics", label: "📊 Metrics" },
   ];
   const activeTabId = { v: "threats" };
 
@@ -2614,6 +2747,7 @@ function boot(){
   mountCoordPanel();
   mountBreachPanel();
   mountAnomalyPanel();
+  mountMetricsPanel();
   mountTacticalPanel();
   mountTimelinePopup();
   mountLineageModal();
