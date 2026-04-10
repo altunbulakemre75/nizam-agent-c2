@@ -1558,6 +1558,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_retrainer.reset()
         AI_ML_PREDICTIONS.clear()
         AI_ML_PREV_TRACKS.clear()
+        ai_ml.clear_feature_cache()
         ai_predictor.reset()
         ai_anomaly.reset()
         ai_tactical.reset()

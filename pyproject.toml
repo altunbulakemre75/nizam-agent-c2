@@ -4,6 +4,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+    "slow: load/stress tests (deselect with -m 'not slow')",
+]
 
 [tool.coverage.run]
 source = ["ai", "cop", "agents"]

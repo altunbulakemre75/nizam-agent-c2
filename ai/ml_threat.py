@@ -34,6 +34,7 @@ import json
 import math
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,6 +54,36 @@ FEATURE_NAMES = [
 
 LABEL_MAP = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 LABEL_NAMES = ["LOW", "MEDIUM", "HIGH"]
+
+# ── Feature vector cache (for online retraining) ──────────────────────────────
+# Bounded rolling cache of the most recent feature vector per track. When an
+# operator approves/rejects an ENGAGE task the retrainer pulls the vector from
+# here so feedback samples carry the real feature values, not proxies.
+_FEATURE_CACHE_MAX = 4096
+_feature_cache: OrderedDict = OrderedDict()
+
+
+def _cache_features(track_id: str, feature_row) -> None:
+    """Store a feature vector (list of floats) keyed by track_id."""
+    try:
+        fv = [float(v) for v in feature_row]
+    except Exception:
+        return
+    if track_id in _feature_cache:
+        _feature_cache.move_to_end(track_id)
+    _feature_cache[track_id] = fv
+    while len(_feature_cache) > _FEATURE_CACHE_MAX:
+        _feature_cache.popitem(last=False)
+
+
+def get_features(track_id: str) -> Optional[List[float]]:
+    """Return the last cached feature vector for a track, or None."""
+    fv = _feature_cache.get(track_id)
+    return list(fv) if fv is not None else None
+
+
+def clear_feature_cache() -> None:
+    _feature_cache.clear()
 
 # ── Distance helper ───────────────────────────────────────────────────────────
 
@@ -358,6 +389,10 @@ def predict_track(
         },
     }
 
+    _tid = track.get("id") or track.get("global_track_id")
+    if _tid:
+        _cache_features(str(_tid), features)
+
     # Decision lineage: record what the model saw and what it decided.
     try:
         from ai import lineage
@@ -430,6 +465,7 @@ def predict_batch(
                 LABEL_NAMES[j]: round(float(p), 3) for j, p in enumerate(proba)
             },
         }
+        _cache_features(str(tid), feature_rows[i])
 
     # Batch lineage recording (single lock acquisition)
     try:

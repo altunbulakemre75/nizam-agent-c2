@@ -86,6 +86,17 @@ def record(
         "predicted_prob":  (ml_pred or {}).get("ml_probability"),
         "ts":              time.time(),
     }
+
+    # Pull the real feature vector the model saw when this decision was taken.
+    # This lifts the retrainer from "proxy sample" to "replay the actual input",
+    # which is the difference between nudging the model and truly learning.
+    try:
+        from ai import ml_threat as _ml
+        fv = _ml.get_features(str(track_id))
+        if fv is not None:
+            record_dict["features"] = fv
+    except Exception:
+        pass
     _feedback_buffer.append(record_dict)
     _retrain_status["total_feedback"] += 1
     _retrain_status["since_last_retrain"] += 1
@@ -222,29 +233,39 @@ def _do_retrain() -> Dict[str, Any]:
     except Exception:
         pass  # No replay data yet — fine, use feedback only
 
-    # ── 2) Build synthetic samples from feedback ──────────────────────────────
+    # ── 2) Build samples from feedback ────────────────────────────────────────
     feedback_recs = _load_feedback()
     n_features = len(FEATURE_NAMES)
 
     X_fb: list = []
     y_fb: list = []
+    real_feature_count = 0
+    proxy_feature_count = 0
     for rec in feedback_recs:
         label = rec.get("true_label", "")
         if label not in LABEL_MAP:
             continue
-        # We don't have the raw feature vector in the feedback record (it wasn't
-        # captured at decision time), so we generate a minimal synthetic sample:
-        # a zero vector with the predicted probability slot set approximately.
-        # This is a weak signal but biases the model in the right direction.
+
+        fv_saved = rec.get("features")
+        if isinstance(fv_saved, list) and len(fv_saved) == n_features:
+            # Real feature vector captured at decision time — the strong signal.
+            try:
+                fv = [float(v) for v in fv_saved]
+                X_fb.append(fv)
+                y_fb.append(LABEL_MAP[label])
+                real_feature_count += 1
+                continue
+            except Exception:
+                pass
+
+        # Legacy record without stored features — fall back to weak proxy so
+        # old feedback still contributes (can be removed once fully migrated).
         fv = [0.0] * n_features
-        prob = rec.get("predicted_prob")
-        if prob is not None:
-            # Slot 0 = speed_mps: proxy high-threat via non-zero speed
-            fv[0] = 15.0 if label == "HIGH" else 5.0
-            # intent_attack slot (index 8)
-            fv[8] = 1.0 if label == "HIGH" else 0.0
+        fv[0] = 15.0 if label == "HIGH" else 5.0
+        fv[8] = 1.0 if label == "HIGH" else 0.0
         X_fb.append(fv)
         y_fb.append(LABEL_MAP[label])
+        proxy_feature_count += 1
 
     X_all = X_base + X_fb
     y_all = y_base + y_fb
@@ -292,6 +313,8 @@ def _do_retrain() -> Dict[str, Any]:
         "samples_total": len(X),
         "samples_base":  len(X_base),
         "feedback_used": len(X_fb),
+        "feedback_real": real_feature_count,
+        "feedback_proxy": proxy_feature_count,
         "labels": {
             LABEL_NAMES[i]: int(sum(1 for v in y_all if v == i))
             for i in range(len(LABEL_NAMES))

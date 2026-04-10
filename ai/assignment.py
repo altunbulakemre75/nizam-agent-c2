@@ -30,6 +30,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Set
 
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 DEG_TO_M = 111_320.0
@@ -106,20 +109,15 @@ def _cost(
     return 0.5 * distance_cost + 0.5 * priority_cost + engagement_cost
 
 
-# ── Hungarian algorithm (O(n³)) ────────────────────────────────────────────────
+# ── Hungarian algorithm (scipy C implementation, O(n³)) ───────────────────────
 
 def _hungarian(cost_matrix: List[List[float]]) -> List[int]:
     """
-    Solve the assignment problem using the Hungarian algorithm.
+    Solve the rectangular assignment problem via scipy's C implementation.
 
-    Parameters
-    ----------
-    cost_matrix : n_rows × n_cols matrix (n_rows ≤ n_cols required; pad if necessary)
-
-    Returns
-    -------
-    assignment : list of length n_rows where assignment[i] = j means row i → col j,
-                 or -1 if no assignment found for row i.
+    Returns a list of length n_rows where assignment[i] = j means row i → col j,
+    or -1 if no assignment. Infinite costs are replaced with a large finite
+    sentinel so scipy's solver never refuses a feasible matching.
     """
     n = len(cost_matrix)
     if n == 0:
@@ -128,141 +126,19 @@ def _hungarian(cost_matrix: List[List[float]]) -> List[int]:
     if m == 0:
         return [-1] * n
 
-    # Pad to square matrix (n × n, n = max(n_rows, n_cols))
-    size = max(n, m)
-    INF  = float("inf")
-    C: List[List[float]] = []
-    for i in range(size):
-        row = []
-        for j in range(size):
-            if i < n and j < m:
-                row.append(cost_matrix[i][j])
-            else:
-                row.append(INF)
-        C.append(row)
+    C = np.asarray(cost_matrix, dtype=float)
 
-    # Replace INF with a large finite number for arithmetic stability
-    big = max(v for row in C for v in row if v != INF) * 2 + 1 if any(
-        v != INF for row in C for v in row
-    ) else 1.0
-    C = [[big if v == INF else v for v in row] for row in C]
+    finite = C[np.isfinite(C)]
+    big = float(finite.max()) * 2.0 + 1.0 if finite.size else 1.0
+    C = np.where(np.isinf(C), big, C)
 
-    # Step 1: subtract row minimum
-    for i in range(size):
-        mn = min(C[i])
-        C[i] = [v - mn for v in C[i]]
+    row_ind, col_ind = linear_sum_assignment(C)
 
-    # Step 2: subtract column minimum
-    for j in range(size):
-        mn = min(C[i][j] for i in range(size))
-        for i in range(size):
-            C[i][j] -= mn
-
-    MAX_ITER = size * 4
-
-    for _ in range(MAX_ITER):
-        # Try to find a complete matching with zeros
-        row_covered: List[bool] = [False] * size
-        col_covered: List[bool] = [False] * size
-        starred: List[List[bool]] = [[False] * size for _ in range(size)]
-        primed:  List[List[bool]] = [[False] * size for _ in range(size)]
-
-        # Star one zero in each uncovered row/col
-        for i in range(size):
-            for j in range(size):
-                if C[i][j] == 0 and not row_covered[i] and not col_covered[j]:
-                    starred[i][j]  = True
-                    row_covered[i] = True
-                    col_covered[j] = True
-
-        row_covered = [False] * size
-        col_covered = [False] * size
-
-        # Cover columns with starred zeros
-        for j in range(size):
-            if any(starred[i][j] for i in range(size)):
-                col_covered[j] = True
-
-        done = sum(col_covered) == size
-        while not done:
-            # Find uncovered zero; prime it
-            found = False
-            pi, pj = -1, -1
-            for i in range(size):
-                if row_covered[i]:
-                    continue
-                for j in range(size):
-                    if C[i][j] == 0 and not col_covered[j]:
-                        primed[i][j] = True
-                        pi, pj = i, j
-                        found = True
-                        break
-                if found:
-                    break
-
-            if not found:
-                # No uncovered zero — update matrix
-                min_val = big
-                for i in range(size):
-                    for j in range(size):
-                        if not row_covered[i] and not col_covered[j]:
-                            if C[i][j] < min_val:
-                                min_val = C[i][j]
-                if min_val == big:
-                    break
-                for i in range(size):
-                    for j in range(size):
-                        if row_covered[i]:
-                            C[i][j] += min_val
-                        if not col_covered[j]:
-                            C[i][j] -= min_val
-                continue
-
-            # Starred zero in row pi?
-            sj = next((j for j in range(size) if starred[pi][j]), -1)
-            if sj >= 0:
-                row_covered[pi] = True
-                col_covered[sj] = False
-            else:
-                # Augment along alternating path
-                path = [(pi, pj)]
-                while True:
-                    last_j = path[-1][1]
-                    si = next((i for i in range(size) if starred[i][last_j]), -1)
-                    if si < 0:
-                        break
-                    path.append((si, last_j))
-                    last_i = path[-1][0]
-                    pj2 = next((j for j in range(size) if primed[last_i][j]), -1)
-                    if pj2 < 0:
-                        break
-                    path.append((last_i, pj2))
-                for (r, c) in path:
-                    if starred[r][c]:
-                        starred[r][c] = False
-                    elif primed[r][c]:
-                        starred[r][c] = True
-
-                row_covered  = [False] * size
-                col_covered  = [False] * size
-                primed       = [[False] * size for _ in range(size)]
-
-                for j in range(size):
-                    if any(starred[i][j] for i in range(size)):
-                        col_covered[j] = True
-                done = sum(col_covered) == size
-
-        # Extract assignment from starred zeros
-        result = [-1] * size
-        for i in range(size):
-            for j in range(size):
-                if starred[i][j]:
-                    result[i] = j
-                    break
-        # Return only valid rows
-        return result[:n]
-
-    return [-1] * n
+    result = [-1] * n
+    for r, c in zip(row_ind, col_ind):
+        if r < n and c < m:
+            result[int(r)] = int(c)
+    return result
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
