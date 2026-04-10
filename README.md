@@ -83,6 +83,7 @@ Each record contains:
 | `adapters/adsb_adapter.py` | dump1090 JSON / Beast | Live aircraft via RTL-SDR |
 | `adapters/ais_adapter.py` | NMEA-0183 serial / TCP | Maritime vessel tracking |
 | `adapters/rest_adapter.py` | Generic HTTP REST poll | Any sensor with a JSON API |
+| `adapters/mqtt_adapter.py` | MQTT v5 (paho-mqtt) | IoT sensors, radar feeds, telemetry |
 
 ### Platform
 
@@ -112,6 +113,7 @@ flowchart LR
         ADSB[ADS-B<br/>dump1090]
         AIS[AIS<br/>NMEA-0183]
         REST[REST<br/>HTTP poll]
+        MQTT[MQTT<br/>paho-mqtt]
     end
 
     FUSER[fuser<br/>multi-sensor fusion]
@@ -136,6 +138,7 @@ flowchart LR
     ADSB --> INGEST
     AIS --> INGEST
     REST --> INGEST
+    MQTT --> INGEST
 
     subgraph AILAYER["AI Decision Support"]
         ML[ML Threat<br/>RandomForest]

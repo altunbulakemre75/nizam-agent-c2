@@ -2070,7 +2070,7 @@ let aarModalEl = null;
 
 function mountAARButton() {
   const btn = el("div", {style:{
-    position:"fixed", top:"60px", right:"12px", zIndex:"10002",
+    position:"fixed", top:"12px", right:"320px", zIndex:"10002",
     background:"#c0392b", color:"#fff",
     padding:"6px 14px", borderRadius:"20px", cursor:"pointer",
     fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
