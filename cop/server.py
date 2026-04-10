@@ -137,7 +137,29 @@ async def lifespan(_app: FastAPI):
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
-app = FastAPI(title="NIZAM COP", version="0.4", lifespan=lifespan)
+app = FastAPI(
+    title="NIZAM COP",
+    version="1.1.0",
+    description=(
+        "Real-time Common Operating Picture (COP) with AI decision support.\n\n"
+        "**Core:** Track ingestion, threat assessment, zone management, asset tracking\n\n"
+        "**AI:** Kalman prediction, anomaly/swarm detection, EW attack detection, "
+        "LLM advisor (Claude/OpenAI/Ollama), coordinated attack analysis, ROE engine\n\n"
+        "**WebSocket:** `ws://<host>/ws` for real-time track/threat/alert streaming"
+    ),
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+    openapi_tags=[
+        {"name": "tracks",  "description": "Track CRUD and ingestion"},
+        {"name": "threats", "description": "Threat assessments"},
+        {"name": "zones",   "description": "Zone management (keep-out, engagement, safe)"},
+        {"name": "assets",  "description": "Friendly/hostile asset registry"},
+        {"name": "tasks",   "description": "Operator task queue (approve/reject)"},
+        {"name": "ai",      "description": "AI decision support — predictions, anomalies, LLM advisor"},
+        {"name": "system",  "description": "Metrics, health, reset"},
+    ],
+)
 
 if DB_ENABLED and _DB_AVAILABLE:
     app.include_router(auth_router)
@@ -1899,6 +1921,90 @@ async def api_metrics():
         "ew":            ai_ew.stats(),
         "sync":          cop_sync.stats(),
     })
+
+
+# ── Prometheus text format metrics ────────────────────────────────────────────
+
+@app.get("/metrics", tags=["system"])
+async def prometheus_metrics():
+    """Prometheus-compatible text metrics (scrape target)."""
+    from fastapi.responses import PlainTextResponse
+    recent: List[float] = list(METRICS["tactical_recent_ms"])
+    uptime_s = _time_mod.time() - _METRICS_START_TS
+    ingest_total = METRICS["ingest_total"]
+    p50 = _metrics_percentile(recent, 50)
+    p95 = _metrics_percentile(recent, 95)
+
+    lines = [
+        "# HELP nizam_uptime_seconds Server uptime in seconds",
+        "# TYPE nizam_uptime_seconds gauge",
+        f"nizam_uptime_seconds {uptime_s:.1f}",
+        "",
+        "# HELP nizam_ingest_total Total ingested events",
+        "# TYPE nizam_ingest_total counter",
+        f"nizam_ingest_total {ingest_total}",
+        "",
+        "# HELP nizam_ingest_per_second Current ingest rate",
+        "# TYPE nizam_ingest_per_second gauge",
+        f"nizam_ingest_per_second {ingest_total / uptime_s:.2f}" if uptime_s > 0 else "nizam_ingest_per_second 0",
+        "",
+        "# HELP nizam_ingest_bad_request Bad ingest requests",
+        "# TYPE nizam_ingest_bad_request counter",
+        f"nizam_ingest_bad_request {METRICS['ingest_bad_request']}",
+        "",
+        "# HELP nizam_tactical_runs Total tactical engine runs",
+        "# TYPE nizam_tactical_runs counter",
+        f"nizam_tactical_runs {METRICS['tactical_ran']}",
+        "",
+        "# HELP nizam_tactical_failed Total tactical engine failures",
+        "# TYPE nizam_tactical_failed counter",
+        f"nizam_tactical_failed {METRICS['tactical_failed']}",
+        "",
+        "# HELP nizam_tactical_p50_ms Tactical engine p50 latency ms",
+        "# TYPE nizam_tactical_p50_ms gauge",
+        f"nizam_tactical_p50_ms {p50:.2f}",
+        "",
+        "# HELP nizam_tactical_p95_ms Tactical engine p95 latency ms",
+        "# TYPE nizam_tactical_p95_ms gauge",
+        f"nizam_tactical_p95_ms {p95:.2f}",
+        "",
+        "# HELP nizam_tactical_max_ms Tactical engine max latency ms",
+        "# TYPE nizam_tactical_max_ms gauge",
+        f"nizam_tactical_max_ms {METRICS['tactical_max_ms']:.2f}",
+        "",
+        "# HELP nizam_ws_clients Connected WebSocket clients",
+        "# TYPE nizam_ws_clients gauge",
+        f"nizam_ws_clients {len(CLIENTS)}",
+        "",
+        "# HELP nizam_ws_broadcasts Total WS broadcasts",
+        "# TYPE nizam_ws_broadcasts counter",
+        f"nizam_ws_broadcasts {METRICS['ws_broadcasts']}",
+        "",
+        "# HELP nizam_tracks Active track count",
+        "# TYPE nizam_tracks gauge",
+        f"nizam_tracks {len(STATE['tracks'])}",
+        "",
+        "# HELP nizam_threats Active threat count",
+        "# TYPE nizam_threats gauge",
+        f"nizam_threats {len(STATE['threats'])}",
+        "",
+        "# HELP nizam_assets Registered assets",
+        "# TYPE nizam_assets gauge",
+        f"nizam_assets {len(STATE['assets'])}",
+        "",
+        "# HELP nizam_zones Defined zones",
+        "# TYPE nizam_zones gauge",
+        f"nizam_zones {len(STATE['zones'])}",
+        "",
+        "# HELP nizam_ew_alerts_total Total EW alerts",
+        "# TYPE nizam_ew_alerts_total counter",
+        f"nizam_ew_alerts_total {ai_ew.stats().get('total_alerts', 0)}",
+        "",
+        "# HELP nizam_deconfliction_merges Total track merges",
+        "# TYPE nizam_deconfliction_merges counter",
+        f"nizam_deconfliction_merges {ai_deconfliction.stats().get('total_aliases', 0)}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
 # ── Distributed sync endpoints ────────────────────────────────────────────────

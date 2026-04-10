@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.coverage
+htmlcov
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+
+# Docs / CI
+*.md
+LICENSE
+.github
+
+# Dev artifacts
+logs/
+*.jsonl
+.agent/
+.claude/

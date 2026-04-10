@@ -23,6 +23,11 @@ x-common-env: &common-env
   JWT_SECRET:           ${JWT_SECRET:-nizam-dev-secret-CHANGE-in-production}
   JWT_EXPIRE_MINUTES:   ${JWT_EXPIRE_MINUTES:-480}
   ORCHESTRATOR_URL:     http://orchestrator:${ORCH_PORT:-8200}
+  LLM_PROVIDER:         ${LLM_PROVIDER:-ollama}
+  ANTHROPIC_API_KEY:    ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY:       ${OPENAI_API_KEY:-}
+  OLLAMA_URL:           ${OLLAMA_URL:-http://host.docker.internal:11434}
+  LLM_MODEL:            ${LLM_MODEL:-llama3.2}
 
 services:
 

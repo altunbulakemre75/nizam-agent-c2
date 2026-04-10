@@ -1279,14 +1279,11 @@ function drawUncertaintyCones(cones) {
 let breachPanelEl = null;
 
 function mountBreachPanel() {
-  breachPanelEl = el("div", { id:"breach-panel", style:{
-    background:"rgba(40,0,0,0.82)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", maxHeight:"180px", overflowY:"auto",
-    border:"1px solid rgba(231,76,60,0.4)",
+  breachPanelEl = el("div", { id:"breach-panel", class:"nz-card", style:{
+    padding:"8px 10px", maxHeight:"180px", overflowY:"auto",
   }});
-  breachPanelEl.innerHTML = "<b>\u26A0 Predictive Breach</b><br><span style='opacity:.5'>No predicted breaches</span>";
+  breachPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">PREDICTIVE BREACH</div>
+    <span style="color:var(--text-3);font-size:10px">Ihlal tahmini yok</span>`;
   RIGHT_TABS.threats.appendChild(breachPanelEl);
 }
 
@@ -1321,14 +1318,11 @@ let mlPanelEl = null;
 let mlModelAvailable = false;
 
 function mountMLPanel() {
-  mlPanelEl = el("div", { id:"ml-panel", style:{
-    background:"rgba(15,10,50,0.88)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
-    lineHeight:"1.5", maxHeight:"220px", overflowY:"auto",
-    border:"1px solid rgba(99,102,241,0.4)",
+  mlPanelEl = el("div", { id:"ml-panel", class:"nz-card", style:{
+    padding:"8px 10px", maxHeight:"220px", overflowY:"auto",
   }});
-  mlPanelEl.innerHTML = '<b style="color:#818cf8">ML Model</b><br><span style="opacity:.5">Bekleniyor...</span>';
+  mlPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">ML THREAT MODEL</div>
+    <span style="color:var(--text-3);font-size:10px">Bekleniyor...</span>`;
   RIGHT_TABS.threats.appendChild(mlPanelEl);
 }
 
@@ -1376,14 +1370,11 @@ const ROE_LABELS = {
 };
 
 function mountROEPanel() {
-  roePanelEl = el("div", { id:"roe-panel", style:{
-    background:"rgba(20,10,40,0.88)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", maxHeight:"200px", overflowY:"auto",
-    border:"1px solid rgba(155,89,182,0.4)",
+  roePanelEl = el("div", { id:"roe-panel", class:"nz-card", style:{
+    padding:"8px 10px", maxHeight:"200px", overflowY:"auto",
   }});
-  roePanelEl.innerHTML = "<b>\u2694 ROE Advisory</b><br><span style='opacity:.5'>No engagements</span>";
+  roePanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">ROE ADVISORY</div>
+    <span style="color:var(--text-3);font-size:10px">Angajman yok</span>`;
   RIGHT_TABS.threats.appendChild(roePanelEl);
 }
 
@@ -1429,14 +1420,12 @@ const convergenceMarkers = new Map(); // key -> L.circleMarker
 const convergenceLines   = new Map(); // key -> [L.polyline, ...]
 
 function mountCoordPanel() {
-  coordPanelEl = el("div", { id:"coord-panel", style:{
-    background:"rgba(80,0,40,0.85)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.4", maxHeight:"180px", overflowY:"auto",
-    border:"1px solid rgba(255,0,80,0.4)",
+  coordPanelEl = el("div", { id:"coord-panel", class:"nz-card", style:{
+    padding:"8px 10px", maxHeight:"180px", overflowY:"auto",
+    borderLeft:"3px solid rgba(255,0,80,0.4)",
   }});
-  coordPanelEl.innerHTML = "<b>\u2694 Coordinated Attack</b><br><span style='opacity:.5'>No coordinated threats</span>";
+  coordPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">KOORDINELI SALDIRI</div>
+    <span style="color:var(--text-3);font-size:10px">Koordineli tehdit yok</span>`;
   RIGHT_TABS.threats.appendChild(coordPanelEl);
 }
 
