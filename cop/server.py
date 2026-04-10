@@ -52,6 +52,7 @@ from ai import lineage as ai_lineage
 from ai import trajectory as ai_trajectory
 from ai import track_fsm
 from ai import deconfliction as ai_deconfliction
+from ai import ew_detector as ai_ew
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -1118,6 +1119,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_roe.reset()
         ai_lineage.clear()
         ai_deconfliction.reset()
+        ai_ew.reset()
         ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
@@ -1237,6 +1239,18 @@ async def ingest(req: Request):
                 lon = payload.get("lon")
                 if lat is not None and lon is not None and STATE["zones"]:
                     await _check_zone_breaches(str(track_id), float(lat), float(lon))
+
+                # ── EW detection: GPS spoofing + false injection ──────────
+                if lat is not None and lon is not None:
+                    ew_alerts = ai_ew.on_track_update(
+                        str(track_id), float(lat), float(lon),
+                        sensors=sensors,
+                    )
+                    for alert in ew_alerts:
+                        asyncio.create_task(broadcast({
+                            "event_type": "cop.ew_alert",
+                            "payload":    {**alert, "server_time": _utc_now_iso()},
+                        }))
 
                 # ── Phase 5: AI hooks on track update ──
                 if lat is not None and lon is not None:
@@ -1470,6 +1484,11 @@ def _ai_run_tactical_compute(
     )
     _timings["roe"] = (_t.monotonic() - _t0) * 1000
 
+    # EW: mass jamming detection (periodic check over all track timestamps)
+    _t0 = _t.monotonic()
+    ew_jamming = ai_ew.check_mass_jamming(tracks_snap)
+    _timings["ew"] = (_t.monotonic() - _t0) * 1000
+
     return {
         "swarm_anomalies":   list(swarm_anomalies),
         "recommendations":   list(recs),
@@ -1478,6 +1497,7 @@ def _ai_run_tactical_compute(
         "coord_attacks":     list(coord_attacks),
         "ml_predictions":    ml_preds,
         "roe_advisories":    list(roe_advs),
+        "ew_alerts":         list(ew_jamming),
         "_timings_ms":       _timings,
     }
 
@@ -1555,6 +1575,13 @@ async def _ai_tactical_background_task() -> None:
 
         AI_ROE_ADVISORIES.clear()
         AI_ROE_ADVISORIES.extend(result["roe_advisories"])
+
+        # Broadcast EW jamming alerts individually
+        for ew_alert in result.get("ew_alerts", []):
+            await broadcast({
+                "event_type": "cop.ew_alert",
+                "payload":    {**ew_alert, "server_time": _utc_now_iso()},
+            })
 
         # 4) Broadcast AI update to connected UI clients.
         await broadcast({
@@ -1846,6 +1873,7 @@ async def api_metrics():
             "tasks":   len(STATE["tasks"]),
         },
         "deconfliction": ai_deconfliction.stats(),
+        "ew": ai_ew.stats(),
     })
 
 
