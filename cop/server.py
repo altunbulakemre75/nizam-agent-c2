@@ -194,6 +194,7 @@ METRICS: Dict[str, Any] = {
     "tactical_last_ms":     0.0,         # duration of the most recent run
     "tactical_max_ms":      0.0,         # worst-case seen so far
     "tactical_recent_ms":   [],          # rolling window of last 32 run durations
+    "tactical_module_ms":   {},          # per-module timing of last run
     # WebSocket fan-out
     "ws_clients":           0,           # current count
     "ws_broadcasts":        0,           # total broadcast calls
@@ -1355,10 +1356,16 @@ def _ai_run_tactical_compute(
     Returns a dict of results. The caller is responsible for applying
     them to the AI_* globals on the event loop thread.
     """
+    import time as _t
+    _timings: Dict[str, float] = {}
+
     # Swarm detection
+    _t0 = _t.monotonic()
     swarm_anomalies = ai_anomaly.detect_swarms(tracks_snap)
+    _timings["swarm"] = (_t.monotonic() - _t0) * 1000
 
     # Tactical recommendations
+    _t0 = _t.monotonic()
     recs = ai_tactical.generate_recommendations(
         tracks=tracks_snap,
         threats=threats_snap,
@@ -1367,25 +1374,33 @@ def _ai_run_tactical_compute(
         anomalies=AI_ANOMALIES,
         predictions=AI_PREDICTIONS,
     )
+    _timings["tactical"] = (_t.monotonic() - _t0) * 1000
 
     # Predictive zone breach detection
+    _t0 = _t.monotonic()
     breaches = ai_zone_breach.check_predictive_breaches(
         predictions=AI_PREDICTIONS,
         zones=zones_snap,
     )
+    _timings["zone_breach"] = (_t.monotonic() - _t0) * 1000
 
     # Uncertainty cones for frontend
+    _t0 = _t.monotonic()
     cones = ai_zone_breach.build_uncertainty_cones(AI_PREDICTIONS)
+    _timings["cones"] = (_t.monotonic() - _t0) * 1000
 
     # Coordinated attack detection
+    _t0 = _t.monotonic()
     coord_attacks = ai_coord_attack.detect_coordinated_attacks(
         tracks=tracks_snap,
         predictions=AI_PREDICTIONS,
         zones=zones_snap,
         assets=assets_snap,
     )
+    _timings["coord_attack"] = (_t.monotonic() - _t0) * 1000
 
     # ML threat scoring
+    _t0 = _t.monotonic()
     ml_preds: Dict[str, Dict] = {}
     if ai_ml.is_available():
         ml_preds = ai_ml.predict_batch(
@@ -1396,8 +1411,10 @@ def _ai_run_tactical_compute(
             prev_tracks=AI_ML_PREV_TRACKS,
             dt=_AI_TACTICAL_INTERVAL,
         )
+    _timings["ml_threat"] = (_t.monotonic() - _t0) * 1000
 
     # ROE: engagement advisories
+    _t0 = _t.monotonic()
     roe_advs = ai_roe.evaluate_all(
         tracks=tracks_snap,
         threats=threats_snap,
@@ -1405,6 +1422,7 @@ def _ai_run_tactical_compute(
         assets=assets_snap,
         coord_attacks=coord_attacks,
     )
+    _timings["roe"] = (_t.monotonic() - _t0) * 1000
 
     return {
         "swarm_anomalies":   list(swarm_anomalies),
@@ -1414,6 +1432,7 @@ def _ai_run_tactical_compute(
         "coord_attacks":     list(coord_attacks),
         "ml_predictions":    ml_preds,
         "roe_advisories":    list(roe_advs),
+        "_timings_ms":       _timings,
     }
 
 
@@ -1458,6 +1477,8 @@ async def _ai_tactical_background_task() -> None:
                 (_time_mod.perf_counter() - t_start) * 1000.0
             )
         METRICS["tactical_ran"] += 1
+        if "_timings_ms" in result:
+            METRICS["tactical_module_ms"] = result.pop("_timings_ms")
 
         # 3) Apply results to AI_* globals. We're back on the event loop
         #    thread here, so writes are serialized w.r.t. /ingest handlers.
@@ -1763,6 +1784,7 @@ async def api_metrics():
             "p50_ms":           round(_metrics_percentile(recent, 50), 2),
             "p95_ms":           round(_metrics_percentile(recent, 95), 2),
             "sample_count":     len(recent),
+            "module_ms":        dict(METRICS.get("tactical_module_ms", {})),
         },
         "websocket": {
             "clients":         len(CLIENTS),

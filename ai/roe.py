@@ -96,10 +96,12 @@ def evaluate_track(
     zones: Dict[str, Dict],
     assets: Dict[str, Dict],
     coord_attack_ids: Set[str],
+    friendlies: Optional[Dict[str, Dict]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Evaluate ROE for a single track.
     Returns an advisory dict or None if nothing changed.
+    Pass pre-computed friendlies dict for batch performance.
     """
     lat = track.get("lat")
     lon = track.get("lon")
@@ -140,8 +142,9 @@ def evaluate_track(
                     zone_dist_restricted = d
 
     # ── Distance to nearest friendly asset ──
-    friendlies = {k: v for k, v in assets.items()
-                  if v.get("type") == "friendly" and v.get("status") == "active"}
+    if friendlies is None:
+        friendlies = {k: v for k, v in assets.items()
+                      if v.get("type") == "friendly" and v.get("status") == "active"}
     min_asset_dist = float("inf")
     nearest_asset_name = ""
     for aid, asset in friendlies.items():
@@ -326,6 +329,10 @@ def evaluate_all(
         for tid in ca.get("track_ids", []):
             coord_ids.add(tid)
 
+    # Pre-compute friendlies once (was recomputed per track before)
+    friendlies = {k: v for k, v in assets.items()
+                  if v.get("type") == "friendly" and v.get("status") == "active"}
+
     advisories: List[Dict[str, Any]] = []
 
     for tid, track in tracks.items():
@@ -335,7 +342,8 @@ def evaluate_all(
         if not level:
             continue
 
-        adv = evaluate_track(tid, track, threat, zones, assets, coord_ids)
+        adv = evaluate_track(tid, track, threat, zones, assets, coord_ids,
+                             friendlies=friendlies)
         if adv and adv["engagement"] != "TRACK_ONLY":
             advisories.append(adv)
 

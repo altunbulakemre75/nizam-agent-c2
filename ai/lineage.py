@@ -131,6 +131,51 @@ def record(
                 _store.pop(oldest, None)
 
 
+def record_batch(records: List[Dict[str, Any]]) -> None:
+    """
+    Append multiple lineage records in a single lock acquisition.
+
+    Each element must be a dict with keys: track_id, stage, summary,
+    and optionally inputs, outputs, rule.  Much faster than calling
+    record() in a loop when there are many records per tactical pass.
+    """
+    if not records:
+        return
+
+    with _lock:
+        for rec_input in records:
+            track_id = rec_input.get("track_id")
+            if not track_id:
+                continue
+
+            record_obj = {
+                "decision_id": uuid.uuid4().hex[:12],
+                "timestamp": _utc_now_iso(),
+                "stage": rec_input.get("stage", ""),
+                "summary": rec_input.get("summary", ""),
+                "inputs": rec_input.get("inputs") or {},
+                "outputs": rec_input.get("outputs") or {},
+                "rule": rec_input.get("rule"),
+            }
+
+            is_new = track_id not in _store
+            chain = _store[track_id]
+
+            if chain:
+                record_obj["prev_hash"] = chain[-1].get("hash", "0" * 64)
+            else:
+                record_obj["prev_hash"] = "0" * 64
+
+            record_obj["hash"] = _hash_record(record_obj)
+            chain.append(record_obj)
+
+            if is_new:
+                _track_order.append(track_id)
+                while len(_track_order) > _MAX_TRACKS:
+                    oldest = _track_order.popleft()
+                    _store.pop(oldest, None)
+
+
 def get_chain(track_id: str) -> List[Dict[str, Any]]:
     """Return all lineage records for a track, oldest first."""
     with _lock:

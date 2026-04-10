@@ -395,19 +395,69 @@ def predict_batch(
 ) -> Dict[str, Dict[str, Any]]:
     """
     Predict threat level for all tracks. Returns {track_id: prediction}.
+    Uses vectorised predict_proba for the entire batch (much faster than
+    per-track calls for sklearn RandomForest).
     """
     if not _load_model():
         return {}
 
-    results = {}
     prev = prev_tracks or {}
 
+    # Extract features for all tracks into a single matrix
+    tid_list: List[str] = []
+    feature_rows: List[np.ndarray] = []
     for tid, track in tracks.items():
-        pred = predict_track(
+        features = extract_track_features(
             track, threats.get(tid), assets, zones, prev.get(tid), dt
         )
-        if pred:
-            results[tid] = pred
+        tid_list.append(tid)
+        feature_rows.append(features)
+
+    if not feature_rows:
+        return {}
+
+    X = np.vstack(feature_rows)  # (N, 16) matrix
+    probas = _model.predict_proba(X)  # single batched call
+
+    results = {}
+    for i, tid in enumerate(tid_list):
+        proba = probas[i]
+        predicted_class = int(np.argmax(proba))
+        results[tid] = {
+            "ml_level": LABEL_NAMES[predicted_class],
+            "ml_probability": round(float(proba[predicted_class]), 3),
+            "ml_probabilities": {
+                LABEL_NAMES[j]: round(float(p), 3) for j, p in enumerate(proba)
+            },
+        }
+
+    # Batch lineage recording (single lock acquisition)
+    try:
+        from ai import lineage
+        batch = []
+        for i, tid in enumerate(tid_list):
+            track = tracks[tid]
+            track_id = track.get("id") or track.get("global_track_id") or tid
+            res = results[tid]
+            top_features = {
+                FEATURE_NAMES[k]: round(float(feature_rows[i][k]), 3)
+                for k in range(min(len(FEATURE_NAMES), len(feature_rows[i])))
+            }
+            batch.append({
+                "track_id": track_id,
+                "stage": "ml_threat",
+                "summary": f"RandomForest → {res['ml_level']} ({res['ml_probability']:.2f})",
+                "inputs": {"features": top_features},
+                "outputs": {
+                    "ml_level": res["ml_level"],
+                    "ml_probability": res["ml_probability"],
+                    "ml_probabilities": res["ml_probabilities"],
+                },
+                "rule": "RandomForestClassifier",
+            })
+        lineage.record_batch(batch)
+    except Exception:
+        pass
 
     return results
 
