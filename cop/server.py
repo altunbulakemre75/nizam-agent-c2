@@ -23,6 +23,14 @@ import asyncio
 import logging
 import os
 import urllib.request
+
+# Load .env early so LLM_PROVIDER / OLLAMA_URL are available before ai modules import
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    from pathlib import Path as _Path
+    _load_dotenv(_Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
 import uuid as _uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone

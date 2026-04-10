@@ -26,6 +26,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
+# Load .env before anything else so LLM_PROVIDER, OLLAMA_URL etc. are visible
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Helpers
