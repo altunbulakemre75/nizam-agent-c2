@@ -53,6 +53,7 @@ from ai import trajectory as ai_trajectory
 from ai import track_fsm
 from ai import deconfliction as ai_deconfliction
 from ai import ew_detector as ai_ew
+from cop import sync as cop_sync
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -107,7 +108,17 @@ async def lifespan(_app: FastAPI):
     rec_path = replay_recorder.start(scenario_name)
     log.info("[cop] Recording started: %s", rec_path)
 
+    # 5) Start peer sync push loop (no-op if no peers registered)
+    _sync_task = cop_sync.start_push_loop(lambda: STATE)
+    # Pre-register peers from env: COP_PEERS=http://node2:8100,http://node3:8100
+    for peer_url in os.environ.get("COP_PEERS", "").split(","):
+        peer_url = peer_url.strip()
+        if peer_url:
+            cop_sync.add_peer(peer_url)
+
     yield
+
+    _sync_task.cancel()
 
     # Stop recording on shutdown
     summary = replay_recorder.stop()
@@ -1120,6 +1131,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_lineage.clear()
         ai_deconfliction.reset()
         ai_ew.reset()
+        cop_sync.reset()
         ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
@@ -1873,8 +1885,70 @@ async def api_metrics():
             "tasks":   len(STATE["tasks"]),
         },
         "deconfliction": ai_deconfliction.stats(),
-        "ew": ai_ew.stats(),
+        "ew":            ai_ew.stats(),
+        "sync":          cop_sync.stats(),
     })
+
+
+# ── Distributed sync endpoints ────────────────────────────────────────────────
+
+@app.post("/api/sync/peers")
+async def api_sync_add_peer(req: Request, _=Depends(require_operator())):
+    """Register a peer COP node URL for state synchronisation."""
+    body = await req.json()
+    url = body.get("url", "").strip()
+    if not url:
+        return JSONResponse({"ok": False, "error": "url required"}, status_code=400)
+    action = body.get("action", "add")
+    if action == "remove":
+        removed = cop_sync.remove_peer(url)
+        return JSONResponse({"ok": True, "removed": removed})
+    cop_sync.add_peer(url)
+    return JSONResponse({"ok": True, "peers": cop_sync.list_peers()})
+
+
+@app.get("/api/sync/status")
+async def api_sync_status():
+    """Return current peer sync status."""
+    return JSONResponse(cop_sync.stats())
+
+
+@app.post("/api/sync/receive")
+async def api_sync_receive(req: Request):
+    """
+    Receive a delta snapshot from a peer COP node.
+    Applies last-write-wins merge into local STATE.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+
+    delta = body.get("delta")
+    if not isinstance(delta, dict):
+        return JSONResponse({"ok": False, "error": "missing delta"}, status_code=400)
+
+    node_id   = body.get("node_id", "unknown")
+    pushed_at = body.get("pushed_at", "")
+
+    async with STATE_LOCK:
+        applied = cop_sync.apply_delta(delta, STATE)
+
+    # Broadcast updated state to connected clients if anything changed
+    total_applied = sum(applied.values())
+    if total_applied > 0:
+        await broadcast({
+            "event_type": "cop.sync_applied",
+            "payload": {
+                "from_node":    node_id,
+                "pushed_at":    pushed_at,
+                "applied":      applied,
+                "server_time":  _utc_now_iso(),
+            },
+        })
+        log.info("[sync] applied %d records from %s", total_applied, node_id)
+
+    return JSONResponse({"ok": True, "applied": applied})
 
 
 @app.get("/api/ai/status")
