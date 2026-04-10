@@ -1131,8 +1131,18 @@ async def api_reset(_=Depends(require_operator())):
 
 # ── Ingest ────────────────────────────────────────────────────
 
+INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "")
+
 @app.post("/ingest")
 async def ingest(req: Request):
+    # API key guard: when AUTH_ENABLED and INGEST_API_KEY is set,
+    # require X-API-Key header for /ingest access.
+    if AUTH_ENABLED and INGEST_API_KEY:
+        provided = req.headers.get("x-api-key", "")
+        if provided != INGEST_API_KEY:
+            METRICS["ingest_bad_request"] += 1
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+
     # Rate limiting
     client_ip = req.client.host if req.client else "unknown"
     if not _rate_limit_check(client_ip):

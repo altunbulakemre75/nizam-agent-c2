@@ -72,13 +72,20 @@ def polar_to_latlon(
 # HTTP helper
 # ---------------------------------------------------------------------------
 
+import os as _os
+_INGEST_API_KEY = _os.environ.get("INGEST_API_KEY", "")
+
+
 def post_json(url: str, body: Dict[str, Any], timeout: float = 3.0) -> bool:
     """POST a JSON body; returns True on 2xx, False otherwise."""
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if _INGEST_API_KEY:
+        headers["X-API-Key"] = _INGEST_API_KEY
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:

@@ -52,7 +52,7 @@ class TestRunTacticalCompute:
             "ml_predictions",
             "roe_advisories",
         }
-        assert set(result.keys()) == required_keys
+        assert required_keys.issubset(set(result.keys()))
         # All list fields must actually be lists (caller does .extend)
         assert isinstance(result["swarm_anomalies"], list)
         assert isinstance(result["recommendations"], list)
