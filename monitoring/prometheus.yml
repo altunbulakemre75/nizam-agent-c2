@@ -1,0 +1,10 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: nizam_cop
+    static_configs:
+      - targets: ['cop:8100']
+    metrics_path: /metrics
+    scrape_timeout: 10s

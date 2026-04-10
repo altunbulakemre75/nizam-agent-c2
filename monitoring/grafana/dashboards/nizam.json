@@ -1,0 +1,154 @@
+{
+  "title": "NIZAM COP",
+  "uid": "nizam-cop-main",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-30m", "to": "now" },
+  "tags": ["nizam", "cop", "tactical"],
+  "panels": [
+    {
+      "id": 1, "type": "stat", "gridPos": {"h":4,"w":4,"x":0,"y":0},
+      "title": "Active Tracks",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background","graphMode":"area","orientation":"auto"},
+      "fieldConfig": {"defaults":{"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":20},{"color":"red","value":50}]}}},
+      "targets": [{"expr":"nizam_tracks","legendFormat":"Tracks","refId":"A"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 2, "type": "stat", "gridPos": {"h":4,"w":4,"x":4,"y":0},
+      "title": "Active Threats",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background","graphMode":"area"},
+      "fieldConfig": {"defaults":{"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":5},{"color":"red","value":15}]}}},
+      "targets": [{"expr":"nizam_threats","legendFormat":"Threats","refId":"A"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 3, "type": "stat", "gridPos": {"h":4,"w":4,"x":8,"y":0},
+      "title": "WEAPONS_FREE Advisories",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background","graphMode":"none"},
+      "fieldConfig": {"defaults":{"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green","value":0},{"color":"orange","value":1},{"color":"red","value":3}]}}},
+      "targets": [{"expr":"nizam_roe_weapons_free","legendFormat":"WEAPONS_FREE","refId":"A"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 4, "type": "stat", "gridPos": {"h":4,"w":4,"x":12,"y":0},
+      "title": "Escalation Pending",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background","graphMode":"none"},
+      "fieldConfig": {"defaults":{"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green","value":0},{"color":"red","value":1}]}}},
+      "targets": [{"expr":"nizam_escalation_pending","legendFormat":"Pending","refId":"A"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 5, "type": "stat", "gridPos": {"h":4,"w":4,"x":16,"y":0},
+      "title": "WS Clients",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},
+      "fieldConfig": {"defaults":{"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"blue","value":0}]}}},
+      "targets": [{"expr":"nizam_ws_clients","legendFormat":"Clients","refId":"A"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 6, "type": "stat", "gridPos": {"h":4,"w":4,"x":20,"y":0},
+      "title": "Ingest Rate",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},
+      "fieldConfig": {"defaults":{"unit":"reqps","color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":50},{"color":"red","value":200}]}}},
+      "targets": [{"expr":"nizam_ingest_per_second","legendFormat":"req/s","refId":"A"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 10, "type": "timeseries", "gridPos": {"h":8,"w":12,"x":0,"y":4},
+      "title": "Tactical Engine Latency (ms)",
+      "options": {"tooltip":{"mode":"multi"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"unit":"ms","custom":{"lineWidth":2,"fillOpacity":5}}},
+      "targets": [
+        {"expr":"nizam_tactical_p50_ms","legendFormat":"p50","refId":"A"},
+        {"expr":"nizam_tactical_p95_ms","legendFormat":"p95","refId":"B"},
+        {"expr":"nizam_tactical_p99_ms","legendFormat":"p99","refId":"C"},
+        {"expr":"nizam_tactical_max_ms","legendFormat":"max","refId":"D"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 11, "type": "timeseries", "gridPos": {"h":8,"w":12,"x":12,"y":4},
+      "title": "Track & Threat Count",
+      "options": {"tooltip":{"mode":"multi"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"custom":{"lineWidth":2,"fillOpacity":8}}},
+      "targets": [
+        {"expr":"nizam_tracks","legendFormat":"Tracks","refId":"A"},
+        {"expr":"nizam_threats","legendFormat":"Threats","refId":"B"},
+        {"expr":"nizam_assets","legendFormat":"Assets","refId":"C"},
+        {"expr":"nizam_tasks","legendFormat":"Tasks","refId":"D"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 12, "type": "timeseries", "gridPos": {"h":7,"w":12,"x":0,"y":12},
+      "title": "Ingest Rate (events/sec)",
+      "options": {"tooltip":{"mode":"single"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"unit":"reqps","custom":{"lineWidth":2,"fillOpacity":10}}},
+      "targets": [
+        {"expr":"nizam_ingest_per_second","legendFormat":"Ingest rate","refId":"A"},
+        {"expr":"rate(nizam_ingest_total[1m])","legendFormat":"1m rate","refId":"B"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 13, "type": "timeseries", "gridPos": {"h":7,"w":12,"x":12,"y":12},
+      "title": "ROE Advisories",
+      "options": {"tooltip":{"mode":"multi"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"custom":{"lineWidth":2,"fillOpacity":8}}},
+      "targets": [
+        {"expr":"nizam_roe_advisories","legendFormat":"Total advisories","refId":"A"},
+        {"expr":"nizam_roe_weapons_free","legendFormat":"WEAPONS_FREE","refId":"B"},
+        {"expr":"nizam_roe_weapons_tight","legendFormat":"WEAPONS_TIGHT","refId":"C"},
+        {"expr":"nizam_escalation_pending","legendFormat":"Escalation pending","refId":"D"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 14, "type": "timeseries", "gridPos": {"h":7,"w":12,"x":0,"y":19},
+      "title": "EW & Deconfliction",
+      "options": {"tooltip":{"mode":"multi"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"custom":{"lineWidth":2,"fillOpacity":5}}},
+      "targets": [
+        {"expr":"rate(nizam_ew_alerts_total[1m])*60","legendFormat":"EW alerts/min","refId":"A"},
+        {"expr":"rate(nizam_deconfliction_merges_total[1m])*60","legendFormat":"Track merges/min","refId":"B"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 15, "type": "timeseries", "gridPos": {"h":7,"w":12,"x":12,"y":19},
+      "title": "WebSocket Fan-out",
+      "options": {"tooltip":{"mode":"multi"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"custom":{"lineWidth":2}}},
+      "targets": [
+        {"expr":"nizam_ws_clients","legendFormat":"Connected clients","refId":"A"},
+        {"expr":"rate(nizam_ws_broadcasts_total[1m])*60","legendFormat":"Broadcasts/min","refId":"B"},
+        {"expr":"rate(nizam_ws_send_failures_total[1m])*60","legendFormat":"Send failures/min","refId":"C"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 16, "type": "bargauge", "gridPos": {"h":6,"w":12,"x":0,"y":26},
+      "title": "Per-Module Tactical Latency (last run)",
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"orientation":"horizontal","displayMode":"gradient"},
+      "fieldConfig": {"defaults":{"unit":"ms","color":{"mode":"continuous-GrYlRd"}}},
+      "targets": [
+        {"expr":"nizam_tactical_module_ms","legendFormat":"{{module}}","refId":"A"}
+      ],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 17, "type": "timeseries", "gridPos": {"h":6,"w":12,"x":12,"y":26},
+      "title": "Tactical Engine Runs",
+      "options": {"tooltip":{"mode":"multi"},"legend":{"displayMode":"list","placement":"bottom"}},
+      "fieldConfig": {"defaults":{"custom":{"lineWidth":2}}},
+      "targets": [
+        {"expr":"rate(nizam_tactical_runs_total[1m])*60","legendFormat":"Runs/min","refId":"A"},
+        {"expr":"rate(nizam_tactical_skipped_total[1m])*60","legendFormat":"Skipped/min","refId":"B"},
+        {"expr":"rate(nizam_tactical_failed_total[1m])*60","legendFormat":"Failures/min","refId":"C"}
+      ],
+      "datasource": "Prometheus"
+    }
+  ]
+}

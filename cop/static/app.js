@@ -859,6 +859,8 @@ function applyAIUpdate(payload) {
   );
   if (newAnomalies.length > 0) pushAnomalies(newAnomalies);
   renderTacticalPanel(payload.recommendations || []);
+  renderAssignmentPanel(payload.assignment || {});
+  renderBFTPanel(payload.bft_warnings || []);
   // Auto-refresh open timeline chart
   if (timelineCurrentTrack) fetchAndDrawTimeline(timelineCurrentTrack);
 }
@@ -1249,6 +1251,7 @@ const CopEngine = (() => {
       case "cop.waypoints_cleared":return clearWaypoints();
       case "cop.ew_alert":        return pushEWAlert(ev.payload);
       case "cop.escalation":      return pushEscalation(ev.payload);
+      case "cop.bft_warning":     return pushBFTWarning(ev.payload);
       case "cop.track_merged":    return pushTrackMerged(ev.payload);
       case "cop.annotation":      return _wsAnnotation(ev.payload);
       case "cop.annotation_removed": return _wsAnnotationRemoved(ev.payload);
@@ -3132,6 +3135,107 @@ function _aarStatCard(label, value, color) {
   </div>`;
 }
 
+/* ── Multi-effector Assignment Panel ────────────────────── */
+let _assignPanelEl = null;
+
+function mountAssignmentPanel() {
+  _assignPanelEl = el("div", {id:"assign-panel", class:"nz-card", style:{
+    width:"100%", marginBottom:"4px", display:"none",
+  }});
+  _assignPanelEl.innerHTML = `
+    <div class="nz-section" style="margin-bottom:6px">Effektör Atama <span id="assign-badge" style="font-size:9px;opacity:.6"></span></div>
+    <div id="assign-body" style="font-size:10px"></div>`;
+  const aiTab = RIGHT_TABS["ai"];
+  if (aiTab) aiTab.appendChild(_assignPanelEl);
+}
+
+function renderAssignmentPanel(data) {
+  if (!_assignPanelEl) return;
+  const assignments = data.assignments || [];
+  const unassigned  = data.unassigned_threats || [];
+  const stats       = data.stats || {};
+  if (assignments.length === 0 && unassigned.length === 0) {
+    _assignPanelEl.style.display = "none";
+    return;
+  }
+  _assignPanelEl.style.display = "";
+  const badge = document.getElementById("assign-badge");
+  if (badge) badge.textContent = `${stats.assigned||0}/${stats.threats||0} atandı`;
+
+  const body = document.getElementById("assign-body");
+  if (!body) return;
+  let html = "";
+  if (assignments.length > 0) {
+    html += assignments.map(a => {
+      const engC = a.engagement === "WEAPONS_FREE" ? "#e74c3c" : "#e67e22";
+      return `<div style="display:flex;justify-content:space-between;align-items:center;
+                padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+        <div>
+          <span style="font-weight:bold;color:#e74c3c">${escHtml(a.threat_id)}</span>
+          <span style="opacity:.5;margin:0 4px">→</span>
+          <span style="color:#27ae60">${escHtml(a.effector_name||a.effector_id)}</span>
+        </div>
+        <div style="opacity:.7;font-size:9px;text-align:right">
+          <span style="color:${engC}">${a.engagement}</span>
+          <span style="margin-left:4px">${a.dist_km}km</span>
+          <span style="margin-left:4px;opacity:.6">c=${a.cost}</span>
+        </div>
+      </div>`;
+    }).join("");
+  }
+  if (unassigned.length > 0) {
+    html += `<div style="margin-top:5px;opacity:.6;font-size:9px">Atanamadı: ${unassigned.map(escHtml).join(", ")}</div>`;
+  }
+  body.innerHTML = html;
+}
+
+/* ── Blue Force Protection Panel ────────────────────────── */
+let _bftPanelEl = null;
+const _bftLog = [];
+
+function mountBFTPanel() {
+  _bftPanelEl = el("div", {id:"bft-panel", class:"nz-card", style:{
+    width:"100%", marginBottom:"4px", display:"none",
+    borderLeft:"3px solid #3498db",
+  }});
+  _bftPanelEl.innerHTML = `
+    <div class="nz-section" style="margin-bottom:6px;color:#3498db">🔵 Mavi Kuvvet Koruması</div>
+    <div id="bft-body" style="font-size:10px"></div>`;
+  const aiTab = RIGHT_TABS["ai"];
+  if (aiTab) aiTab.appendChild(_bftPanelEl);
+}
+
+function renderBFTPanel(warnings) {
+  if (!_bftPanelEl) return;
+  if (!warnings || warnings.length === 0) {
+    _bftPanelEl.style.display = "none";
+    return;
+  }
+  _bftPanelEl.style.display = "";
+  const body = document.getElementById("bft-body");
+  if (!body) return;
+  body.innerHTML = warnings.map(w => {
+    const assets = (w.at_risk||[]).map(r =>
+      `<span style="color:#f39c12">${escHtml(r.asset_name)}</span> <span style="opacity:.5">(${r.clearance_m}m)</span>`
+    ).join(", ");
+    return `<div style="background:rgba(52,152,219,0.08);border-left:2px solid #3498db;
+              padding:4px 6px;margin-bottom:4px;border-radius:0 4px 4px 0">
+      <div style="font-weight:bold;color:#3498db">${escHtml(w.track_id)}</div>
+      <div style="opacity:.8;margin-top:2px">Koridor: ${assets||"?"}</div>
+      <div style="opacity:.5;font-size:9px;margin-top:1px">WEAPONS_FREE → WEAPONS_HOLD</div>
+    </div>`;
+  }).join("");
+}
+
+function pushBFTWarning(payload) {
+  if (!payload) return;
+  _bftLog.unshift({...payload, _t: Date.now()});
+  if (_bftLog.length > 10) _bftLog.length = 10;
+  renderBFTPanel(_bftLog.filter(w => Date.now() - w._t < 120000));
+  // Flash EW panel tab badge briefly
+  setTabBadge("ai", (_bftLog.length));
+}
+
 /* ── Audit Log Modal ─────────────────────────────────────── */
 let _auditModalEl = null;
 
@@ -4703,6 +4807,8 @@ function boot(){
   mountAARButton();
   mountAuditModal();
   mountKillChainPanel();
+  mountAssignmentPanel();
+  mountBFTPanel();
   // Federation nodes panel
   mountNodesPanel();
   _refreshNodesPanel();

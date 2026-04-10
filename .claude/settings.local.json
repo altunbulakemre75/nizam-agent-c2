@@ -5,7 +5,29 @@
       "Bash(pip install:*)",
       "Bash(python -c ':*)",
       "Bash(python -c \"import uvicorn; print\\(uvicorn.__version__\\)\")",
-      "Bash(timeout 6 python start.py --duration_s 5 --rate_hz 2)"
+      "Bash(timeout 6 python start.py --duration_s 5 --rate_hz 2)",
+      "Bash(timeout 20 python start.py --duration_s 15 --rate_hz 2)",
+      "Bash(python start.py --duration_s 20 --rate_hz 2)",
+      "Bash(python start.py --open_browser --duration_s 300 --rate_hz 1)",
+      "Bash(python start.py --scenario coordinated_attack --open_browser --duration_s 120 --rate_hz 1)",
+      "Bash(python start.py --scenario scenarios/coordinated_attack.json --open_browser --duration_s 120 --rate_hz 1)",
+      "Bash(python start.py --scenario scenarios/coordinated_attack.json --duration_s 120 --rate_hz 1)",
+      "Bash(curl -s http://127.0.0.1:8100/api/ai/coordinated)",
+      "Bash(pkill -f \"start.py\")",
+      "Bash(pkill -f \"cop/server.py\")",
+      "Bash(pkill -f \"uvicorn\")",
+      "Bash(curl -s http://127.0.0.1:8100/api/ai/timeline)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(taskkill //F //IM python3.exe)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(xargs wc:*)",
+      "Bash(python start.py --scenario scenarios/single_drone.json --duration_s 30)",
+      "Bash(claude --version)",
+      "Bash(claude /status)",
+      "Bash(claude status:*)",
+      "Bash(claude whoami:*)",
+      "Bash(claude auth:*)",
+      "Bash(claude config:*)"
     ]
   }
 }

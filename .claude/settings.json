@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ':*)",
+      "Bash(curl -s http://127.0.0.1:8100/api/ai/roe)",
+      "Bash(wc -l ai/*.py cop/server.py cop/static/app.js agents/*/*.py agents/*.py start.py)"
+    ]
+  }
+}

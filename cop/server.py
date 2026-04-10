@@ -68,6 +68,8 @@ from ai import ew_ml as ai_ew_ml
 from ai import fusion as ai_fusion
 from ai.fusion import SensorMeasurement as FusionMeasurement
 from ai import escalation as ai_escalation
+from ai import assignment as ai_assignment
+from ai import blue_force as ai_blue_force
 from cop import sync as cop_sync
 from cop import circuit_breaker as cop_cb
 from replay import recorder as replay_recorder
@@ -213,6 +215,8 @@ AI_PRED_BREACHES: List[Dict] = []             # predictive zone breach warnings
 AI_UNCERTAINTY_CONES: Dict[str, List[Dict]] = {}  # uncertainty cones for frontend
 AI_COORD_ATTACKS: List[Dict] = []                 # coordinated attack warnings
 AI_ROE_ADVISORIES: List[Dict] = []                # ROE engagement advisories
+AI_ASSIGNMENT: Dict[str, Any] = {}               # latest effector assignment result
+AI_BFT_WARNINGS: List[Dict]   = []               # latest blue-force fratricide warnings
 AI_ML_PREDICTIONS: Dict[str, Dict] = {}               # ML threat predictions per track
 AI_ML_PREV_TRACKS: Dict[str, Dict] = {}               # previous frame tracks for acceleration calc
 AI_ANOMALY_MAX = 100
@@ -1293,6 +1297,8 @@ async def api_reset(_=Depends(require_operator())):
         AI_UNCERTAINTY_CONES.clear()
         AI_COORD_ATTACKS.clear()
         AI_ROE_ADVISORIES.clear()
+        AI_ASSIGNMENT.clear()
+        AI_BFT_WARNINGS.clear()
         AI_ML_PREDICTIONS.clear()
         AI_ML_PREV_TRACKS.clear()
         ai_predictor.reset()
@@ -1869,10 +1875,44 @@ async def _ai_tactical_background_task() -> None:
                     STATE["threats"][tid]["confidence_grade"]     = enriched["confidence_grade"]
                     STATE["threats"][tid]["confidence_breakdown"] = enriched["confidence_breakdown"]
 
+        # ── Blue Force / Fratricide check ─────────────────────────────────
+        # Must run against current STATE so it sees live friendly positions.
+        bft_screened, bft_warnings = ai_blue_force.check_advisories(
+            advisories=result["roe_advisories"],
+            tracks=dict(STATE["tracks"]),
+            assets=dict(STATE["assets"]),
+        )
+        for warn in bft_warnings:
+            log.warning("[bft] %s", warn["message"])
+            await broadcast({
+                "event_type": "cop.bft_warning",
+                "payload":    {**warn, "server_time": _utc_now_iso()},
+            })
+
         AI_ROE_ADVISORIES.clear()
-        AI_ROE_ADVISORIES.extend(result["roe_advisories"])
+        AI_ROE_ADVISORIES.extend(bft_screened)
         for adv in AI_ROE_ADVISORIES:
             ai_aar.record_roe_advisory(adv)
+
+        # ── Multi-effector assignment ──────────────────────────────────────
+        assign_result = ai_assignment.compute(
+            threats=dict(STATE["threats"]),
+            assets=dict(STATE["assets"]),
+            roe_advisories=AI_ROE_ADVISORIES,
+        )
+        AI_ASSIGNMENT["assignments"] = [
+            {"threat_id": a.threat_id, "effector_id": a.effector_id,
+             "effector_name": a.effector_name, "cost": a.cost,
+             "dist_km": a.dist_km, "threat_score": a.threat_score,
+             "engagement": a.engagement}
+            for a in assign_result.assignments
+        ]
+        AI_ASSIGNMENT["unassigned_threats"]   = assign_result.unassigned_threats
+        AI_ASSIGNMENT["unassigned_effectors"] = assign_result.unassigned_effectors
+        AI_ASSIGNMENT["stats"]                = assign_result.stats
+
+        AI_BFT_WARNINGS.clear()
+        AI_BFT_WARNINGS.extend(bft_warnings)
 
         # ── Escalation check — unanswered advisory alarm ──────────────────
         escalations = ai_escalation.check(AI_ROE_ADVISORIES)
@@ -1911,6 +1951,8 @@ async def _ai_tactical_background_task() -> None:
                     for tid, t in STATE["threats"].items()
                     if t.get("confidence") is not None
                 },
+                "assignment":        dict(AI_ASSIGNMENT),
+                "bft_warnings":      list(AI_BFT_WARNINGS),
                 "server_time":       _utc_now_iso(),
             },
         })
@@ -2289,84 +2331,60 @@ async def api_metrics():
 
 @app.get("/metrics", tags=["system"])
 async def prometheus_metrics():
-    """Prometheus-compatible text metrics (scrape target)."""
+    """Prometheus-compatible text metrics (scrape endpoint for Prometheus/Grafana)."""
     from fastapi.responses import PlainTextResponse
     recent: List[float] = list(METRICS["tactical_recent_ms"])
     uptime_s = _time_mod.time() - _METRICS_START_TS
     ingest_total = METRICS["ingest_total"]
-    p50 = _metrics_percentile(recent, 50)
-    p95 = _metrics_percentile(recent, 95)
+    p50  = _metrics_percentile(recent, 50)
+    p95  = _metrics_percentile(recent, 95)
+    p99  = _metrics_percentile(recent, 99)
+    roe_weapons_free   = sum(1 for a in AI_ROE_ADVISORIES if a.get("engagement") == "WEAPONS_FREE")
+    roe_weapons_tight  = sum(1 for a in AI_ROE_ADVISORIES if a.get("engagement") == "WEAPONS_TIGHT")
+    escalation_pending = len(ai_escalation.get_pending())
+    module_ms: Dict[str, float] = METRICS.get("tactical_module_ms", {})
 
-    lines = [
-        "# HELP nizam_uptime_seconds Server uptime in seconds",
-        "# TYPE nizam_uptime_seconds gauge",
-        f"nizam_uptime_seconds {uptime_s:.1f}",
-        "",
-        "# HELP nizam_ingest_total Total ingested events",
-        "# TYPE nizam_ingest_total counter",
-        f"nizam_ingest_total {ingest_total}",
-        "",
-        "# HELP nizam_ingest_per_second Current ingest rate",
-        "# TYPE nizam_ingest_per_second gauge",
-        f"nizam_ingest_per_second {ingest_total / uptime_s:.2f}" if uptime_s > 0 else "nizam_ingest_per_second 0",
-        "",
-        "# HELP nizam_ingest_bad_request Bad ingest requests",
-        "# TYPE nizam_ingest_bad_request counter",
-        f"nizam_ingest_bad_request {METRICS['ingest_bad_request']}",
-        "",
-        "# HELP nizam_tactical_runs Total tactical engine runs",
-        "# TYPE nizam_tactical_runs counter",
-        f"nizam_tactical_runs {METRICS['tactical_ran']}",
-        "",
-        "# HELP nizam_tactical_failed Total tactical engine failures",
-        "# TYPE nizam_tactical_failed counter",
-        f"nizam_tactical_failed {METRICS['tactical_failed']}",
-        "",
-        "# HELP nizam_tactical_p50_ms Tactical engine p50 latency ms",
-        "# TYPE nizam_tactical_p50_ms gauge",
-        f"nizam_tactical_p50_ms {p50:.2f}",
-        "",
-        "# HELP nizam_tactical_p95_ms Tactical engine p95 latency ms",
-        "# TYPE nizam_tactical_p95_ms gauge",
-        f"nizam_tactical_p95_ms {p95:.2f}",
-        "",
-        "# HELP nizam_tactical_max_ms Tactical engine max latency ms",
-        "# TYPE nizam_tactical_max_ms gauge",
-        f"nizam_tactical_max_ms {METRICS['tactical_max_ms']:.2f}",
-        "",
-        "# HELP nizam_ws_clients Connected WebSocket clients",
-        "# TYPE nizam_ws_clients gauge",
-        f"nizam_ws_clients {len(CLIENTS)}",
-        "",
-        "# HELP nizam_ws_broadcasts Total WS broadcasts",
-        "# TYPE nizam_ws_broadcasts counter",
-        f"nizam_ws_broadcasts {METRICS['ws_broadcasts']}",
-        "",
-        "# HELP nizam_tracks Active track count",
-        "# TYPE nizam_tracks gauge",
-        f"nizam_tracks {len(STATE['tracks'])}",
-        "",
-        "# HELP nizam_threats Active threat count",
-        "# TYPE nizam_threats gauge",
-        f"nizam_threats {len(STATE['threats'])}",
-        "",
-        "# HELP nizam_assets Registered assets",
-        "# TYPE nizam_assets gauge",
-        f"nizam_assets {len(STATE['assets'])}",
-        "",
-        "# HELP nizam_zones Defined zones",
-        "# TYPE nizam_zones gauge",
-        f"nizam_zones {len(STATE['zones'])}",
-        "",
-        "# HELP nizam_ew_alerts_total Total EW alerts",
-        "# TYPE nizam_ew_alerts_total counter",
-        f"nizam_ew_alerts_total {ai_ew.stats().get('total_alerts', 0)}",
-        "",
-        "# HELP nizam_deconfliction_merges Total track merges",
-        "# TYPE nizam_deconfliction_merges counter",
-        f"nizam_deconfliction_merges {ai_deconfliction.stats().get('total_aliases', 0)}",
-    ]
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+    def g(name: str, help_text: str, value, typ: str = "gauge") -> List[str]:
+        return [f"# HELP {name} {help_text}", f"# TYPE {name} {typ}", f"{name} {value}", ""]
+
+    def labeled(name: str, help_text: str, items: Dict[str, float], typ: str = "gauge") -> List[str]:
+        out = [f"# HELP {name} {help_text}", f"# TYPE {name} {typ}"]
+        for label, val in items.items():
+            out.append(f'{name}{{module="{label}"}} {val:.2f}')
+        out.append("")
+        return out
+
+    lines: List[str] = []
+    lines += g("nizam_uptime_seconds",           "Server uptime in seconds",             f"{uptime_s:.1f}")
+    lines += g("nizam_ingest_total",              "Total ingested events",                ingest_total, "counter")
+    lines += g("nizam_ingest_per_second",         "Current ingest rate events/s",
+               f"{ingest_total/uptime_s:.2f}" if uptime_s > 0 else "0")
+    lines += g("nizam_ingest_bad_request_total",  "Bad ingest requests",                  METRICS["ingest_bad_request"], "counter")
+    lines += g("nizam_tactical_runs_total",       "Total tactical engine runs",           METRICS["tactical_ran"], "counter")
+    lines += g("nizam_tactical_failed_total",     "Total tactical engine failures",       METRICS["tactical_failed"], "counter")
+    lines += g("nizam_tactical_skipped_total",    "Tactical runs skipped (rate limiter)", METRICS["tactical_rate_skipped"], "counter")
+    lines += g("nizam_tactical_p50_ms",           "Tactical engine p50 latency ms",       f"{p50:.2f}")
+    lines += g("nizam_tactical_p95_ms",           "Tactical engine p95 latency ms",       f"{p95:.2f}")
+    lines += g("nizam_tactical_p99_ms",           "Tactical engine p99 latency ms",       f"{p99:.2f}")
+    lines += g("nizam_tactical_max_ms",           "Tactical engine worst-case latency ms",f"{METRICS['tactical_max_ms']:.2f}")
+    if module_ms:
+        lines += labeled("nizam_tactical_module_ms", "Per-module tactical latency ms (last run)", module_ms)
+    lines += g("nizam_ws_clients",               "Connected WebSocket clients",          len(CLIENTS))
+    lines += g("nizam_ws_broadcasts_total",       "Total WS broadcasts sent",             METRICS["ws_broadcasts"], "counter")
+    lines += g("nizam_ws_messages_total",         "Total WS messages sent",               METRICS["ws_messages_sent"], "counter")
+    lines += g("nizam_ws_send_failures_total",    "WS send failures",                     METRICS["ws_send_failures"], "counter")
+    lines += g("nizam_tracks",                    "Active track count",                   len(STATE["tracks"]))
+    lines += g("nizam_threats",                   "Active threat count",                  len(STATE["threats"]))
+    lines += g("nizam_assets",                    "Registered asset count",               len(STATE["assets"]))
+    lines += g("nizam_zones",                     "Defined zone count",                   len(STATE["zones"]))
+    lines += g("nizam_tasks",                     "Total task count",                     len(STATE["tasks"]))
+    lines += g("nizam_roe_advisories",            "Active ROE advisories",                len(AI_ROE_ADVISORIES))
+    lines += g("nizam_roe_weapons_free",          "WEAPONS_FREE advisories",              roe_weapons_free)
+    lines += g("nizam_roe_weapons_tight",         "WEAPONS_TIGHT advisories",             roe_weapons_tight)
+    lines += g("nizam_escalation_pending",        "Unanswered escalation advisories",     escalation_pending)
+    lines += g("nizam_ew_alerts_total",           "Total EW alerts detected",             ai_ew.stats().get("total_alerts", 0), "counter")
+    lines += g("nizam_deconfliction_merges_total","Total track deconfliction merges",      ai_deconfliction.stats().get("total_aliases", 0), "counter")
+    return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
 
 
 # ── Distributed sync endpoints ────────────────────────────────────────────────
@@ -2823,6 +2841,37 @@ async def api_kill_chain():
         "stage_counts": stage_counts,
         "total":        len(pipeline),
         "server_time":  _utc_now_iso(),
+    })
+
+
+# ── Multi-effector assignment ──────────────────────────────────────────────────
+
+@app.get("/api/ai/assignment", tags=["ai"])
+async def api_assignment():
+    """
+    Latest optimal effector→threat assignment (Hungarian algorithm).
+
+    Returns the current assignment computed by the tactical engine:
+    - assignments: list of {threat_id, effector_id, effector_name, cost, dist_km, engagement}
+    - unassigned_threats: threats with ROE advisory but no available effector
+    - unassigned_effectors: effectors with no threat assigned
+    - stats: summary counts
+    """
+    return JSONResponse({**AI_ASSIGNMENT, "server_time": _utc_now_iso()})
+
+
+@app.get("/api/ai/bft", tags=["ai"])
+async def api_bft():
+    """
+    Latest Blue Force / fratricide warnings.
+
+    Returns tracks where a WEAPONS_FREE engagement was downgraded to
+    WEAPONS_HOLD because a friendly asset lay within the engagement corridor.
+    """
+    return JSONResponse({
+        "warnings":    list(AI_BFT_WARNINGS),
+        "count":       len(AI_BFT_WARNINGS),
+        "server_time": _utc_now_iso(),
     })
 
 
