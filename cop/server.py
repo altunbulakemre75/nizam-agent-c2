@@ -51,6 +51,7 @@ from ai import ml_threat as ai_ml
 from ai import lineage as ai_lineage
 from ai import trajectory as ai_trajectory
 from ai import track_fsm
+from ai import deconfliction as ai_deconfliction
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -1116,6 +1117,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_aar.reset()
         ai_roe.reset()
         ai_lineage.clear()
+        ai_deconfliction.reset()
         ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
@@ -1191,6 +1193,40 @@ async def ingest(req: Request):
                 or payload.get("global_track_id") or payload.get("gid")
             )
             if track_id is not None:
+                raw_id = str(track_id)
+
+                # ── Deconfliction: resolve alias or detect duplicate ──────────
+                canonical_id = raw_id
+                match = ai_deconfliction.find_match(payload, STATE["tracks"])
+                if match is not None:
+                    matched_id, score = match
+                    if matched_id != raw_id:
+                        # Merge: adopt canonical ID, fuse sensor lists
+                        existing = STATE["tracks"].get(matched_id, {})
+                        payload["supporting_sensors"] = ai_deconfliction.merge_sensors(
+                            existing, payload
+                        )
+                        payload["id"] = matched_id
+                        payload["_deconfliction"] = {
+                            "alias": raw_id,
+                            "canonical": matched_id,
+                            "score": score,
+                        }
+                        ai_deconfliction.record_merge(raw_id, matched_id)
+                        canonical_id = matched_id
+                        # Broadcast merge event so UI can remove the duplicate marker
+                        asyncio.create_task(broadcast({
+                            "event_type": "cop.track_merged",
+                            "payload": {
+                                "alias_id":     raw_id,
+                                "canonical_id": matched_id,
+                                "score":        score,
+                                "server_time":  _utc_now_iso(),
+                            },
+                        }))
+
+                track_id = canonical_id
+
                 # Track FSM: update lifecycle state
                 sensors = payload.get("supporting_sensors", [])
                 fsm_state = track_fsm.on_update(str(track_id), sensors)
@@ -1809,6 +1845,7 @@ async def api_metrics():
             "zones":   len(STATE["zones"]),
             "tasks":   len(STATE["tasks"]),
         },
+        "deconfliction": ai_deconfliction.stats(),
     })
 
 
