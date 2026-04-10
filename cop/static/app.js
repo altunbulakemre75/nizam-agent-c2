@@ -3130,6 +3130,51 @@ async function amRefresh(listEl) {
   }
 }
 
+/* ── Mobile FAB bar (≤767px only, CSS hides it on desktop) ── */
+
+function mountMobileFAB() {
+  let leftOpen = false, rightOpen = false;
+
+  function toggleLeft() {
+    leftOpen = !leftOpen;
+    rightOpen = false;
+    document.body.classList.toggle("mob-left-open",  leftOpen);
+    document.body.classList.toggle("mob-right-open", rightOpen);
+    btnLeft.classList.toggle("active",  leftOpen);
+    btnRight.classList.toggle("active", rightOpen);
+  }
+
+  function toggleRight() {
+    rightOpen = !rightOpen;
+    leftOpen  = false;
+    document.body.classList.toggle("mob-right-open", rightOpen);
+    document.body.classList.toggle("mob-left-open",  leftOpen);
+    btnRight.classList.toggle("active", rightOpen);
+    btnLeft.classList.toggle("active",  leftOpen);
+  }
+
+  const btnLeft = el("button", { class:"mob-fab", onclick: toggleLeft }, [
+    el("span", { class:"mob-icon" }, ["☰"]),
+    "Controls",
+  ]);
+  const btnRight = el("button", { class:"mob-fab", onclick: toggleRight }, [
+    el("span", { class:"mob-icon" }, ["⊞"]),
+    "Panels",
+  ]);
+
+  const fab = el("div", { id: "mobile-fab-bar" }, [btnLeft, btnRight]);
+  document.body.appendChild(fab);
+
+  // Close drawers on map click (touch)
+  document.getElementById("map")?.addEventListener("click", () => {
+    if (!leftOpen && !rightOpen) return;
+    leftOpen = rightOpen = false;
+    document.body.classList.remove("mob-left-open", "mob-right-open");
+    btnLeft.classList.remove("active");
+    btnRight.classList.remove("active");
+  });
+}
+
 function mountReplayButton() {
   const btn = el("button", {
     id: "replay-open-btn",
@@ -3574,6 +3619,8 @@ function boot(){
   mountScenarioEditor();
   // Admin panel (content loaded on demand)
   mountAdminPanel();
+  // Mobile FAB bar (hidden on desktop via CSS)
+  mountMobileFAB();
   // Replay system
   mountReplayBar();
   mountReplayList();

@@ -534,3 +534,129 @@ body[data-role="viewer"] .nz-write-ctrl { display: none !important; }
   font-size: 8px; font-weight: 700; color: white;
   pointer-events: none;
 }
+
+/* ================================================================
+   MOBILE / RESPONSIVE  (≤ 767px)
+   ================================================================ */
+
+/* Touch-friendly: remove tap delay on all interactive elements */
+a, button, [role="button"], .nz-btn, .nz-tab-btn, .leaflet-interactive {
+  touch-action: manipulation;
+}
+
+/* Mobile FAB bar — two floating toggles at bottom */
+#mobile-fab-bar {
+  display: none;
+}
+
+@media (max-width: 767px) {
+
+  /* ── Topbar ────────────────────────────────────────────── */
+  #topbar {
+    padding: 0 8px;
+    gap: 6px;
+  }
+  .nz-logo-sub, .nz-topbar-divider { display: none; }
+  .nz-topbar-kpis { gap: 8px; }
+  .nz-kpi-label   { display: none; }
+  .nz-kpi-val     { font-size: 14px; }
+  #tb-user-badge  { display: none !important; }
+  #admin-panel-btn { font-size: 9px; padding: 1px 5px; }
+
+  /* ── Left controls: slide-up drawer ───────────────────── */
+  #left-controls {
+    top: auto !important;
+    bottom: 60px;
+    left: 0 !important;
+    right: 0;
+    width: 100% !important;
+    max-width: 100%;
+    max-height: 65vh;
+    overflow-y: auto;
+    border-radius: 16px 16px 0 0;
+    border-bottom: none;
+    transform: translateY(120%);
+    transition: transform 0.25s ease;
+    z-index: 9997;
+  }
+  body.mob-left-open #left-controls {
+    transform: translateY(0);
+  }
+
+  /* ── Right sidebar: full-width slide-in ───────────────── */
+  #right-sidebar {
+    top: var(--topbar-h) !important;
+    right: 0 !important;
+    bottom: 60px;
+    width: 100% !important;
+    max-height: none !important;
+    max-width: 100%;
+    border-radius: 0;
+    transform: translateX(110%);
+    transition: transform 0.25s ease;
+    z-index: 9996;
+  }
+  body.mob-right-open #right-sidebar {
+    transform: translateX(0);
+  }
+
+  /* Make tab bar scrollable on narrow screens */
+  .nz-tab-bar {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .nz-tab-bar::-webkit-scrollbar { display: none; }
+  .nz-tab-btn {
+    flex-shrink: 0;
+    min-width: 52px;
+    padding: 7px 10px;
+    font-size: 10px;
+  }
+
+  /* Larger tap targets for all buttons */
+  .nz-btn {
+    min-height: 40px;
+    padding: 8px 14px;
+  }
+
+  /* ── Mobile FAB bar ────────────────────────────────────── */
+  #mobile-fab-bar {
+    display: flex;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    height: 56px;
+    background: rgba(7,9,15,0.96);
+    border-top: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 9999;
+    align-items: center;
+    justify-content: space-around;
+    padding: 0 16px;
+  }
+  .mob-fab {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 2px; cursor: pointer; padding: 6px 16px;
+    border-radius: 10px; border: 1px solid transparent;
+    background: transparent; color: var(--text-2);
+    font-size: 9px; font-weight: 600; letter-spacing: 0.06em;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    min-width: 64px; min-height: 44px; justify-content: center;
+  }
+  .mob-fab .mob-icon { font-size: 18px; line-height: 1; }
+  .mob-fab.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* Scenario editor button positioning */
+  #scenario-editor-btn {
+    top: auto !important;
+    bottom: 66px !important;
+    left: 50% !important;
+    transform: translateX(-50%);
+  }
+}
