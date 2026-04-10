@@ -108,3 +108,14 @@ def require_admin():
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
         return user
     return _check
+
+
+def require_viewer():
+    """Requires any authenticated user (VIEWER, OPERATOR, or ADMIN). No-op when AUTH_ENABLED=false."""
+    async def _check(user: Optional[User] = Depends(get_current_user)) -> Optional[User]:
+        if not AUTH_ENABLED:
+            return user
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Authentication required")
+        return user
+    return _check

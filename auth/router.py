@@ -154,3 +154,28 @@ async def delete_user(
     await db.delete(user)
     await db.commit()
     return {"ok": True, "deleted": username}
+
+
+class RoleUpdateRequest(BaseModel):
+    role: UserRole
+
+
+@router.put("/users/{username}/role")
+async def update_user_role(
+    username:     str,
+    body:         RoleUpdateRequest,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User | None  = Depends(require_admin()),
+):
+    """Admin-only: change a user's role."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    result = await db.execute(select(User).where(User.username == username))
+    user   = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if current_user and user.username == current_user.username:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+    user.role = body.role
+    await db.commit()
+    return {"ok": True, "username": username, "role": body.role.value}

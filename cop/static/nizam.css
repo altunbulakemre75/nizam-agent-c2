@@ -481,6 +481,47 @@ html, body {
 .nz-threat-card.MEDIUM { border-left-color: var(--warn);   background: rgba(240,128,48,0.06); }
 .nz-threat-card.LOW    { border-left-color: var(--ok);     }
 
+/* ── RBAC: hide write controls for VIEWER role ───────────── */
+body[data-role="viewer"] .nz-write-ctrl { display: none !important; }
+
+/* ── Role badge in topbar ────────────────────────────────── */
+#tb-user-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: default;
+}
+#tb-user-badge.role-admin    { background: rgba(231,76,60,0.25);  color: #e74c3c; }
+#tb-user-badge.role-operator { background: rgba(52,152,219,0.25); color: #3498db; }
+#tb-user-badge.role-viewer   { background: rgba(255,255,255,0.1); color: var(--text-3); }
+
+/* ── Admin panel modal ───────────────────────────────────── */
+#admin-modal {
+  position: fixed; inset: 0; z-index: 99998;
+  background: rgba(0,0,0,0.65);
+  display: flex; align-items: center; justify-content: center;
+}
+#admin-modal .am-box {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 22px 26px;
+  min-width: 400px; max-width: 560px; width: 90%;
+  max-height: 80vh; overflow-y: auto;
+}
+#admin-modal .am-title {
+  font-size: 14px; font-weight: 700; margin-bottom: 14px;
+  color: var(--text-1);
+}
+#admin-modal .am-user-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); margin-bottom: 6px;
+  background: rgba(255,255,255,0.03);
+}
+#admin-modal .am-user-row .am-uname { flex: 1; font-size: 12px; color: var(--text-1); }
+#admin-modal .am-user-row select { font-size: 11px; }
+
 /* ── Threat badge on map ─────────────────────────────────── */
 .nz-threat-badge {
   position: absolute;

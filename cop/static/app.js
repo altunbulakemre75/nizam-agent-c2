@@ -108,6 +108,12 @@ function mountTopBar() {
       </div>
     </div>
     <div class="nz-topbar-right">
+      <span id="tb-user-badge" style="display:none"></span>
+      <button id="admin-panel-btn" title="User Management"
+        style="display:none;padding:2px 8px;font-size:10px;background:rgba(231,76,60,0.2);
+               border:1px solid rgba(231,76,60,0.4);border-radius:6px;color:#e74c3c;
+               cursor:pointer;font-weight:600"
+        onclick="openAdminPanel()">ADMIN</button>
       <span id="tb-mode" class="nz-mode-badge">LIVE</span>
       <div class="nz-ws-indicator">
         <div id="tb-ws-dot" class="nz-ws-dot off"></div>
@@ -923,11 +929,14 @@ function mountAssetPanel() {
   const header = el("div", { class:"nz-section" }, ["Place Asset"]);
   const hint = el("div",{style:{marginTop:"4px",color:"var(--text-3)",fontSize:"10px"}},["Click map to place"]);
 
+  const writeSect = el("div", { class: "nz-write-ctrl" });
+  writeSect.appendChild(mkBtn("+ Friendly","friendly","c-ok"));
+  writeSect.appendChild(mkBtn("+ Hostile","hostile","c-danger"));
+  writeSect.appendChild(el("button",{class:"nz-btn",style:{width:"100%",marginBottom:"4px"},onclick:()=>startAssetPlace("unknown")},["+ Unknown"]));
+  writeSect.appendChild(hint);
+
   assetPanelEl.appendChild(header);
-  assetPanelEl.appendChild(mkBtn("+ Friendly","friendly","c-ok"));
-  assetPanelEl.appendChild(mkBtn("+ Hostile","hostile","c-danger"));
-  assetPanelEl.appendChild(el("button",{class:"nz-btn",style:{width:"100%",marginBottom:"4px"},onclick:()=>startAssetPlace("unknown")},["+ Unknown"]));
-  assetPanelEl.appendChild(hint);
+  assetPanelEl.appendChild(writeSect);
   RIGHT_TABS.assets.appendChild(assetPanelEl);
 
   // Map click → place asset
@@ -1097,7 +1106,7 @@ function mountZonePanel(){
   });
   panel.appendChild(el("div",{class:"nz-section"},["Draw Zone"]));
   panel.appendChild(nameInput);panel.appendChild(typeSelect);
-  panel.appendChild(el("div",{style:{display:"flex",gap:"4px"}},[btnDraw,btnSave,btnCancel]));
+  panel.appendChild(el("div",{class:"nz-write-ctrl",style:{display:"flex",gap:"4px"}},[btnDraw,btnSave,btnCancel]));
   panel.appendChild(hint);
   RIGHT_TABS.zones.appendChild(panel);
   UI.map.on("click",e=>{
@@ -3032,6 +3041,95 @@ async function scDelete() {
   }
 }
 
+/* ── Admin panel: user management ────────────────────────── */
+
+function mountAdminPanel() { /* placeholder — panel created on open */ }
+
+async function openAdminPanel() {
+  const existing = document.getElementById("admin-modal");
+  if (existing) { existing.remove(); return; }
+
+  const modal = el("div", { id: "admin-modal" });
+  const box   = el("div", { class: "am-box" });
+  const title = el("div", { class: "am-title" }, ["User Management"]);
+  const listEl= el("div", { id: "am-list" });
+  const addSection = el("div", { class: "nz-write-ctrl", style: { marginTop: "14px" } });
+
+  // New user form
+  const nuName = el("input", { type:"text", placeholder:"Username", class:"nz-input",
+    style:{ marginBottom:"6px" } });
+  const nuPass = el("input", { type:"password", placeholder:"Password", class:"nz-input",
+    style:{ marginBottom:"6px" } });
+  const nuRole = el("select", { class:"nz-select", style:{ marginBottom:"8px" } });
+  ["OPERATOR","VIEWER","ADMIN"].forEach(r => nuRole.appendChild(el("option",{value:r},[r])));
+  const nuBtn  = el("button", { class:"nz-btn c-ok", style:{ width:"100%" },
+    onclick: async () => {
+      const resp = await authFetch("/auth/register", {
+        method:"POST",
+        body: JSON.stringify({ username:nuName.value, password:nuPass.value, role:nuRole.value }),
+      });
+      if (resp.ok) { nuName.value=""; nuPass.value=""; await amRefresh(listEl); }
+      else { const e=await resp.json(); alert(e.detail || "Error"); }
+    }
+  }, ["+ Add User"]);
+
+  const addHdr = el("div", { class:"nz-section", style:{ marginBottom:"8px" } }, ["Add User"]);
+  addSection.append(addHdr, nuName, nuPass, nuRole, nuBtn);
+
+  const closeBtn = el("button", {
+    class: "nz-btn c-danger", style: { marginTop:"12px", width:"100%" },
+    onclick: () => modal.remove(),
+  }, ["Close"]);
+
+  box.append(title, listEl, addSection, closeBtn);
+  modal.appendChild(box);
+  document.body.appendChild(modal);
+  modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  await amRefresh(listEl);
+}
+
+async function amRefresh(listEl) {
+  listEl.innerHTML = "";
+  try {
+    const r = await authFetch("/auth/users");
+    if (!r.ok) { listEl.textContent = "Could not load users."; return; }
+    const { users } = await r.json();
+    if (!users.length) { listEl.textContent = "No users."; return; }
+    users.forEach(u => {
+      const roleSelect = el("select", { class:"nz-select" });
+      ["ADMIN","OPERATOR","VIEWER"].forEach(ro => {
+        const opt = el("option", { value:ro }, [ro]);
+        if (ro === u.role) opt.selected = true;
+        roleSelect.appendChild(opt);
+      });
+      roleSelect.addEventListener("change", async () => {
+        await authFetch(`/auth/users/${encodeURIComponent(u.username)}/role`, {
+          method:"PUT", body:JSON.stringify({ role:roleSelect.value }),
+        });
+      });
+
+      const delBtn = el("button", { class:"nz-btn c-danger",
+        style:{ fontSize:"10px", padding:"2px 7px" },
+        onclick: async () => {
+          if (!confirm(`Delete user "${u.username}"?`)) return;
+          await authFetch(`/auth/users/${encodeURIComponent(u.username)}`, { method:"DELETE" });
+          await amRefresh(listEl);
+        }
+      }, ["Del"]);
+
+      const row = el("div", { class:"am-user-row" });
+      row.append(
+        el("span", { class:"am-uname" }, [u.username]),
+        roleSelect,
+        delBtn,
+      );
+      listEl.appendChild(row);
+    });
+  } catch(e) {
+    listEl.textContent = "Error: " + e.message;
+  }
+}
+
 function mountReplayButton() {
   const btn = el("button", {
     id: "replay-open-btn",
@@ -3223,9 +3321,11 @@ function fmtTime(s) {
   return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
 }
 
-/* ── Auth: JWT login ─────────────────────────────────────── */
+/* ── Auth: JWT login + RBAC ──────────────────────────────── */
 
 let AUTH_TOKEN = localStorage.getItem("nizam_jwt") || null;
+let USER_ROLE  = "ADMIN";    // default full access; overwritten by fetchUserRole()
+let USER_NAME  = "anonymous";
 
 function authHeaders() {
   return AUTH_TOKEN
@@ -3275,6 +3375,7 @@ function showLoginModal(msg = "") {
         AUTH_TOKEN = data.access_token;
         localStorage.setItem("nizam_jwt", AUTH_TOKEN);
         overlay.remove();
+        await fetchUserRole();
       } else {
         msgEl.textContent = "Geçersiz kullanıcı adı veya şifre";
       }
@@ -3293,7 +3394,37 @@ async function checkAuth() {
     const r = await fetch("/auth/status");
     const d = await r.json();
     if (d.auth_enabled && !AUTH_TOKEN) showLoginModal();
+    else await fetchUserRole();
   } catch { /* auth endpoint not available */ }
+}
+
+async function fetchUserRole() {
+  try {
+    const headers = AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {};
+    const r = await fetch("/auth/me", { headers });
+    if (!r.ok) return;
+    const d = await r.json();
+    USER_ROLE = (d.role || "ADMIN").toUpperCase();
+    USER_NAME = d.username || "anonymous";
+    applyRoleUI();
+  } catch { /* ignore */ }
+}
+
+function applyRoleUI() {
+  // Apply role class to body for CSS-based write control hiding
+  document.body.dataset.role = USER_ROLE.toLowerCase();
+
+  // Update topbar user badge
+  const badge = document.getElementById("tb-user-badge");
+  if (badge) {
+    badge.textContent = USER_NAME + " · " + USER_ROLE;
+    badge.className   = "role-" + USER_ROLE.toLowerCase();
+    badge.style.display = "";
+  }
+
+  // Show/hide admin panel button
+  const adminBtn = document.getElementById("admin-panel-btn");
+  if (adminBtn) adminBtn.style.display = USER_ROLE === "ADMIN" ? "" : "none";
 }
 
 /* ── Right-side tab container ────────────────────────────── */
@@ -3441,6 +3572,8 @@ function boot(){
   mountAARButton();
   // Scenario editor
   mountScenarioEditor();
+  // Admin panel (content loaded on demand)
+  mountAdminPanel();
   // Replay system
   mountReplayBar();
   mountReplayList();
