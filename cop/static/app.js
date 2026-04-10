@@ -124,6 +124,11 @@ function mountTopBar() {
                border:1px solid rgba(39,174,96,0.4);border-radius:6px;color:#2ecc71;
                cursor:pointer;font-weight:600"
         onclick="openHandoverModal()">HANDOVER</button>
+      <button id="audit-panel-btn" title="Operator Audit Log"
+        style="padding:2px 8px;font-size:10px;background:rgba(52,152,219,0.18);
+               border:1px solid rgba(52,152,219,0.4);border-radius:6px;color:#3498db;
+               cursor:pointer;font-weight:600"
+        onclick="openAuditModal()">AUDIT</button>
       <button id="admin-panel-btn" title="User Management"
         style="display:none;padding:2px 8px;font-size:10px;background:rgba(231,76,60,0.2);
                border:1px solid rgba(231,76,60,0.4);border-radius:6px;color:#e74c3c;
@@ -1282,16 +1287,35 @@ async function hardReset(){
 }
 
 /* ── WebSocket ────────────────────────────────────────────── */
+let _wsDelay = 500;  // current reconnect delay (ms); resets to 500 on success
+const _WS_DELAY_MAX = 30000;
+const _WS_DELAY_BASE = 500;
+
 function connectWS(){
   const proto=location.protocol==="https:"?"wss":"ws";
   const url=`${proto}://${location.host}/ws?operator_id=${encodeURIComponent(MY_OPERATOR_ID)}`;
-  setStatus(`WS: connecting ${url}`);
+  setStatus(`WS: connecting…`);
   let ws;
   try{ws=new WebSocket(url);}
-  catch(e){setStatus(`WS: failed (${e})`);setTimeout(connectWS,1200);return;}
+  catch(e){
+    setStatus(`WS: failed — retry in ${(_wsDelay/1000).toFixed(1)}s`);
+    setTimeout(connectWS, _wsDelay);
+    _wsDelay = Math.min(_wsDelay * 2, _WS_DELAY_MAX);
+    return;
+  }
   UI.ws=ws;
-  ws.onopen =()=>{UI.wsConnected=true; setStatus(`WS: connected (live) · ${MY_OPERATOR_ID}`);};
-  ws.onclose=()=>{UI.wsConnected=false;setStatus("WS: closed (reconnecting...)");setTimeout(connectWS,1200);};
+  ws.onopen=()=>{
+    UI.wsConnected=true;
+    _wsDelay=_WS_DELAY_BASE;   // reset backoff on successful connect
+    setStatus(`WS: connected (live) · ${MY_OPERATOR_ID}`);
+  };
+  ws.onclose=()=>{
+    UI.wsConnected=false;
+    const delaySec=(_wsDelay/1000).toFixed(1);
+    setStatus(`WS: closed — retry in ${delaySec}s`);
+    setTimeout(connectWS, _wsDelay);
+    _wsDelay = Math.min(_wsDelay * 2, _WS_DELAY_MAX);
+  };
   ws.onerror=()=>{};
   ws.onmessage=msg=>{const ev=safeJsonParse(msg.data);if(ev)CopEngine.onEvent(ev);};
 }
@@ -2832,7 +2856,9 @@ function mountAARModal() {
         <h2 style="margin:0;font-size:18px">After-Action Report</h2>
         <div>
           <button id="aar-download" style="background:#2980b9;color:#fff;border:none;border-radius:6px;
-            padding:5px 12px;cursor:pointer;margin-right:8px;font-size:11px">JSON Indir</button>
+            padding:5px 12px;cursor:pointer;margin-right:6px;font-size:11px">JSON Indir</button>
+          <button id="aar-print" style="background:#27ae60;color:#fff;border:none;border-radius:6px;
+            padding:5px 12px;cursor:pointer;margin-right:8px;font-size:11px">Yazdir / PDF</button>
           <span id="aar-close" style="cursor:pointer;opacity:.6;font-size:20px;padding:0 8px">\u2715</span>
         </div>
       </div>
@@ -2846,6 +2872,9 @@ function mountAARModal() {
   });
   document.getElementById("aar-download").addEventListener("click", ()=>{
     downloadAARJson();
+  });
+  document.getElementById("aar-print").addEventListener("click", ()=>{
+    printAAR();
   });
 }
 
@@ -2871,6 +2900,33 @@ function downloadAARJson() {
   const a = document.createElement("a");
   a.href = url; a.download = `aar_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.json`;
   a.click(); URL.revokeObjectURL(url);
+}
+
+function printAAR() {
+  const body = document.getElementById("aar-body");
+  if (!body) return;
+  const title = `NIZAM COP — After-Action Report — ${new Date().toISOString().slice(0,19).replace("T"," ")} UTC`;
+  const win = window.open("", "_blank", "width=900,height=700");
+  if (!win) { alert("Pop-up engellendi. Tarayici pop-up izinlerini kontrol edin."); return; }
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; background: #fff; color: #111; margin: 20px 40px; }
+    h2 { font-size: 18px; margin-bottom: 4px; }
+    h3 { font-size: 13px; margin: 14px 0 4px; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 2px; }
+    table { width:100%; border-collapse:collapse; font-size:11px; margin-top:4px; }
+    th, td { padding: 3px 6px; text-align:left; border-bottom:1px solid #eee; }
+    th { background:#f5f5f5; font-weight:600; }
+    div[style*="grid"] > div { border: 1px solid #ddd !important; background: #f9f9f9 !important; }
+    @media print { body { margin:10mm 15mm; } button { display:none; } }
+  </style></head><body>
+  <div style="border-bottom:2px solid #2980b9;padding-bottom:8px;margin-bottom:16px">
+    <div style="font-size:15px;font-weight:bold;color:#2980b9">NIZAM COP — After-Action Report</div>
+    <div style="font-size:11px;color:#555">${title}</div>
+  </div>
+  ${body.innerHTML}
+  <script>window.onload=function(){window.print();}<\/script>
+  </body></html>`);
+  win.document.close();
 }
 
 function renderAAR(r) {
@@ -3074,6 +3130,130 @@ function _aarStatCard(label, value, color) {
     <div style="font-size:18px;font-weight:bold;color:${color}">${value}</div>
     <div style="font-size:10px;opacity:.7">${label}</div>
   </div>`;
+}
+
+/* ── Audit Log Modal ─────────────────────────────────────── */
+let _auditModalEl = null;
+
+function mountAuditModal() {
+  _auditModalEl = el("div", { id:"audit-modal", style:{
+    display:"none", position:"fixed", inset:"0", zIndex:"10012",
+    background:"rgba(0,0,0,0.88)", color:"white",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    overflowY:"auto",
+  }});
+  _auditModalEl.innerHTML = `
+    <div style="max-width:900px;margin:30px auto;padding:20px 28px;
+         background:rgba(10,10,30,0.97);border-radius:14px;border:1px solid rgba(52,152,219,0.25)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="margin:0;font-size:17px;color:#3498db">Operator Audit Log</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="audit-filter-user" placeholder="Kullanici filtrele..." style="background:#1a1a2e;color:#ccc;border:1px solid rgba(100,100,150,0.4);border-radius:6px;padding:4px 8px;font-size:11px;width:130px">
+          <button onclick="_auditLoad()" style="background:#2980b9;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px">Yenile</button>
+          <span id="audit-close" style="cursor:pointer;opacity:.6;font-size:20px;padding:0 8px" onclick="_closeAuditModal()">&#x2715;</span>
+        </div>
+      </div>
+      <div id="audit-status" style="opacity:.5;font-size:11px;margin-bottom:8px"></div>
+      <div id="audit-table-wrap" style="overflow-x:auto">
+        <table id="audit-table" style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead>
+            <tr style="opacity:.6;text-align:left;border-bottom:1px solid rgba(255,255,255,0.1)">
+              <th style="padding:4px 8px;min-width:130px">Zaman</th>
+              <th style="padding:4px 8px">Kullanici</th>
+              <th style="padding:4px 8px">Rol</th>
+              <th style="padding:4px 8px">Islem</th>
+              <th style="padding:4px 8px">Kaynak</th>
+              <th style="padding:4px 8px">ID</th>
+              <th style="padding:4px 8px">Durum</th>
+              <th style="padding:4px 8px">IP</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </div>
+      <div id="audit-pagination" style="margin-top:10px;display:flex;gap:8px;align-items:center"></div>
+    </div>`;
+  document.body.appendChild(_auditModalEl);
+}
+
+let _auditOffset = 0;
+const _AUDIT_LIMIT = 50;
+
+function openAuditModal() {
+  if (!_auditModalEl) return;
+  _auditOffset = 0;
+  _auditModalEl.style.display = "block";
+  _auditLoad();
+}
+function _closeAuditModal() {
+  if (_auditModalEl) _auditModalEl.style.display = "none";
+}
+
+async function _auditLoad() {
+  const userFilter = (document.getElementById("audit-filter-user")||{}).value || "";
+  const url = `/api/audit?limit=${_AUDIT_LIMIT}&offset=${_auditOffset}` +
+    (userFilter ? `&username=${encodeURIComponent(userFilter)}` : "");
+  const statusEl = document.getElementById("audit-status");
+  const tbody = document.getElementById("audit-tbody");
+  if (statusEl) statusEl.textContent = "Yukleniyor...";
+  try {
+    const resp = await fetch(url, {headers: _authHeaders()});
+    if (resp.status === 403) {
+      if (statusEl) statusEl.textContent = "Erisim reddedildi — admin yetkisi gerekli";
+      if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="padding:16px;opacity:.5;text-align:center">Bu panel sadece admin kullanicilara aciktir.</td></tr>`;
+      return;
+    }
+    const data = await resp.json();
+    const records = data.records || [];
+    const total = data.total || 0;
+    if (statusEl) statusEl.textContent = `${total} kayit (${_auditOffset + 1}–${Math.min(_auditOffset + _AUDIT_LIMIT, total)})` + (data.note ? `  — ${data.note}` : "");
+
+    const actionColors = {
+      approve:"#27ae60", reject:"#e74c3c", create:"#3498db",
+      delete:"#e67e22", login:"#9b59b6", logout:"#95a5a6",
+      ack:"#f39c12", resolve:"#1abc9c",
+    };
+    if (tbody) {
+      if (records.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" style="padding:16px;opacity:.5;text-align:center">Kayit bulunamadi.</td></tr>`;
+      } else {
+        tbody.innerHTML = records.map(r => {
+          const actionKey = (r.action||"").toLowerCase().split("_")[0];
+          const ac = actionColors[actionKey] || "#aaa";
+          const ok = r.success ? `<span style="color:#27ae60">&#x2713;</span>` : `<span style="color:#e74c3c">&#x2717;</span>`;
+          const ts = r.time ? r.time.replace("T"," ").slice(0,19) : "—";
+          return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);transition:background .1s" onmouseover="this.style.background='rgba(52,152,219,0.07)'" onmouseout="this.style.background=''">
+            <td style="padding:4px 8px;font-family:monospace;opacity:.7">${escHtml(ts)}</td>
+            <td style="padding:4px 8px;font-weight:bold">${escHtml(r.username||"—")}</td>
+            <td style="padding:4px 8px;opacity:.7">${escHtml(r.role||"—")}</td>
+            <td style="padding:4px 8px;color:${ac};font-weight:600">${escHtml(r.action||"—")}</td>
+            <td style="padding:4px 8px;opacity:.8">${escHtml(r.resource_type||"—")}</td>
+            <td style="padding:4px 8px;font-family:monospace;opacity:.65">${escHtml((r.resource_id||"").slice(0,14))}</td>
+            <td style="padding:4px 8px">${ok}</td>
+            <td style="padding:4px 8px;opacity:.55;font-size:10px">${escHtml(r.ip||"—")}</td>
+          </tr>`;
+        }).join("");
+      }
+    }
+
+    // pagination
+    const pagEl = document.getElementById("audit-pagination");
+    if (pagEl) {
+      const hasPrev = _auditOffset > 0;
+      const hasNext = _auditOffset + _AUDIT_LIMIT < total;
+      pagEl.innerHTML =
+        `<button onclick="_auditPage(-1)" style="background:#1a1a2e;color:#${hasPrev?'3498db':'555'};border:1px solid rgba(100,100,150,0.3);border-radius:5px;padding:3px 10px;cursor:${hasPrev?'pointer':'default'}" ${hasPrev?'':' disabled'}>&#x2190; Onceki</button>` +
+        `<span style="opacity:.5">${Math.floor(_auditOffset/_AUDIT_LIMIT)+1} / ${Math.max(1,Math.ceil(total/_AUDIT_LIMIT))}</span>` +
+        `<button onclick="_auditPage(1)" style="background:#1a1a2e;color:#${hasNext?'3498db':'555'};border:1px solid rgba(100,100,150,0.3);border-radius:5px;padding:3px 10px;cursor:${hasNext?'pointer':'default'}" ${hasNext?'':' disabled'}>Sonraki &#x2192;</button>`;
+    }
+  } catch(e) {
+    if (statusEl) statusEl.textContent = "Hata: " + e.message;
+  }
+}
+
+function _auditPage(dir) {
+  _auditOffset = Math.max(0, _auditOffset + dir * _AUDIT_LIMIT);
+  _auditLoad();
 }
 
 /* ── AI: periodic refresh ──────────────────────────────────── */
@@ -4312,6 +4492,85 @@ async function _removePeer(url) {
   } catch (e) { alert("Failed to remove peer: " + e.message); }
 }
 
+/* ── Kill Chain Panel ────────────────────────────────────── */
+const _KC_STAGES = [
+  { id:"DETECTED",   label:"Tespit",     color:"#3498db" },
+  { id:"CLASSIFIED", label:"Sinif",      color:"#9b59b6" },
+  { id:"ROE",        label:"ROE",        color:"#e67e22" },
+  { id:"TASKED",     label:"Gorev",      color:"#e74c3c" },
+  { id:"ENGAGED",    label:"Angaje",     color:"#c0392b" },
+];
+// Stage colours for track rows
+const _KC_LEVEL_C = { HIGH:"#e74c3c", MEDIUM:"#f39c12", LOW:"#27ae60", UNKNOWN:"#aaa" };
+
+function mountKillChainPanel() {
+  const panel = RIGHT_TABS["kill"];
+  if (!panel) return;
+  panel.innerHTML = `
+    <div class="nz-section">Kill Chain Durumu</div>
+    <div id="kc-funnel" style="display:flex;gap:3px;margin-bottom:10px;align-items:flex-end"></div>
+    <div id="kc-track-list" style="overflow-y:auto;max-height:350px"></div>`;
+  refreshKillChain();
+  setInterval(refreshKillChain, 5000);
+}
+
+async function refreshKillChain() {
+  const funnelEl = document.getElementById("kc-funnel");
+  const listEl   = document.getElementById("kc-track-list");
+  if (!funnelEl) return;
+  try {
+    const data = await fetch("/api/ai/kill_chain", {headers:_authHeaders()}).then(r=>r.json());
+    const counts = data.stage_counts || {};
+    const total  = data.total || 0;
+    const pipeline = data.pipeline || [];
+
+    // ── Funnel bars ──
+    const maxCount = Math.max(1, ...Object.values(counts));
+    funnelEl.innerHTML = _KC_STAGES.map(s => {
+      const n   = counts[s.id] || 0;
+      const pct = total > 0 ? Math.round(100 * n / total) : 0;
+      const h   = Math.max(18, Math.round(60 * n / maxCount));
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+        <div style="font-size:9px;color:${s.color};font-weight:bold">${n}</div>
+        <div style="width:100%;height:${h}px;background:${s.color}33;border:1px solid ${s.color}88;
+             border-radius:4px 4px 0 0;transition:height .4s" title="${s.label}: ${n} (${pct}%)"></div>
+        <div style="font-size:9px;opacity:.7;text-align:center;line-height:1.1">${s.label}</div>
+        <div style="font-size:8px;opacity:.45">${pct}%</div>
+      </div>`;
+    }).join("");
+
+    // ── Track rows (ROE+ only) ──
+    const interesting = pipeline.filter(p => ["ROE","TASKED","ENGAGED"].includes(p.stage));
+    if (!listEl) return;
+    if (interesting.length === 0) {
+      listEl.innerHTML = `<div style="opacity:.4;font-size:10px;padding:8px 0">ROE veya gorev atanan hedef yok.</div>`;
+      return;
+    }
+    const stageOrder = {ENGAGED:0, TASKED:1, ROE:2, CLASSIFIED:3, DETECTED:4};
+    interesting.sort((a,b) => (stageOrder[a.stage]||9) - (stageOrder[b.stage]||9));
+
+    listEl.innerHTML = interesting.map(p => {
+      const sc  = _KC_STAGES.find(s => s.id === p.stage);
+      const lc  = _KC_LEVEL_C[p.threat_level] || "#aaa";
+      return `<div style="border-left:3px solid ${sc?.color||'#888'};padding:4px 6px;margin-bottom:4px;
+                          background:rgba(255,255,255,0.03);border-radius:0 4px 4px 0">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:bold;font-size:11px">${escHtml(p.track_id)}</span>
+          <span style="font-size:9px;background:${sc?.color||'#888'}22;color:${sc?.color||'#888'};
+                       border:1px solid ${sc?.color||'#888'}66;border-radius:10px;padding:1px 6px">${p.stage}</span>
+        </div>
+        <div style="font-size:10px;opacity:.7;margin-top:2px">
+          <span style="color:${lc}">${p.threat_level}</span>
+          <span style="margin-left:6px;opacity:.8">${escHtml(p.intent||'unknown')}</span>
+          ${p.engagement ? `<span style="margin-left:6px;color:#e67e22;font-size:9px">${escHtml(p.engagement)}</span>` : ''}
+        </div>
+      </div>`;
+    }).join("");
+  } catch(e) {
+    if (funnelEl) funnelEl.innerHTML = `<span style="opacity:.4;font-size:10px">Yüklenemedi</span>`;
+  }
+}
+
 function mountRightTabContainer() {
   const TAB_DEFS = [
     { id: "threats", label: "Threats" },
@@ -4322,6 +4581,7 @@ function mountRightTabContainer() {
     { id: "ew",      label: "EW"      },
     { id: "metrics", label: "Metrics" },
     { id: "ai",      label: "AI"      },
+    { id: "kill",    label: "Kill"    },
     { id: "nodes",   label: "Nodes"   },
   ];
   const activeTabId = { v: "threats" };
@@ -4441,6 +4701,8 @@ function boot(){
   mountChatToggle();
   mountAARModal();
   mountAARButton();
+  mountAuditModal();
+  mountKillChainPanel();
   // Federation nodes panel
   mountNodesPanel();
   _refreshNodesPanel();

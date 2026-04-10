@@ -2755,6 +2755,77 @@ async def api_audit(
     return JSONResponse({"records": records, "total": total, "offset": offset, "limit": limit})
 
 
+# ── Kill Chain ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/ai/kill_chain", tags=["ai"])
+async def api_kill_chain():
+    """
+    Kill chain pipeline status for all active tracks.
+
+    Stages (in order):
+      DETECTED   → track seen by at least one sensor
+      CLASSIFIED → threat assessment produced (any threat_level)
+      ROE        → ROE advisory issued (WEAPONS_FREE or WEAPONS_TIGHT)
+      TASKED     → at least one task created for the track
+      ENGAGED    → task has been approved (operator authorised action)
+
+    Returns per-track stage + summary counts.
+    """
+    tracks  = STATE["tracks"]
+    threats = STATE["threats"]
+
+    roe_ids     = {a.get("track_id") for a in AI_ROE_ADVISORIES if a.get("track_id")}
+    tasked_ids  = set()
+    engaged_ids = set()
+    for task in STATE["tasks"].values():
+        tid = task.get("track_id") or task.get("target_id")
+        if tid:
+            tasked_ids.add(tid)
+            if task.get("status") == "APPROVED":
+                engaged_ids.add(tid)
+
+    pipeline = []
+    for track_id, track in tracks.items():
+        threat = threats.get(track_id)
+        level  = (threat or {}).get("threat_level", "UNKNOWN")
+        intent = (threat or {}).get("intent", "unknown")
+        engagement = next(
+            (a.get("engagement") for a in AI_ROE_ADVISORIES if a.get("track_id") == track_id),
+            None,
+        )
+
+        if track_id in engaged_ids:
+            stage = "ENGAGED"
+        elif track_id in tasked_ids:
+            stage = "TASKED"
+        elif track_id in roe_ids:
+            stage = "ROE"
+        elif threat is not None:
+            stage = "CLASSIFIED"
+        else:
+            stage = "DETECTED"
+
+        pipeline.append({
+            "track_id":   track_id,
+            "stage":      stage,
+            "threat_level": level,
+            "intent":     intent,
+            "engagement": engagement,
+        })
+
+    stage_order = ["DETECTED", "CLASSIFIED", "ROE", "TASKED", "ENGAGED"]
+    stage_counts = {s: 0 for s in stage_order}
+    for p in pipeline:
+        stage_counts[p["stage"]] = stage_counts.get(p["stage"], 0) + 1
+
+    return JSONResponse({
+        "pipeline":     pipeline,
+        "stage_counts": stage_counts,
+        "total":        len(pipeline),
+        "server_time":  _utc_now_iso(),
+    })
+
+
 # ── Analytics ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/analytics/tracks", tags=["system"])
