@@ -129,6 +129,11 @@ function mountTopBar() {
                border:1px solid rgba(52,152,219,0.4);border-radius:6px;color:#3498db;
                cursor:pointer;font-weight:600"
         onclick="openAuditModal()">AUDIT</button>
+      <button id="weather-btn" title="Weather Overlay"
+        style="padding:2px 8px;font-size:10px;background:rgba(100,100,100,0.2);
+               border:1px solid rgba(150,150,150,0.4);border-radius:6px;color:#aaa;
+               cursor:pointer;font-weight:600"
+        onclick="toggleWeatherOverlay()">WX</button>
       <button id="admin-panel-btn" title="User Management"
         style="display:none;padding:2px 8px;font-size:10px;background:rgba(231,76,60,0.2);
                border:1px solid rgba(231,76,60,0.4);border-radius:6px;color:#e74c3c;
@@ -905,6 +910,7 @@ function applyAIUpdate(payload) {
   renderAssignmentPanel(payload.assignment || {});
   renderBFTPanel(payload.bft_warnings || []);
   renderEffectorStatusPanel(payload.effector_status || {}, payload.effector_outcomes || []);
+  renderDriftPanel(payload.drift || {});
   // Auto-refresh open timeline chart
   if (timelineCurrentTrack) fetchAndDrawTimeline(timelineCurrentTrack);
 }
@@ -3392,6 +3398,179 @@ function applyEffectorStatus(payload) {
   renderEffectorStatusPanel({ [payload.effector_id]: { status: payload.status } }, []);
 }
 
+/* ── Model Drift Panel ───────────────────────────────────── */
+let _driftPanelEl = null;
+
+function mountDriftPanel() {
+  _driftPanelEl = el("div", {id:"drift-panel", class:"nz-card", style:{
+    width:"100%", marginBottom:"4px", display:"none",
+  }});
+  _driftPanelEl.innerHTML = `
+    <div class="nz-section" style="margin-bottom:6px">Model Drift <span id="drift-badge"></span></div>
+    <div id="drift-body" style="font-size:10px"></div>`;
+  const aiTab = RIGHT_TABS["ai"];
+  if (aiTab) aiTab.appendChild(_driftPanelEl);
+}
+
+function renderDriftPanel(d) {
+  if (!_driftPanelEl || !d || d.observations === undefined) return;
+  if (d.observations === 0) { _driftPanelEl.style.display = "none"; return; }
+  _driftPanelEl.style.display = "";
+
+  const LEVEL_COLOR = { none:"#27ae60", minor:"#f39c12", major:"#e74c3c" };
+  const level = d.drift_level || "none";
+  const col   = LEVEL_COLOR[level] || "#aaa";
+
+  const badge = document.getElementById("drift-badge");
+  if (badge) badge.innerHTML =
+    `<span style="background:${col}22;color:${col};border:1px solid ${col}44;
+                  padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold">
+      ${level.toUpperCase()}
+    </span>`;
+
+  const body = document.getElementById("drift-body");
+  if (!body) return;
+
+  // Grade distribution bar
+  const dist = d.grade_dist || {};
+  const base = d.baseline_dist || {};
+  const bars = [
+    {label:"HIGH",   pct:(dist.HIGH||0)*100,   basePct:(base.HIGH||0)*100,   col:"#e74c3c"},
+    {label:"MEDIUM", pct:(dist.MEDIUM||0)*100, basePct:(base.MEDIUM||0)*100, col:"#f39c12"},
+    {label:"LOW",    pct:(dist.LOW||0)*100,     basePct:(base.LOW||0)*100,   col:"#27ae60"},
+  ];
+  const distHtml = bars.map(b => `
+    <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px">
+      <span style="width:42px;color:${b.col};font-size:9px">${b.label}</span>
+      <div style="flex:1;background:rgba(255,255,255,0.07);border-radius:2px;height:8px;position:relative">
+        <div style="width:${b.pct.toFixed(1)}%;background:${b.col};height:100%;border-radius:2px;opacity:.8"></div>
+        ${b.basePct > 0 ? `<div style="position:absolute;top:0;left:${b.basePct.toFixed(1)}%;width:2px;height:100%;background:#fff;opacity:.4"></div>` : ""}
+      </div>
+      <span style="width:32px;text-align:right;opacity:.7;font-size:9px">${b.pct.toFixed(0)}%</span>
+    </div>`).join("");
+
+  const psiHtml = `
+    <div style="display:flex;justify-content:space-between;padding:4px 0;
+                border-top:1px solid rgba(255,255,255,0.08);margin-top:4px">
+      <span style="opacity:.6">PSI</span>
+      <span style="color:${col};font-weight:bold">${(d.psi||0).toFixed(4)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;padding:1px 0">
+      <span style="opacity:.6">ML Mean</span>
+      <span>${d.ml_mean != null ? d.ml_mean.toFixed(3) : "—"}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;padding:1px 0">
+      <span style="opacity:.6">FP Rate</span>
+      <span>${d.fp_rate != null ? (d.fp_rate*100).toFixed(1)+"%" : "—"}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;padding:1px 0">
+      <span style="opacity:.6">Gözlem</span>
+      <span>${d.observations||0} / ${d.window_size||2000}</span>
+    </div>
+    ${!d.baseline_locked ? `<div style="opacity:.5;font-size:9px;margin-top:3px">Baseline bekleniyor (${d.observations}/${100})</div>` : ""}`;
+
+  body.innerHTML = distHtml + psiHtml;
+}
+
+/* ── Weather Overlay ─────────────────────────────────────── */
+let _wxEnabled = false;
+const _wxMarkers = [];
+let   _wxInterval = null;
+
+const WX_COLORS = {
+  TSRA:"#9b59b6", RA:"#3498db", "-RA":"#85c1e9", "+RA":"#1a5276",
+  SN:"#d5d8dc", FG:"#839192", MIFG:"#b2babb", HZ:"#f0b27a", "":"#27ae60",
+};
+
+function _wxIcon(obs) {
+  const col  = WX_COLORS[obs.wx] || "#2ecc71";
+  const wind = obs.wind_kt;
+  const vis  = obs.visibility_m;
+  const vis_txt = vis < 9999 ? `${(vis/1000).toFixed(1)}km` : "CAVOK";
+  const wx_txt  = obs.wx || "CLR";
+  // Wind barb: short line in wind direction
+  const angle = obs.wind_dir;
+  const sinA  = Math.sin(angle * Math.PI / 180);
+  const cosA  = Math.cos(angle * Math.PI / 180);
+  const x2    = 16 + sinA * 12 * Math.min(wind / 20, 1.5);
+  const y2    = 16 - cosA * 12 * Math.min(wind / 20, 1.5);
+  return L.divIcon({
+    className: "",
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+    html: `<div style="position:relative;width:32px;height:32px">
+      <svg width="32" height="32" style="position:absolute;top:0;left:0">
+        <circle cx="16" cy="16" r="5" fill="${col}" opacity=".85" stroke="#fff" stroke-width="1"/>
+        ${wind > 3 ? `<line x1="16" y1="16" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"
+                           stroke="${col}" stroke-width="2" opacity=".9"/>` : ""}
+      </svg>
+      <div style="position:absolute;bottom:-22px;left:50%;transform:translateX(-50%);
+                  white-space:nowrap;font-size:8px;color:#ddd;
+                  text-shadow:0 0 3px #000;pointer-events:none">
+        ${obs.station}<br>${wx_txt} ${vis_txt}
+      </div>
+    </div>`,
+  });
+}
+
+async function _loadWeatherObs() {
+  try {
+    const r = await fetch("/api/weather");
+    if (!r.ok) return;
+    const data = await r.json();
+    // Remove old markers
+    _wxMarkers.forEach(m => { try { m.remove(); } catch {} });
+    _wxMarkers.length = 0;
+    (data.observations || []).forEach(obs => {
+      if (obs.lat == null || obs.lon == null) return;
+      const m = L.marker([obs.lat, obs.lon], { icon: _wxIcon(obs), zIndexOffset: -500 })
+        .bindTooltip(_wxTooltip(obs), { direction: "top", offset: [0, -10] })
+        .addTo(UI.map);
+      _wxMarkers.push(m);
+    });
+    // Show warnings in EW panel / topbar if any high severity
+    const highs = (data.warnings || []).filter(w => w.severity === "HIGH");
+    if (highs.length > 0) {
+      highs.forEach(w => {
+        pushEWAlert({ type: "WEATHER", track_id: w.station,
+                      message: w.message, severity: w.severity });
+      });
+    }
+  } catch {}
+}
+
+function _wxTooltip(obs) {
+  const wind = `${obs.wind_dir}°/${obs.wind_kt}kt${obs.gust_kt ? ` G${obs.gust_kt}kt` : ""}`;
+  const vis  = obs.visibility_m < 9999 ? `${obs.visibility_m}m` : "CAVOK";
+  const ceil = obs.ceiling_ft ? `${obs.ceiling_ft}ft` : "—";
+  return `<div style="font-size:10px;min-width:140px">
+    <b>${escHtml(obs.station)}</b> — ${escHtml(obs.name)}<br>
+    Sıcaklık: ${obs.temp_c}°C / Çiğ: ${obs.dew_c}°C<br>
+    Rüzgar: ${wind}<br>
+    Görüş: ${vis} | Tavan: ${ceil}<br>
+    WX: <b>${escHtml(obs.wx || 'CLR')}</b>
+    <div style="font-size:8px;opacity:.6;margin-top:2px">${escHtml(obs.metar)}</div>
+  </div>`;
+}
+
+function toggleWeatherOverlay() {
+  _wxEnabled = !_wxEnabled;
+  const btn = document.getElementById("weather-btn");
+  if (btn) {
+    btn.style.background    = _wxEnabled ? "rgba(52,152,219,0.25)" : "rgba(100,100,100,0.2)";
+    btn.style.borderColor   = _wxEnabled ? "rgba(52,152,219,0.5)"  : "rgba(150,150,150,0.4)";
+    btn.style.color         = _wxEnabled ? "#3498db" : "#aaa";
+  }
+  if (_wxEnabled) {
+    _loadWeatherObs();
+    _wxInterval = setInterval(_loadWeatherObs, 300_000);  // refresh every 5 min
+  } else {
+    clearInterval(_wxInterval);
+    _wxMarkers.forEach(m => { try { m.remove(); } catch {} });
+    _wxMarkers.length = 0;
+  }
+}
+
 /* ── Audit Log Modal ─────────────────────────────────────── */
 let _auditModalEl = null;
 
@@ -4966,6 +5145,7 @@ function boot(){
   mountAssignmentPanel();
   mountBFTPanel();
   mountEffectorStatusPanel();
+  mountDriftPanel();
   // Federation nodes panel
   mountNodesPanel();
   _refreshNodesPanel();

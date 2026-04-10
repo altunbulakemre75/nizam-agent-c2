@@ -34,6 +34,9 @@ x-common-env: &common-env
   OPENAI_API_KEY:       ${OPENAI_API_KEY:-}
   OLLAMA_URL:           ${OLLAMA_URL:-http://host.docker.internal:11434}
   LLM_MODEL:            ${LLM_MODEL:-llama3.2}
+  OTEL_ENABLED:         ${OTEL_ENABLED:-false}
+  OTEL_SERVICE_NAME:    ${OTEL_SERVICE_NAME:-nizam-cop}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
 
 services:
 
@@ -140,6 +143,19 @@ services:
     depends_on:
       cop:
         condition: service_healthy
+
+  # ── Jaeger (OpenTelemetry tracing) ────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"    # Jaeger UI
+      - "4317:4317"                          # OTLP gRPC
+      - "4318:4318"                          # OTLP HTTP
+    profiles:
+      - tracing   # opt-in: docker compose --profile tracing up
 
   # ── Grafana ────────────────────────────────────────────────
   grafana:

@@ -33,6 +33,11 @@ torch>=2.0.0        # LSTM trajectory predictor (CPU-only fine)
 # MQTT (mqtt_adapter)
 paho-mqtt>=2.0.0
 
+# OpenTelemetry (optional — gracefully disabled if not installed)
+opentelemetry-sdk>=1.25.0
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0
+opentelemetry-instrumentation-fastapi>=0.46b0
+
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0

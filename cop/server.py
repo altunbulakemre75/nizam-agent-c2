@@ -71,7 +71,11 @@ from ai import escalation as ai_escalation
 from ai import assignment as ai_assignment
 from ai import blue_force as ai_blue_force
 from ai import nonlethal as ai_nonlethal
+from ai import drift as ai_drift
+from ai import retrainer as ai_retrainer
+from cop.otel import init_tracing, span as otel_span
 from cop import sync as cop_sync
+from cop import weather as cop_weather
 from cop import circuit_breaker as cop_cb
 from replay import recorder as replay_recorder
 from replay import player as replay_player
@@ -126,15 +130,20 @@ async def lifespan(_app: FastAPI):
         except Exception as exc:
             log.warning("[cop] DB init failed — running in-memory only: %s", exc)
 
-    # 3) Start AAR session
+    # 3) Initialise OpenTelemetry tracing (no-op if OTEL_ENABLED != "true")
+    if init_tracing(_app):
+        log.info("[cop] OpenTelemetry tracing enabled → %s",
+                 os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317"))
+
+    # 5) Start AAR session
     ai_aar.start_session()
 
-    # 4) Start recording
+    # 6) Start recording
     scenario_name = os.environ.get("NIZAM_SCENARIO", "live")
     rec_path = replay_recorder.start(scenario_name)
     log.info("[cop] Recording started: %s", rec_path)
 
-    # 5) Start peer sync push loop (no-op if no peers registered)
+    # 7) Start peer sync push loop (no-op if no peers registered)
     _sync_task = cop_sync.start_push_loop(lambda: STATE)
     # Pre-register peers from env: COP_PEERS=http://node2:8100,http://node3:8100
     for peer_url in os.environ.get("COP_PEERS", "").split(","):
@@ -220,6 +229,7 @@ AI_ROE_ADVISORIES: List[Dict] = []                # ROE engagement advisories
 AI_ASSIGNMENT: Dict[str, Any] = {}               # latest effector assignment result
 AI_BFT_WARNINGS: List[Dict]   = []               # latest blue-force fratricide warnings
 EFFECTOR_OUTCOMES: List[Dict] = []               # recent engagement outcomes (max 50)
+AI_DRIFT_STATUS: Dict[str, Any] = {}             # latest model drift status
 AI_ML_PREDICTIONS: Dict[str, Dict] = {}               # ML threat predictions per track
 AI_ML_PREV_TRACKS: Dict[str, Dict] = {}               # previous frame tracks for acceleration calc
 AI_ANOMALY_MAX = 100
@@ -957,6 +967,11 @@ async def api_task_approve(task_id: str, req: Request, current_user=Depends(requ
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task_update(task)))
 
+    # ── Drift + retrainer feedback: ENGAGE approved = true positive ──
+    if action == "ENGAGE" and target_id:
+        ai_drift.record_feedback(target_id, "true_positive")
+        ai_retrainer.record(target_id, AI_ML_PREDICTIONS.get(str(target_id)), "true_positive")
+
     # ── Mark assigned effector as ENGAGED ──
     if action in ("ENGAGE", "JAM", "SPOOF", "EW_SUPPRESS") and target_id:
         for a in AI_ASSIGNMENT.get("assignments", []):
@@ -1287,6 +1302,14 @@ async def api_task_reject(task_id: str, req: Request, current_user=Depends(requi
     reject_track_id = task.get("track_id")
     if reject_track_id:
         ai_escalation.acknowledge(str(reject_track_id), operator_id)
+        # Drift + retrainer feedback: ENGAGE rejected = false positive
+        if task.get("action") == "ENGAGE":
+            ai_drift.record_feedback(str(reject_track_id), "false_positive")
+            ai_retrainer.record(
+                str(reject_track_id),
+                AI_ML_PREDICTIONS.get(str(reject_track_id)),
+                "false_positive",
+            )
 
     asyncio.create_task(cop_audit.log_action(
         username=operator_id,
@@ -1530,6 +1553,9 @@ async def api_reset(_=Depends(require_operator())):
         AI_BFT_WARNINGS.clear()
         EFFECTOR_OUTCOMES.clear()
         STATE["effector_status"].clear()
+        AI_DRIFT_STATUS.clear()
+        ai_drift.reset()
+        ai_retrainer.reset()
         AI_ML_PREDICTIONS.clear()
         AI_ML_PREV_TRACKS.clear()
         ai_predictor.reset()
@@ -1624,6 +1650,7 @@ async def ingest(req: Request):
     METRICS["ingest_total"] += 1
     METRICS["ingest_by_type"][event_type] = METRICS["ingest_by_type"].get(event_type, 0) + 1
     cop_cb.record_success(client_ip)
+
 
     if isinstance(payload, dict) and "server_time" not in payload:
         payload["server_time"] = _utc_now_iso()
@@ -1995,22 +2022,21 @@ def _ai_run_tactical_compute(
     ml_predictions = _results.get("ml_predictions", {})
     ew_alerts_flat = list(_results.get("ew_alerts", []))
 
-    # Confidence scores fuse ML probability + EW penalties + track quality.
-    # Returns enriched threat dicts with "confidence" and "confidence_grade".
-    enriched_threats = _timed(
-        "confidence",
-        ai_confidence.score_batch,
-        tracks=tracks_snap,
-        threats=threats_snap,
-        ml_predictions=ml_predictions,
-        ew_alerts=ew_alerts_flat,
-    )
+    with otel_span("tactical.confidence", {"tracks": len(tracks_snap), "threats": len(threats_snap)}):
+        enriched_threats = _timed(
+            "confidence",
+            ai_confidence.score_batch,
+            tracks=tracks_snap,
+            threats=threats_snap,
+            ml_predictions=ml_predictions,
+            ew_alerts=ew_alerts_flat,
+        )
 
-    # ROE now receives confidence-enriched threats so its gates can apply.
-    roe_advs = _timed("roe", ai_roe.evaluate_all,
-                       tracks=tracks_snap, threats=enriched_threats,
-                       zones=zones_snap, assets=assets_snap,
-                       coord_attacks=coord_attacks)
+    with otel_span("tactical.roe", {"advisories_in": len(enriched_threats)}):
+        roe_advs = _timed("roe", ai_roe.evaluate_all,
+                           tracks=tracks_snap, threats=enriched_threats,
+                           zones=zones_snap, assets=assets_snap,
+                           coord_attacks=coord_attacks)
 
     return {
         "swarm_anomalies":   list(_results.get("swarm_anomalies", [])),
@@ -2106,6 +2132,16 @@ async def _ai_tactical_background_task() -> None:
                     STATE["threats"][tid]["confidence_grade"]     = enriched["confidence_grade"]
                     STATE["threats"][tid]["confidence_breakdown"] = enriched["confidence_breakdown"]
 
+        # ── Model drift detection ─────────────────────────────────────────────
+        ai_drift.record_batch(
+            enriched_threats=result.get("enriched_threats", {}),
+            ml_predictions=result.get("ml_predictions", {}),
+        )
+        AI_DRIFT_STATUS.clear()
+        AI_DRIFT_STATUS.update(ai_drift.status())
+        if AI_DRIFT_STATUS.get("drift_level") == "major":
+            log.warning("[drift] Major model drift detected — PSI=%.3f", AI_DRIFT_STATUS["psi"])
+
         # ── Blue Force / Fratricide check ─────────────────────────────────
         # Must run against current STATE so it sees live friendly positions.
         bft_screened, bft_warnings = ai_blue_force.check_advisories(
@@ -2126,11 +2162,14 @@ async def _ai_tactical_background_task() -> None:
             ai_aar.record_roe_advisory(adv)
 
         # ── Multi-effector assignment ──────────────────────────────────────
-        assign_result = ai_assignment.compute(
-            threats=dict(STATE["threats"]),
-            assets=dict(STATE["assets"]),
-            roe_advisories=AI_ROE_ADVISORIES,
-        )
+        with otel_span("tactical.assignment", {
+            "threats": len(STATE["threats"]), "assets": len(STATE["assets"]),
+        }):
+            assign_result = ai_assignment.compute(
+                threats=dict(STATE["threats"]),
+                assets=dict(STATE["assets"]),
+                roe_advisories=AI_ROE_ADVISORIES,
+            )
         AI_ASSIGNMENT["assignments"] = [
             {"threat_id": a.threat_id, "effector_id": a.effector_id,
              "effector_name": a.effector_name, "cost": a.cost,
@@ -2186,6 +2225,7 @@ async def _ai_tactical_background_task() -> None:
                 "bft_warnings":      list(AI_BFT_WARNINGS),
                 "effector_status":   dict(STATE["effector_status"]),
                 "effector_outcomes": list(EFFECTOR_OUTCOMES[-10:]),
+                "drift":             dict(AI_DRIFT_STATUS),
                 "server_time":       _utc_now_iso(),
             },
         })
@@ -2617,6 +2657,15 @@ async def prometheus_metrics():
     lines += g("nizam_escalation_pending",        "Unanswered escalation advisories",     escalation_pending)
     lines += g("nizam_ew_alerts_total",           "Total EW alerts detected",             ai_ew.stats().get("total_alerts", 0), "counter")
     lines += g("nizam_deconfliction_merges_total","Total track deconfliction merges",      ai_deconfliction.stats().get("total_aliases", 0), "counter")
+    # Model drift metrics
+    drift_psi         = AI_DRIFT_STATUS.get("psi", 0.0)
+    drift_obs         = AI_DRIFT_STATUS.get("observations", 0)
+    drift_fp_rate     = AI_DRIFT_STATUS.get("fp_rate") or 0.0
+    drift_alert       = 1 if AI_DRIFT_STATUS.get("alert") else 0
+    lines += g("nizam_model_drift_psi",           "Model drift PSI vs baseline",          f"{drift_psi:.4f}")
+    lines += g("nizam_model_drift_observations",  "Confidence observations in window",    drift_obs, "counter")
+    lines += g("nizam_model_drift_fp_rate",       "Approximate false-positive rate",      f"{drift_fp_rate:.3f}")
+    lines += g("nizam_model_drift_alert",         "1 if drift alert is active",           drift_alert)
     return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
 
 
@@ -3106,6 +3155,55 @@ async def api_bft():
         "count":       len(AI_BFT_WARNINGS),
         "server_time": _utc_now_iso(),
     })
+
+
+@app.post("/api/ai/retrain", tags=["ai"])
+async def api_retrain(_=Depends(require_operator())):
+    """
+    Manually trigger model retraining using accumulated operator feedback.
+    Runs asynchronously in a background thread; returns immediately.
+    """
+    result = ai_retrainer.trigger(blocking=False)
+    return JSONResponse({**result, "server_time": _utc_now_iso()})
+
+
+@app.get("/api/ai/retrain/status", tags=["ai"])
+async def api_retrain_status():
+    """Current retraining status and feedback buffer stats."""
+    return JSONResponse({**ai_retrainer.status(), "server_time": _utc_now_iso()})
+
+
+@app.get("/api/weather", tags=["weather"])
+async def api_weather(refresh: bool = False):
+    """Current weather observations for all stations in the AO."""
+    obs  = cop_weather.get_observations(force_refresh=refresh)
+    warn = cop_weather.tactical_warnings(obs)
+    return JSONResponse({
+        "observations": obs,
+        "warnings":     warn,
+        "count":        len(obs),
+        "server_time":  _utc_now_iso(),
+    })
+
+
+@app.get("/api/weather/{station_id}", tags=["weather"])
+async def api_weather_station(station_id: str):
+    """Single-station weather observation."""
+    obs = cop_weather.get_station(station_id.upper())
+    if not obs:
+        return JSONResponse({"ok": False, "error": "station not found"}, status_code=404)
+    return JSONResponse({**obs, "server_time": _utc_now_iso()})
+
+
+@app.get("/api/ai/drift", tags=["ai"])
+async def api_drift():
+    """
+    Current model drift status.
+
+    Returns PSI vs. baseline, grade distribution, ML score stats,
+    and approximate false-positive rate from operator feedback.
+    """
+    return JSONResponse({**AI_DRIFT_STATUS, "server_time": _utc_now_iso()})
 
 
 # ── Effector Telemetry ─────────────────────────────────────────────────────────
