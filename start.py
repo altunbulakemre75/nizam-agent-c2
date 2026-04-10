@@ -28,6 +28,24 @@ ROOT = Path(__file__).parent
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _wait_for_server(url: str, timeout: float = 30.0) -> bool:
+    """Poll /api/metrics until the COP server responds or timeout expires."""
+    import urllib.request
+    import urllib.error
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(f"{url}/api/metrics", timeout=2)
+            return True
+        except Exception:
+            time.sleep(0.25)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # COP server thread (uvicorn in-process)
 # ---------------------------------------------------------------------------
 
@@ -127,9 +145,12 @@ def main() -> None:
     ).start()
     print(f"[start] COP server starting on {ui_url} ...", file=sys.stderr)
 
-    # Give both servers a moment to bind before pipeline starts
-    time.sleep(1.5)
-    print(f"[start] Servers ready. Orchestrator: {orch_url}", file=sys.stderr)
+    # Wait until COP server is actually accepting requests before starting pipeline
+    print(f"[start] Waiting for COP server on {ui_url} ...", file=sys.stderr)
+    if _wait_for_server(ui_url, timeout=30.0):
+        print(f"[start] COP server ready. Orchestrator: {orch_url}", file=sys.stderr)
+    else:
+        print(f"[start] WARNING: COP server did not respond within 30 s — pipeline may fail", file=sys.stderr)
 
     # -- 2) Open browser (optional) -----------------------------------------
     if args.open_browser:
