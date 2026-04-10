@@ -552,6 +552,49 @@ function playEffectorImpact(payload) {
   requestAnimationFrame(step);
 }
 
+/**
+ * Play a non-lethal effect animation (JAM = yellow, SPOOF = cyan, EW_SUPPRESS = purple).
+ * Expanding ring that pulses (unlike ENGAGE's fade-out) to signal suppression, not destruction.
+ */
+function playNLEffect(payload, color) {
+  if (!UI.map || payload?.lat == null || payload?.lon == null) return;
+  const lat = +payload.lat, lon = +payload.lon;
+  const durS = +payload.duration_s || 10.0;
+
+  const ring = L.circle([lat, lon], {
+    radius: 30, color, weight: 2, fillColor: color, fillOpacity: 0.25,
+  }).addTo(UI.map);
+  const label = L.marker([lat, lon], {
+    icon: L.divIcon({
+      className: "",
+      html: `<div style="background:${color};color:#000;font-size:9px;font-weight:bold;
+                         padding:2px 4px;border-radius:3px;white-space:nowrap;opacity:.9">
+               ${payload.action || "NL"}
+             </div>`,
+      iconAnchor: [20, -6],
+    }),
+  }).addTo(UI.map);
+
+  const startTs = performance.now();
+  const endTs   = startTs + durS * 1000;
+
+  function step(now) {
+    const t = Math.min((now - startTs) / (endTs - startTs), 1);
+    if (t >= 1) {
+      try { ring.remove(); } catch {}
+      try { label.remove(); } catch {}
+      return;
+    }
+    // Pulse: radius oscillates while fading
+    const pulse  = 30 + 120 * t + 20 * Math.sin(t * Math.PI * 8);
+    const opFill = 0.25 * (1 - t);
+    ring.setRadius(pulse);
+    ring.setStyle({ fillOpacity: opFill, opacity: 0.7 * (1 - t) });
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
 function upsertThreat(threat) {
   const id=String(threat.id??threat.global_track_id??threat.threat_id??""); if(!id) return;
   UI.threats.set(id,threat);
@@ -861,6 +904,7 @@ function applyAIUpdate(payload) {
   renderTacticalPanel(payload.recommendations || []);
   renderAssignmentPanel(payload.assignment || {});
   renderBFTPanel(payload.bft_warnings || []);
+  renderEffectorStatusPanel(payload.effector_status || {}, payload.effector_outcomes || []);
   // Auto-refresh open timeline chart
   if (timelineCurrentTrack) fetchAndDrawTimeline(timelineCurrentTrack);
 }
@@ -1069,8 +1113,14 @@ function mountTaskPanel() {
   RIGHT_TABS.tasks.appendChild(taskPanelEl);
 }
 
-const ACTION_COLORS = { ENGAGE:"var(--danger)", OBSERVE:"var(--warn)", EVADE:"var(--accent)" };
-const ACTION_BG     = { ENGAGE:"rgba(240,64,64,0.1)", OBSERVE:"rgba(240,128,48,0.1)", EVADE:"rgba(79,127,255,0.1)" };
+const ACTION_COLORS = {
+  ENGAGE:"var(--danger)", OBSERVE:"var(--warn)", EVADE:"var(--accent)",
+  JAM:"#f1c40f", SPOOF:"#1abc9c", EW_SUPPRESS:"#9b59b6",
+};
+const ACTION_BG = {
+  ENGAGE:"rgba(240,64,64,0.1)", OBSERVE:"rgba(240,128,48,0.1)", EVADE:"rgba(79,127,255,0.1)",
+  JAM:"rgba(241,196,15,0.1)", SPOOF:"rgba(26,188,156,0.1)", EW_SUPPRESS:"rgba(155,89,182,0.1)",
+};
 
 function _renderTaskPanel() {
   if(!taskPanelEl) return;
@@ -1251,8 +1301,13 @@ const CopEngine = (() => {
       case "cop.waypoints_cleared":return clearWaypoints();
       case "cop.ew_alert":        return pushEWAlert(ev.payload);
       case "cop.escalation":      return pushEscalation(ev.payload);
-      case "cop.bft_warning":     return pushBFTWarning(ev.payload);
-      case "cop.track_merged":    return pushTrackMerged(ev.payload);
+      case "cop.bft_warning":        return pushBFTWarning(ev.payload);
+      case "cop.jam_active":         return playNLEffect({...ev.payload, action:"JAM"}, "#f1c40f");
+      case "cop.spoof_active":       return playNLEffect({...ev.payload, action:"SPOOF"}, "#1abc9c");
+      case "cop.ew_suppress_active": return playNLEffect({...ev.payload, action:"EW"}, "#9b59b6");
+      case "cop.effector_outcome":   return pushEffectorOutcome(ev.payload);
+      case "cop.effector_status":    return applyEffectorStatus(ev.payload);
+      case "cop.track_merged":       return pushTrackMerged(ev.payload);
       case "cop.annotation":      return _wsAnnotation(ev.payload);
       case "cop.annotation_removed": return _wsAnnotationRemoved(ev.payload);
     }
@@ -3236,6 +3291,107 @@ function pushBFTWarning(payload) {
   setTabBadge("ai", (_bftLog.length));
 }
 
+/* ── Effector Status & Outcome Panel ────────────────────── */
+let _effStatusPanelEl = null;
+const _outcomeLog = [];   // rolling outcome log (max 20)
+
+const STATUS_COLORS = {
+  READY:"#27ae60", ENGAGED:"#f39c12", COOLDOWN:"#e67e22", OFFLINE:"#7f8c8d",
+};
+const OUTCOME_COLORS = {
+  hit:"#27ae60", miss:"#e74c3c", partial:"#f39c12", suppressed:"#9b59b6",
+};
+
+function mountEffectorStatusPanel() {
+  _effStatusPanelEl = el("div", {id:"eff-status-panel", class:"nz-card", style:{
+    width:"100%", marginBottom:"4px", display:"none",
+  }});
+  _effStatusPanelEl.innerHTML = `
+    <div class="nz-section" style="margin-bottom:6px">Effektör Durumu</div>
+    <div id="eff-status-body" style="font-size:10px"></div>
+    <div class="nz-section" style="margin:6px 0 4px">Son Angajman Sonuçları</div>
+    <div id="eff-outcome-body" style="font-size:10px"></div>`;
+  const aiTab = RIGHT_TABS["ai"];
+  if (aiTab) aiTab.appendChild(_effStatusPanelEl);
+}
+
+function renderEffectorStatusPanel(statusMap, outcomes) {
+  if (!_effStatusPanelEl) return;
+  const hasStatus   = Object.keys(statusMap).length > 0;
+  const hasOutcomes = outcomes && outcomes.length > 0;
+  if (!hasStatus && !hasOutcomes && _outcomeLog.length === 0) {
+    _effStatusPanelEl.style.display = "none";
+    return;
+  }
+  _effStatusPanelEl.style.display = "";
+
+  // Status table
+  const sbody = document.getElementById("eff-status-body");
+  if (sbody) {
+    if (!hasStatus) {
+      sbody.innerHTML = `<span style="opacity:.4">Aktif effektör yok</span>`;
+    } else {
+      sbody.innerHTML = Object.entries(statusMap).map(([eid, s]) => {
+        const col = STATUS_COLORS[s.status] || "#aaa";
+        return `<div style="display:flex;justify-content:space-between;align-items:center;
+                             padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+          <span style="opacity:.8">${escHtml(eid)}</span>
+          <span style="background:${col}22;color:${col};border:1px solid ${col}44;
+                       padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold">
+            ${escHtml(s.status)}
+          </span>
+        </div>`;
+      }).join("");
+    }
+  }
+
+  // Outcomes (merge server payload + local log, newest first)
+  if (outcomes && outcomes.length > 0) {
+    outcomes.forEach(o => {
+      if (!_outcomeLog.some(x => x.task_id === o.task_id && x.outcome === o.outcome)) {
+        _outcomeLog.unshift({...o, _t: Date.now()});
+      }
+    });
+    if (_outcomeLog.length > 20) _outcomeLog.length = 20;
+  }
+  const obody = document.getElementById("eff-outcome-body");
+  if (obody) {
+    if (_outcomeLog.length === 0) {
+      obody.innerHTML = `<span style="opacity:.4">Henüz sonuç yok</span>`;
+    } else {
+      obody.innerHTML = _outcomeLog.slice(0, 8).map(o => {
+        const col = OUTCOME_COLORS[o.outcome] || "#aaa";
+        const ago = Math.round((Date.now() - o._t) / 1000);
+        return `<div style="display:flex;justify-content:space-between;align-items:center;
+                             padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+          <div>
+            <span style="color:${ACTION_COLORS[o.action]||'#aaa'}">${escHtml(o.action||"?")}</span>
+            <span style="opacity:.5;margin:0 3px">→</span>
+            <span style="font-family:var(--mono);font-size:9px">${escHtml(o.track_id||o.effector_id||"?")}</span>
+          </div>
+          <div style="text-align:right">
+            <span style="color:${col};font-weight:bold;font-size:9px">${escHtml(o.outcome)}</span>
+            <span style="opacity:.4;margin-left:4px;font-size:8px">${ago}s önce</span>
+          </div>
+        </div>`;
+      }).join("");
+    }
+  }
+}
+
+function pushEffectorOutcome(payload) {
+  if (!payload) return;
+  _outcomeLog.unshift({...payload, _t: Date.now()});
+  if (_outcomeLog.length > 20) _outcomeLog.length = 20;
+  renderEffectorStatusPanel({}, []);   // re-render outcome section
+}
+
+function applyEffectorStatus(payload) {
+  if (!payload?.effector_id) return;
+  // Update local status map and re-render
+  renderEffectorStatusPanel({ [payload.effector_id]: { status: payload.status } }, []);
+}
+
 /* ── Audit Log Modal ─────────────────────────────────────── */
 let _auditModalEl = null;
 
@@ -4809,6 +4965,7 @@ function boot(){
   mountKillChainPanel();
   mountAssignmentPanel();
   mountBFTPanel();
+  mountEffectorStatusPanel();
   // Federation nodes panel
   mountNodesPanel();
   _refreshNodesPanel();

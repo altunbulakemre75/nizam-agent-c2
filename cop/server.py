@@ -70,6 +70,7 @@ from ai.fusion import SensorMeasurement as FusionMeasurement
 from ai import escalation as ai_escalation
 from ai import assignment as ai_assignment
 from ai import blue_force as ai_blue_force
+from ai import nonlethal as ai_nonlethal
 from cop import sync as cop_sync
 from cop import circuit_breaker as cop_cb
 from replay import recorder as replay_recorder
@@ -191,15 +192,16 @@ app.mount("/static", StaticFiles(directory="cop/static"), name="static")
 # ── In-memory state ───────────────────────────────────────────────────────────
 
 STATE: Dict[str, Any] = {
-    "agents":      {},
-    "tracks":      {},
-    "threats":     {},
-    "zones":       {},
-    "assets":      {},
-    "tasks":       {},
-    "waypoints":   {},
-    "annotations": {},   # track_id → [list of annotation dicts]
-    "events_tail": [],
+    "agents":           {},
+    "tracks":           {},
+    "threats":          {},
+    "zones":            {},
+    "assets":           {},
+    "tasks":            {},
+    "waypoints":        {},
+    "annotations":      {},   # track_id → [list of annotation dicts]
+    "events_tail":      [],
+    "effector_status":  {},   # {effector_id: {status, updated_at, task_id?, lat?, lon?}}
 }
 
 BREACH_STATE: Dict[str, Set[str]] = {}
@@ -217,6 +219,7 @@ AI_COORD_ATTACKS: List[Dict] = []                 # coordinated attack warnings
 AI_ROE_ADVISORIES: List[Dict] = []                # ROE engagement advisories
 AI_ASSIGNMENT: Dict[str, Any] = {}               # latest effector assignment result
 AI_BFT_WARNINGS: List[Dict]   = []               # latest blue-force fratricide warnings
+EFFECTOR_OUTCOMES: List[Dict] = []               # recent engagement outcomes (max 50)
 AI_ML_PREDICTIONS: Dict[str, Dict] = {}               # ML threat predictions per track
 AI_ML_PREV_TRACKS: Dict[str, Dict] = {}               # previous frame tracks for acceleration calc
 AI_ANOMALY_MAX = 100
@@ -651,59 +654,94 @@ async def _auto_task(threat_id: str, threat_payload: Dict[str, Any]) -> None:
         action = "OBSERVE"
 
     task_key = f"{action}:{intent}"
-    if task_key in emitted:
-        return
-
-    for t in STATE["tasks"].values():
-        if t["track_id"] == threat_id and t["action"] == action and t["status"] == "PENDING":
-            return
-
-    task = {
-        "id":           _new_id("task-"),
-        "track_id":     threat_id,
-        "action":       action,
-        "threat_level": level,
-        "intent":       intent,
-        "score":        threat_payload.get("score", 0),
-        "tti_s":        threat_payload.get("tti_s"),
-        "status":       "PENDING",
-        "created_at":   _utc_now_iso(),
-        "resolved_at":  None,
-        "resolved_by":  None,
-    }
-
-    STATE["tasks"][task["id"]] = task
-    TASK_EMITTED.setdefault(threat_id, set()).add(task_key)
-
-    ev = {"event_type": "cop.task", "payload": task}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_persist_task(task)))
-    ai_aar.record_task(task)
-    if level == "HIGH":
-        asyncio.create_task(cop_webhooks.dispatch("cop.threat_high", {
-            "track_id": threat_id, "action": action,
-            "threat_level": level, "intent": intent,
-            "score": task["score"],
-        }))
-
-    # Decision lineage: record the auto-task creation against the track.
-    try:
-        ai_lineage.record(
-            track_id=threat_id,
-            stage="task_proposer",
-            summary=f"Auto-proposed {action} (intent={intent}, level={level})",
-            inputs={
-                "threat_level": level,
-                "intent": intent,
-                "score": threat_payload.get("score", 0),
-                "tti_s": threat_payload.get("tti_s"),
-            },
-            outputs={"task_id": task["id"], "action": action, "status": "PENDING"},
-            rule=f"auto_task.{intent}→{action}",
+    if task_key not in emitted:
+        # Avoid duplicate PENDING tasks for the same action
+        already = any(
+            t["track_id"] == threat_id and t["action"] == action and t["status"] == "PENDING"
+            for t in STATE["tasks"].values()
         )
-    except Exception:
-        pass
+        if not already:
+            task = {
+                "id":           _new_id("task-"),
+                "track_id":     threat_id,
+                "action":       action,
+                "threat_level": level,
+                "intent":       intent,
+                "score":        threat_payload.get("score", 0),
+                "tti_s":        threat_payload.get("tti_s"),
+                "status":       "PENDING",
+                "created_at":   _utc_now_iso(),
+                "resolved_at":  None,
+                "resolved_by":  None,
+            }
+            STATE["tasks"][task["id"]] = task
+            TASK_EMITTED.setdefault(threat_id, set()).add(task_key)
+            ev = {"event_type": "cop.task", "payload": task}
+            _append_event_tail(ev)
+            await broadcast(ev)
+            asyncio.create_task(_db_write(_persist_task(task)))
+            ai_aar.record_task(task)
+            if level == "HIGH":
+                asyncio.create_task(cop_webhooks.dispatch("cop.threat_high", {
+                    "track_id": threat_id, "action": action,
+                    "threat_level": level, "intent": intent,
+                    "score": task["score"],
+                }))
+            try:
+                ai_lineage.record(
+                    track_id=threat_id,
+                    stage="task_proposer",
+                    summary=f"Auto-proposed {action} (intent={intent}, level={level})",
+                    inputs={
+                        "threat_level": level,
+                        "intent": intent,
+                        "score": threat_payload.get("score", 0),
+                        "tti_s": threat_payload.get("tti_s"),
+                    },
+                    outputs={"task_id": task["id"], "action": action, "status": "PENDING"},
+                    rule=f"auto_task.{intent}→{action}",
+                )
+            except Exception:
+                pass
+
+    # ── Non-lethal alternatives (alongside ENGAGE for score < 90) ─────────────
+    if action == "ENGAGE":
+        nl_options = ai_nonlethal.recommend(
+            threat_id, threat_payload, dict(STATE["assets"])
+        )
+        for opt in nl_options:
+            nl_action = opt["action"]
+            nl_key    = f"{nl_action}:{intent}"
+            if nl_key in TASK_EMITTED.get(threat_id, set()):
+                continue
+            already_nl = any(
+                t["track_id"] == threat_id and t["action"] == nl_action and t["status"] == "PENDING"
+                for t in STATE["tasks"].values()
+            )
+            if already_nl:
+                continue
+            nl_task = {
+                "id":           _new_id("task-"),
+                "track_id":     threat_id,
+                "action":       nl_action,
+                "threat_level": level,
+                "intent":       intent,
+                "score":        threat_payload.get("score", 0),
+                "tti_s":        threat_payload.get("tti_s"),
+                "effector_id":  opt.get("effector_id"),
+                "effector_name": opt.get("effector_name"),
+                "dist_km":      opt.get("dist_km"),
+                "status":       "PENDING",
+                "created_at":   _utc_now_iso(),
+                "resolved_at":  None,
+                "resolved_by":  None,
+            }
+            STATE["tasks"][nl_task["id"]] = nl_task
+            TASK_EMITTED.setdefault(threat_id, set()).add(nl_key)
+            nl_ev = {"event_type": "cop.task", "payload": nl_task}
+            _append_event_tail(nl_ev)
+            await broadcast(nl_ev)
+            asyncio.create_task(_db_write(_persist_task(nl_task)))
 
 
 def _make_snapshot_payload() -> Dict[str, Any]:
@@ -919,14 +957,28 @@ async def api_task_approve(task_id: str, req: Request, current_user=Depends(requ
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task_update(task)))
 
+    # ── Mark assigned effector as ENGAGED ──
+    if action in ("ENGAGE", "JAM", "SPOOF", "EW_SUPPRESS") and target_id:
+        for a in AI_ASSIGNMENT.get("assignments", []):
+            if a.get("threat_id") == target_id:
+                eid = a["effector_id"]
+                STATE["effector_status"][eid] = {
+                    "status":     "ENGAGED",
+                    "updated_at": _utc_now_iso(),
+                    "task_id":    task["id"],
+                }
+                break
+
     # ── Fire control loop ──
-    # If the approved task was an ENGAGE order, kick off the effector
-    # impact sequence on the target track. Runs as a background task so
-    # the API call returns immediately — the operator sees the task flip
-    # to APPROVED in the UI, then an expanding red circle animation over
-    # the target, then the target marker disappears.
+    # Dispatch the appropriate effect based on the approved task action.
     if action == "ENGAGE" and target_id:
         asyncio.create_task(_run_effector_impact(str(target_id), task["id"]))
+    elif action == "JAM" and target_id:
+        asyncio.create_task(_run_jam_effect(str(target_id), task["id"]))
+    elif action == "SPOOF" and target_id:
+        asyncio.create_task(_run_spoof_effect(str(target_id), task["id"]))
+    elif action == "EW_SUPPRESS" and target_id:
+        asyncio.create_task(_run_ew_suppress_effect(str(target_id), task["id"]))
 
     # Operator action counts as acknowledgement for escalation engine
     if target_id:
@@ -948,6 +1000,12 @@ async def api_task_approve(task_id: str, req: Request, current_user=Depends(requ
 # Represents weapon flight time; also gives the UI a beat to play its
 # animation before the target vanishes.
 _EFFECTOR_IMPACT_DELAY_S = 2.0
+
+# Non-lethal effect duration (seconds) — how long jamming/spoofing persists
+_NL_EFFECT_DURATION_S = 10.0
+
+# Cooldown period after an ENGAGE before effector is READY again
+_EFFECTOR_COOLDOWN_S = 5.0
 
 
 async def _run_effector_impact(target_id: str, task_id: str) -> None:
@@ -1028,7 +1086,178 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
             "server_time": _utc_now_iso(),
         },
     })
+    # Record outcome and update effector status
+    async with STATE_LOCK:
+        EFFECTOR_OUTCOMES.append({
+            "task_id":   task_id,
+            "track_id":  target_id,
+            "action":    "ENGAGE",
+            "outcome":   "hit",
+            "timestamp": _utc_now_iso(),
+        })
+        if len(EFFECTOR_OUTCOMES) > 50:
+            EFFECTOR_OUTCOMES[:] = EFFECTOR_OUTCOMES[-50:]
+        # Find assigned effector and set to COOLDOWN
+        for a in AI_ASSIGNMENT.get("assignments", []):
+            if a.get("threat_id") == target_id:
+                eid = a["effector_id"]
+                STATE["effector_status"][eid] = {
+                    "status":     "COOLDOWN",
+                    "updated_at": _utc_now_iso(),
+                    "task_id":    task_id,
+                }
+                asyncio.create_task(_effector_cooldown_reset(eid))
+                break
+    await broadcast({
+        "event_type": "cop.effector_outcome",
+        "payload": {
+            "task_id":   task_id,
+            "track_id":  target_id,
+            "action":    "ENGAGE",
+            "outcome":   "hit",
+            "server_time": _utc_now_iso(),
+        },
+    })
     log.info("[fire] engage %s: target %s neutralized", task_id, target_id)
+
+
+async def _effector_cooldown_reset(effector_id: str) -> None:
+    """After cooldown period, return effector to READY state."""
+    await asyncio.sleep(_EFFECTOR_COOLDOWN_S)
+    async with STATE_LOCK:
+        st = STATE["effector_status"].get(effector_id, {})
+        if st.get("status") == "COOLDOWN":
+            st["status"]     = "READY"
+            st["updated_at"] = _utc_now_iso()
+    await broadcast({
+        "event_type": "cop.effector_status",
+        "payload": {
+            "effector_id": effector_id,
+            "status":      "READY",
+            "server_time": _utc_now_iso(),
+        },
+    })
+
+
+def _record_outcome(task_id: str, track_id: str, action: str, outcome: str) -> None:
+    """Append an outcome record (called from NL fire control functions)."""
+    EFFECTOR_OUTCOMES.append({
+        "task_id":   task_id,
+        "track_id":  track_id,
+        "action":    action,
+        "outcome":   outcome,
+        "timestamp": _utc_now_iso(),
+    })
+    if len(EFFECTOR_OUTCOMES) > 50:
+        EFFECTOR_OUTCOMES[:] = EFFECTOR_OUTCOMES[-50:]
+
+
+async def _run_jam_effect(target_id: str, task_id: str) -> None:
+    """Background task: apply RF jamming to a track (non-lethal)."""
+    async with STATE_LOCK:
+        target = STATE["tracks"].get(target_id)
+        if not target:
+            return
+        target["track_state"] = "JAMMED"
+        lat = target.get("lat")
+        lon = target.get("lon")
+
+    await broadcast({
+        "event_type": "cop.jam_active",
+        "payload": {
+            "target_id":  target_id,
+            "task_id":    task_id,
+            "lat":        lat,
+            "lon":        lon,
+            "duration_s": _NL_EFFECT_DURATION_S,
+            "server_time": _utc_now_iso(),
+        },
+    })
+    async with STATE_LOCK:
+        _record_outcome(task_id, target_id, "JAM", "suppressed")
+    await broadcast({
+        "event_type": "cop.effector_outcome",
+        "payload": {
+            "task_id":   task_id,
+            "track_id":  target_id,
+            "action":    "JAM",
+            "outcome":   "suppressed",
+            "server_time": _utc_now_iso(),
+        },
+    })
+    log.info("[jam] task %s: target %s jammed for %.0fs", task_id, target_id, _NL_EFFECT_DURATION_S)
+
+
+async def _run_spoof_effect(target_id: str, task_id: str) -> None:
+    """Background task: apply GPS spoofing to a track (non-lethal)."""
+    async with STATE_LOCK:
+        target = STATE["tracks"].get(target_id)
+        if not target:
+            return
+        target["track_state"] = "SPOOFED"
+        lat = target.get("lat")
+        lon = target.get("lon")
+
+    await broadcast({
+        "event_type": "cop.spoof_active",
+        "payload": {
+            "target_id":  target_id,
+            "task_id":    task_id,
+            "lat":        lat,
+            "lon":        lon,
+            "duration_s": _NL_EFFECT_DURATION_S,
+            "server_time": _utc_now_iso(),
+        },
+    })
+    async with STATE_LOCK:
+        _record_outcome(task_id, target_id, "SPOOF", "suppressed")
+    await broadcast({
+        "event_type": "cop.effector_outcome",
+        "payload": {
+            "task_id":   task_id,
+            "track_id":  target_id,
+            "action":    "SPOOF",
+            "outcome":   "suppressed",
+            "server_time": _utc_now_iso(),
+        },
+    })
+    log.info("[spoof] task %s: target %s spoofed for %.0fs", task_id, target_id, _NL_EFFECT_DURATION_S)
+
+
+async def _run_ew_suppress_effect(target_id: str, task_id: str) -> None:
+    """Background task: apply broadband EW suppression to a track (non-lethal)."""
+    async with STATE_LOCK:
+        target = STATE["tracks"].get(target_id)
+        if not target:
+            return
+        target["track_state"] = "EW_SUPPRESSED"
+        lat = target.get("lat")
+        lon = target.get("lon")
+
+    await broadcast({
+        "event_type": "cop.ew_suppress_active",
+        "payload": {
+            "target_id":  target_id,
+            "task_id":    task_id,
+            "lat":        lat,
+            "lon":        lon,
+            "duration_s": _NL_EFFECT_DURATION_S,
+            "server_time": _utc_now_iso(),
+        },
+    })
+    async with STATE_LOCK:
+        _record_outcome(task_id, target_id, "EW_SUPPRESS", "suppressed")
+    await broadcast({
+        "event_type": "cop.effector_outcome",
+        "payload": {
+            "task_id":   task_id,
+            "track_id":  target_id,
+            "action":    "EW_SUPPRESS",
+            "outcome":   "suppressed",
+            "server_time": _utc_now_iso(),
+        },
+    })
+    log.info("[ew] task %s: target %s EW-suppressed for %.0fs", task_id, target_id, _NL_EFFECT_DURATION_S)
 
 
 @app.post("/api/tasks/{task_id}/reject")
@@ -1299,6 +1528,8 @@ async def api_reset(_=Depends(require_operator())):
         AI_ROE_ADVISORIES.clear()
         AI_ASSIGNMENT.clear()
         AI_BFT_WARNINGS.clear()
+        EFFECTOR_OUTCOMES.clear()
+        STATE["effector_status"].clear()
         AI_ML_PREDICTIONS.clear()
         AI_ML_PREV_TRACKS.clear()
         ai_predictor.reset()
@@ -1953,6 +2184,8 @@ async def _ai_tactical_background_task() -> None:
                 },
                 "assignment":        dict(AI_ASSIGNMENT),
                 "bft_warnings":      list(AI_BFT_WARNINGS),
+                "effector_status":   dict(STATE["effector_status"]),
+                "effector_outcomes": list(EFFECTOR_OUTCOMES[-10:]),
                 "server_time":       _utc_now_iso(),
             },
         })
@@ -2873,6 +3106,111 @@ async def api_bft():
         "count":       len(AI_BFT_WARNINGS),
         "server_time": _utc_now_iso(),
     })
+
+
+# ── Effector Telemetry ─────────────────────────────────────────────────────────
+
+@app.post("/api/effectors/{effector_id}/telemetry", tags=["effectors"])
+async def api_effector_telemetry(
+    effector_id: str, req: Request,
+    _=Depends(require_operator()),
+):
+    """
+    Report effector operational status and/or post-engagement outcome.
+
+    Body fields:
+      status   : "READY" | "ENGAGED" | "COOLDOWN" | "OFFLINE"  (required)
+      outcome  : "hit" | "miss" | "partial"                     (optional)
+      track_id : associated track                               (optional)
+      action   : "ENGAGE" | "JAM" | "SPOOF" | "EW_SUPPRESS"    (optional)
+      lat, lon : current effector position                      (optional)
+    """
+    body = await req.json()
+    status = body.get("status", "READY")
+    valid_statuses = {"READY", "ENGAGED", "COOLDOWN", "OFFLINE"}
+    if status not in valid_statuses:
+        return JSONResponse(
+            {"ok": False, "error": f"status must be one of {sorted(valid_statuses)}"},
+            status_code=400,
+        )
+    outcome  = body.get("outcome")
+    track_id = body.get("track_id")
+
+    async with STATE_LOCK:
+        STATE["effector_status"][effector_id] = {
+            "status":     status,
+            "updated_at": _utc_now_iso(),
+            "task_id":    body.get("task_id"),
+            "lat":        body.get("lat"),
+            "lon":        body.get("lon"),
+        }
+        if outcome:
+            valid_outcomes = {"hit", "miss", "partial"}
+            if outcome not in valid_outcomes:
+                return JSONResponse(
+                    {"ok": False, "error": f"outcome must be one of {sorted(valid_outcomes)}"},
+                    status_code=400,
+                )
+            _record_outcome(body.get("task_id") or "", track_id or "", body.get("action") or "", outcome)
+
+    await broadcast({
+        "event_type": "cop.effector_status",
+        "payload": {
+            "effector_id": effector_id,
+            "status":      status,
+            "server_time": _utc_now_iso(),
+        },
+    })
+    if outcome:
+        await broadcast({
+            "event_type": "cop.effector_outcome",
+            "payload": {
+                "effector_id": effector_id,
+                "track_id":    track_id,
+                "outcome":     outcome,
+                "action":      body.get("action"),
+                "server_time": _utc_now_iso(),
+            },
+        })
+    return JSONResponse({"ok": True, "effector_id": effector_id, "status": status})
+
+
+@app.get("/api/effectors/telemetry", tags=["effectors"])
+async def api_effectors_telemetry():
+    """Current effector operational status and recent engagement outcomes."""
+    return JSONResponse({
+        "effector_status":  dict(STATE["effector_status"]),
+        "recent_outcomes":  list(EFFECTOR_OUTCOMES[-20:]),
+        "server_time":      _utc_now_iso(),
+    })
+
+
+# ── Asset PATCH ────────────────────────────────────────────────────────────────
+
+@app.patch("/api/assets/{asset_id}", tags=["assets"])
+async def api_asset_patch(
+    asset_id: str, req: Request,
+    current_user=Depends(require_operator()),
+):
+    """Partial update of an asset record (status, lat, lon, name, capability, range_km)."""
+    body = await req.json()
+    allowed = {"status", "lat", "lon", "name", "capability", "range_km"}
+    async with STATE_LOCK:
+        asset = STATE["assets"].get(asset_id)
+        if not asset:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        for k, v in body.items():
+            if k in allowed:
+                asset[k] = v
+    await broadcast({"event_type": "cop.asset", "payload": dict(asset)})
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "operator"),
+        role=getattr(current_user, "role", ""),
+        action="PATCH_ASSET", resource_type="asset", resource_id=asset_id,
+        detail={k: v for k, v in body.items() if k in allowed},
+        ip=req.client.host if req.client else "",
+    ))
+    return JSONResponse({"ok": True, "asset": asset})
 
 
 # ── Analytics ──────────────────────────────────────────────────────────────────
