@@ -109,6 +109,16 @@ function mountTopBar() {
     </div>
     <div class="nz-topbar-right">
       <span id="tb-user-badge" style="display:none"></span>
+      <button id="tts-btn" title="Toggle voice alerts (TTS)" class="nz-write-ctrl"
+        style="padding:2px 8px;font-size:10px;background:rgba(100,100,100,0.2);
+               border:1px solid rgba(150,150,150,0.4);border-radius:6px;color:#aaa;
+               cursor:pointer;font-weight:600"
+        onclick="(function(){const on=_TTS.toggle();const b=document.getElementById('tts-btn');b.style.background=on?'rgba(52,152,219,0.25)':'rgba(100,100,100,0.2)';b.style.borderColor=on?'rgba(52,152,219,0.5)':'rgba(150,150,150,0.4)';b.style.color=on?'#3498db':'#aaa';b.title=on?'Voice alerts ON — click to disable':'Voice alerts OFF — click to enable';if(on)_TTS.speak('Voice alerts enabled','low');})()">🔊</button>
+      <button id="alt-btn" title="Toggle altitude colour mode" class="nz-write-ctrl"
+        style="padding:2px 8px;font-size:10px;background:rgba(100,100,100,0.2);
+               border:1px solid rgba(150,150,150,0.4);border-radius:6px;color:#aaa;
+               cursor:pointer;font-weight:600"
+        onclick="(function(){_ALT_MODE=!_ALT_MODE;const b=document.getElementById('alt-btn');b.style.background=_ALT_MODE?'rgba(241,196,15,0.25)':'rgba(100,100,100,0.2)';b.style.borderColor=_ALT_MODE?'rgba(241,196,15,0.5)':'rgba(150,150,150,0.4)';b.style.color=_ALT_MODE?'#f1c40f':'#aaa';b.title=_ALT_MODE?'Altitude mode ON — click to disable':'Altitude mode OFF — click to enable';for(const[id,t]of UI.tracks)upsertTrack(t);})()">ALT</button>
       <button id="handover-btn" title="Shift Handover Report" class="nz-write-ctrl"
         style="padding:2px 8px;font-size:10px;background:rgba(39,174,96,0.18);
                border:1px solid rgba(39,174,96,0.4);border-radius:6px;color:#2ecc71;
@@ -252,6 +262,39 @@ function getLL(t) {
   return [lat,lon];
 }
 
+/* ── TTS (Web Speech API) ───────────────────────────────── */
+const _TTS = (function() {
+  let _enabled = false;
+  let _voices  = [];
+  if ("speechSynthesis" in window) {
+    speechSynthesis.onvoiceschanged = () => { _voices = speechSynthesis.getVoices(); };
+  }
+  function speak(text, priority) {
+    if (!_enabled || !("speechSynthesis" in window)) return;
+    if (priority === "high") speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate   = 1.1;
+    utt.volume = 1.0;
+    const eng = _voices.find(v => v.lang && v.lang.startsWith("en"));
+    if (eng) utt.voice = eng;
+    speechSynthesis.speak(utt);
+  }
+  function toggle() { _enabled = !_enabled; return _enabled; }
+  function isEnabled() { return _enabled; }
+  return { speak, toggle, isEnabled };
+})();
+
+/* ── Altitude colour mode ───────────────────────────────── */
+let _ALT_MODE = false;
+function _altColor(alt_m) {
+  const a = Math.max(0, Number(alt_m) || 0);
+  if (a < 300)  return "#27ae60"; // green  – low
+  if (a < 1500) return "#f1c40f"; // yellow – medium
+  if (a < 3000) return "#e67e22"; // orange – high
+  if (a < 6000) return "#e74c3c"; // red    – very high
+  return "#9b59b6";               // purple – extreme
+}
+
 /* ── Threat / intent colours ────────────────────────────── */
 const THREAT_COLORS = { HIGH:"#e74c3c", MEDIUM:"#f39c12", LOW:"#27ae60" };
 const INTENT_META = {
@@ -261,8 +304,8 @@ const INTENT_META = {
   unknown:       {color:"#95a5a6", icon:"?", label:"UNKNOWN"},
 };
 
-function makeThreatIcon(level, intent) {
-  const c = THREAT_COLORS[level] ?? "#2980b9";
+function makeThreatIcon(level, intent, overrideColor) {
+  const c = overrideColor ?? THREAT_COLORS[level] ?? "#2980b9";
   const im = INTENT_META[intent] ?? INTENT_META.unknown;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="42" viewBox="0 0 32 42">
     <path d="M16 0C7.16 0 0 7.16 0 16C0 28 16 42 16 42S32 28 32 16C32 7.16 24.84 0 16 0Z"
@@ -298,13 +341,16 @@ function buildTooltip(track, threat) {
   const mlColor = THREAT_COLORS[mlLevel] ?? "#6366f1";
   const annCount = (_ANNOTATIONS.get(id) ?? []).length;
   const annBadge = annCount > 0 ? ` <span style="color:#90caf9">\u{1F4AC}${annCount}</span>` : "";
+  const alt_m = kin.altitude_m != null ? `${Math.round(kin.altitude_m)} m` : "-";
+  const altStyle = _ALT_MODE ? `color:${_altColor(kin.altitude_m ?? 0)};font-weight:bold` : "";
   return `<div style="font:12px/1.5 monospace;min-width:175px">
     <b style="font-size:13px">${id}</b>${annBadge}<br>
     <span style="color:${THREAT_COLORS[level]??'#aaa'}"> ${level}</span>
     \u00a0score:<b>${score}</b>
     \u00a0<span style="color:${mlColor}">ML:${mlLevel}(${mlProb})</span><br>
     TTI:<b>${tti}</b> Vr:<b>${vr}</b> Range:<b>${range}</b><br>
-    Intent:<span style="color:${im.color}">${im.icon} ${im.label}</span>(${(iconf*100).toFixed(0)}%)<br>
+    Alt:<span style="${altStyle}">${alt_m}</span>
+    \u00a0Intent:<span style="color:${im.color}">${im.icon} ${im.label}</span>(${(iconf*100).toFixed(0)}%)<br>
     Label:${cls.label??"?"}(${cls.conf!=null?(cls.conf*100).toFixed(0)+"%":"?"}) Sensors:${sens}<br>
     Trail:${(track.history??[]).length}pts Action:<b>${action}</b>
   </div>`;
@@ -334,7 +380,8 @@ function upsertTrack(track) {
   const threat=UI.threats.get(id);
   const level =threat?.threat_level??track.threat_level??"LOW";
   const intent=track.intent??"unknown";
-  const icon  =makeThreatIcon(level, intent);
+  const altCol=_ALT_MODE ? _altColor(track.kinematics?.altitude_m ?? 0) : null;
+  const icon  =makeThreatIcon(level, intent, altCol);
   const tip   =buildTooltip(track, threat);
   const ex    =UI.trackMarkers.get(id);
   if(!ex) {
@@ -422,10 +469,18 @@ function upsertThreat(threat) {
   const marker=UI.trackMarkers.get(id), track=UI.tracks.get(id);
   if(marker&&track){
     const level=threat.threat_level??"LOW";
-    marker.setIcon(makeThreatIcon(level,track.intent??threat.intent??"unknown"));
+    const altCol2=_ALT_MODE ? _altColor(track.kinematics?.altitude_m ?? 0) : null;
+    marker.setIcon(makeThreatIcon(level,track.intent??threat.intent??"unknown",altCol2));
     marker.setTooltipContent(buildTooltip(track,threat));
     const pl=UI.trackPolylines.get(id);
     if(pl) pl.setStyle({color:THREAT_COLORS[level]??"#2980b9"});
+    // TTS: announce new HIGH threat
+    if (level === "HIGH") {
+      const prev = UI.threats.get(id);
+      if (!prev || prev.threat_level !== "HIGH") {
+        _TTS.speak(`High threat detected. Track ${id}`, "high");
+      }
+    }
   }
   _scheduleRenderThreatList();
   updateThreatIntelCard();
@@ -754,6 +809,8 @@ function pushAlert(p) {
   if (alertPanelEl) alertPanelEl.innerHTML = html;
   const marker=UI.trackMarkers.get(p.track_id);
   if(marker){ const e=marker.getElement(); if(e){e.style.filter="drop-shadow(0 0 8px red)";setTimeout(()=>{e.style.filter="";},1000);} }
+  // TTS: announce zone breach
+  _TTS.speak(`Zone breach. Track ${p.track_id} entered ${p.zone_name ?? "restricted zone"}`, "high");
 }
 
 /* ── EW alert panel ──────────────────────────────────────── */
@@ -821,8 +878,10 @@ function pushEWAlert(p) {
     const btn = document.getElementById("rtab-ew");
     if (btn) btn.click();
     _ewToast(`EW ALERT: ${p.type} — CRITICAL`, "var(--danger)");
+    _TTS.speak(`Critical EW alert. ${(p.type || "").replace("_", " ")} detected`, "high");
   } else if (p.severity === "HIGH") {
     _ewToast(`EW: ${p.type}`, "var(--warn)");
+    _TTS.speak(`EW warning. ${(p.type || "").replace("_", " ")}`, "low");
   }
 
   // Highlight the affected track on map
@@ -3964,6 +4023,88 @@ function setTabBadge(tabId, count) {
   badge.textContent = count > 99 ? "99+" : String(count);
 }
 
+/* ── Multi-node Federation panel ───────────────────────── */
+let _nodesPanelEl = null;
+let _nodesRefreshTimer = null;
+
+function mountNodesPanel() {
+  _nodesPanelEl = el("div", { id:"nodes-panel", style:{
+    fontFamily:"var(--mono)", fontSize:"11px", width:"100%",
+  }});
+  _nodesPanelEl.innerHTML = "<span style='color:var(--text-3)'>Loading…</span>";
+  RIGHT_TABS.nodes.appendChild(_nodesPanelEl);
+}
+
+async function _refreshNodesPanel() {
+  if (!_nodesPanelEl) return;
+  try {
+    const s = await fetch("/api/sync/status").then(r => r.json());
+    const peers = s.peers ?? [];
+    const stats = s.push_stats ?? {};
+    let html = `<div class="nz-section">Federation Nodes</div>`;
+    html += `<div style="color:var(--text-3);font-size:10px;margin-bottom:6px">`;
+    html += `Node: <b style="color:#3498db">${s.node_id ?? "?"}</b> &nbsp;`;
+    html += `Interval: ${s.sync_interval_s ?? 5}s &nbsp; Peers: ${peers.length}</div>`;
+
+    if (peers.length === 0) {
+      html += `<div style="color:var(--text-3);font-size:10px;margin-bottom:8px">No peers registered</div>`;
+    } else {
+      peers.forEach(p => {
+        const ps = stats[p] ?? {};
+        const ok = ps.ok ?? 0;
+        const fail = ps.fail ?? 0;
+        const last = ps.last_push_ago_s != null ? `${ps.last_push_ago_s.toFixed(0)}s ago` : "never";
+        const statusColor = fail > 0 ? "var(--warn)" : "var(--ok)";
+        html += `<div class="nz-card" style="margin-bottom:4px;border-left:3px solid ${statusColor}">
+          <div style="display:flex;align-items:center;gap:4px">
+            <span style="color:${statusColor};font-size:10px">●</span>
+            <span style="color:var(--text-1);font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis">${escHtml(p)}</span>
+            <button style="font-size:9px;padding:1px 5px;background:rgba(231,76,60,0.2);border:1px solid #e74c3c;
+                           border-radius:4px;color:#e74c3c;cursor:pointer"
+              onclick="_removePeer(${JSON.stringify(p)})">✕</button>
+          </div>
+          <div style="color:var(--text-3);font-size:9px;margin-top:2px">
+            ok:${ok} fail:${fail} last:${last}
+          </div>
+        </div>`;
+      });
+    }
+
+    // Add peer form
+    html += `<div style="margin-top:8px;display:flex;gap:4px">
+      <input id="nodes-peer-url" placeholder="http://peer:8100" style="flex:1;font-size:10px;
+             background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);
+             border-radius:4px;padding:3px 6px;color:#fff;min-width:0"/>
+      <button onclick="_addPeer()" style="font-size:10px;padding:3px 8px;background:rgba(52,152,219,0.2);
+              border:1px solid #3498db;border-radius:4px;color:#3498db;cursor:pointer;white-space:nowrap">+ Add</button>
+    </div>`;
+
+    _nodesPanelEl.innerHTML = html;
+  } catch (e) {
+    _nodesPanelEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(e.message)}</span>`;
+  }
+}
+
+async function _addPeer() {
+  const inp = document.getElementById("nodes-peer-url");
+  const url = (inp?.value ?? "").trim();
+  if (!url) return;
+  try {
+    await fetch("/api/sync/peers", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ url }) });
+    inp.value = "";
+    _refreshNodesPanel();
+  } catch (e) { alert("Failed to add peer: " + e.message); }
+}
+
+async function _removePeer(url) {
+  try {
+    await fetch("/api/sync/peers", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ url, action: "remove" }) });
+    _refreshNodesPanel();
+  } catch (e) { alert("Failed to remove peer: " + e.message); }
+}
+
 function mountRightTabContainer() {
   const TAB_DEFS = [
     { id: "threats", label: "Threats" },
@@ -3974,6 +4115,7 @@ function mountRightTabContainer() {
     { id: "ew",      label: "EW"      },
     { id: "metrics", label: "Metrics" },
     { id: "ai",      label: "AI"      },
+    { id: "nodes",   label: "Nodes"   },
   ];
   const activeTabId = { v: "threats" };
 
@@ -4090,6 +4232,10 @@ function boot(){
   mountChatToggle();
   mountAARModal();
   mountAARButton();
+  // Federation nodes panel
+  mountNodesPanel();
+  _refreshNodesPanel();
+  setInterval(_refreshNodesPanel, 10000);
   // Scenario editor
   mountScenarioEditor();
   // Admin panel (content loaded on demand)
