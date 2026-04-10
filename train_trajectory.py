@@ -230,10 +230,13 @@ if __name__ == "__main__":
                     help="Synthetic trajectory count (default 10 000)")
     ap.add_argument("--out",     default="ai/trajectory_model.pt",
                     help="Output model path")
+    ap.add_argument("--seed",    type=int, default=42,
+                    help="Random seed for reproducibility (default 42)")
     args = ap.parse_args()
 
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    print(f"[train] Random seed: {args.seed}")
 
     train(args.samples, args.epochs, args.out)

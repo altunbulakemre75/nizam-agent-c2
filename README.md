@@ -96,39 +96,83 @@ Each record contains:
 
 ## System Architecture
 
-```
-                 ┌─ radar_sim ──┐
-  world_agent ──┼─  rf_sim    ──┼─► fuser ─► cop_publisher ─► COP /ingest
-                 └─  eo_sim   ──┘                                   │
-                                                                     ▼
-  Real sensors:                                          ┌─────────────────────┐
-    ADS-B adapter ─────────────────────────────────────►│     COP Server      │
-    AIS adapter   ─────────────────────────────────────►│     (FastAPI)       │
-    REST adapter  ─────────────────────────────────────►│                     │
-                                                         │  ├─ ML Threat      │
-                                                         │  ├─ LSTM Traj.     │
-                                                         │  ├─ Tactical       │
-                                                         │  ├─ ROE            │
-                                                         │  ├─ Anomaly        │
-                                                         │  ├─ Fire Control   │
-                                                         │  └─ Lineage (SHA)  │
-                                                         └────────┬────────────┘
-                                                                  │ WebSocket
-                                                         ┌────────▼────────────┐
-                                                         │    TimescaleDB      │
-                                                         │  track_events       │
-                                                         │  threat_events      │
-                                                         │  alert_records      │
-                                                         └─────────────────────┘
-                                                                  │
-                                                         ┌────────▼────────────┐
-                                                         │    Browser UI       │
-                                                         │  ├─ Track map       │
-                                                         │  ├─ LSTM lines      │
-                                                         │  ├─ Lineage chain   │
-                                                         │  ├─ Tab panels      │
-                                                         │  └─ Multi-operator  │
-                                                         └─────────────────────┘
+```mermaid
+flowchart LR
+    subgraph SIM["Simulated Sensors"]
+        WORLD[world_agent<br/>truth source]
+        RADAR[radar_sim]
+        RF[rf_sim]
+        EO[eo_sim]
+        WORLD --> RADAR
+        WORLD --> RF
+        WORLD --> EO
+    end
+
+    subgraph REAL["Real Sensor Adapters"]
+        ADSB[ADS-B<br/>dump1090]
+        AIS[AIS<br/>NMEA-0183]
+        REST[REST<br/>HTTP poll]
+    end
+
+    FUSER[fuser<br/>multi-sensor fusion]
+    PUB[cop_publisher<br/>bounded queue]
+
+    RADAR --> FUSER
+    RF --> FUSER
+    EO --> FUSER
+    FUSER --> PUB
+
+    subgraph COP["COP Server (FastAPI)"]
+        INGEST["/ingest"]
+        AI["AI Engine<br/>(thread pool)"]
+        LINEAGE[SHA-256<br/>Hash Chain]
+        FC[Fire Control]
+        INGEST --> AI
+        AI --> LINEAGE
+        AI --> FC
+    end
+
+    PUB --> INGEST
+    ADSB --> INGEST
+    AIS --> INGEST
+    REST --> INGEST
+
+    subgraph AILAYER["AI Decision Support"]
+        ML[ML Threat<br/>RandomForest]
+        LSTM[LSTM<br/>Trajectory]
+        KAL[Kalman<br/>Predictor]
+        ANOM[Anomaly<br/>Detection]
+        COORD[Coordinated<br/>Attack]
+        TAC[Tactical<br/>Recommender]
+        ROE[ROE<br/>Advisor]
+    end
+
+    AI --> ML
+    AI --> LSTM
+    AI --> KAL
+    AI --> ANOM
+    AI --> COORD
+    AI --> TAC
+    AI --> ROE
+
+    DB[(TimescaleDB<br/>hypertables)]
+    AI --> DB
+
+    subgraph UI["Browser UI (Leaflet)"]
+        MAP[Track Map +<br/>LSTM polylines]
+        TABS[Tab Panels]
+        CHAIN[Lineage Modal]
+        OPS[Multi-operator<br/>presence]
+    end
+
+    COP -.->|WebSocket| UI
+
+    classDef sensor fill:#1e3a5f,stroke:#4a90e2,color:#fff
+    classDef ai fill:#4a1e5f,stroke:#a04ae2,color:#fff
+    classDef store fill:#1e5f3a,stroke:#4ae290,color:#fff
+    class RADAR,RF,EO,WORLD,ADSB,AIS,REST sensor
+    class ML,LSTM,KAL,ANOM,COORD,TAC,ROE ai
+    class DB store
 ```
 
 **Key design properties:**
@@ -285,6 +329,37 @@ python scripts/smoke_test.py --duration 12   # end-to-end
 ```
 
 CI runs on every push to `main` (GitHub Actions, Python 3.10–3.12).
+
+---
+
+## Scenario Comparison & Load Tests
+
+### Multi-scenario AAR comparison
+
+Run several scenarios sequentially against a live COP server, then print a side-by-side AAR comparison and save the full reports:
+
+```bash
+# COP server must be running first (python start.py ...)
+python scripts/compare_scenarios.py \
+    --cop_url http://127.0.0.1:8100 \
+    --duration 60 \
+    --scenarios scenarios/single_drone.json \
+                scenarios/swarm_attack.json \
+                scenarios/coordinated_attack.json \
+                scenarios/multi_axis_attack.json \
+                scenarios/decoy_attack.json
+```
+
+For each scenario the runner: resets COP state → spawns the sensor pipeline → waits for it to exit → fetches `/api/ai/aar` → extracts key metrics (peak threat, coordinated attacks, zone breaches, tasks, risk level). Output is a comparison table on stdout plus a full JSON dump under `reports/comparison_<timestamp>.json`.
+
+### 1000-track load test
+
+```bash
+# COP server must be running first
+python scripts/load_test.py --tracks 1000 --duration 30 --rate_hz 2 --workers 32
+```
+
+Measures throughput, p50/p95/p99 latency, and error rate against `/ingest`. Exits non-zero if error rate exceeds 5%.
 
 ---
 
