@@ -75,7 +75,7 @@ try:
         TrackEvent, ThreatEvent, WaypointRecord, ZoneRecord,
     )
     from db.init_db import init_db
-    from auth.deps import AUTH_ENABLED, require_operator, require_admin
+    from auth.deps import AUTH_ENABLED, require_operator, require_admin, require_viewer
     from auth.router import router as auth_router
     _DB_AVAILABLE = True
 except ImportError:
@@ -85,6 +85,7 @@ except ImportError:
     def get_current_user(): return None
     def require_operator(): return lambda: None
     def require_admin():    return lambda: None
+    def require_viewer():   return lambda: None
 
 from cop import audit as cop_audit
 from cop import analytics as cop_analytics
@@ -189,6 +190,7 @@ STATE: Dict[str, Any] = {
     "assets":      {},
     "tasks":       {},
     "waypoints":   {},
+    "annotations": {},   # track_id → [list of annotation dicts]
     "events_tail": [],
 }
 
@@ -1127,6 +1129,72 @@ async def api_track_release(track_id: str, req: Request, _=Depends(require_opera
     return JSONResponse({"ok": True, "track_id": track_id})
 
 
+# ── Track annotations ────────────────────────────────────────
+
+@app.get("/api/tracks/{track_id}/annotations")
+async def api_annotations_get(track_id: str):
+    """Return all annotations for a track."""
+    return JSONResponse({"annotations": STATE["annotations"].get(track_id, [])})
+
+
+@app.post("/api/tracks/{track_id}/annotations")
+async def api_annotations_create(
+    track_id: str, req: Request, current_user=Depends(require_operator()),
+):
+    """Add an operator annotation to a track."""
+    body = await req.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "text required"}, status_code=400)
+
+    annotation = {
+        "id":         _new_id("ann-"),
+        "track_id":   track_id,
+        "text":       text[:500],
+        "author":     getattr(current_user, "username", "anonymous"),
+        "created_at": _utc_now_iso(),
+    }
+    async with STATE_LOCK:
+        STATE["annotations"].setdefault(track_id, []).append(annotation)
+
+    ev = {"event_type": "cop.annotation", "payload": annotation}
+    _append_event_tail(ev)
+    await broadcast(ev)
+    asyncio.create_task(cop_audit.log_action(
+        username=annotation["author"],
+        role=getattr(current_user, "role", ""),
+        action="CREATE_ANNOTATION", resource_type="track", resource_id=track_id,
+        detail={"text": text[:80]},
+        ip=req.client.host if req.client else "",
+    ))
+    return JSONResponse({"ok": True, "annotation": annotation})
+
+
+@app.delete("/api/tracks/{track_id}/annotations/{ann_id}")
+async def api_annotations_delete(
+    track_id: str, ann_id: str, current_user=Depends(require_operator()),
+):
+    """Delete an annotation (author or admin only)."""
+    uname = getattr(current_user, "username", "anonymous")
+    role  = getattr(current_user, "role", "")
+    async with STATE_LOCK:
+        anns = STATE["annotations"].get(track_id, [])
+        target = next((a for a in anns if a["id"] == ann_id), None)
+        if not target:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        # Only author or admin can delete
+        is_admin = str(role).upper() == "ADMIN"
+        if not is_admin and target["author"] != uname:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        STATE["annotations"][track_id] = [a for a in anns if a["id"] != ann_id]
+
+    ev = {"event_type": "cop.annotation_removed",
+          "payload": {"track_id": track_id, "id": ann_id}}
+    _append_event_tail(ev)
+    await broadcast(ev)
+    return JSONResponse({"ok": True})
+
+
 # ── Waypoints ────────────────────────────────────────────────
 
 @app.get("/api/waypoints")
@@ -1927,6 +1995,78 @@ async def api_ai_ml_train():
         return JSONResponse({"ok": True, "result": result})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/handover")
+async def api_handover(current_user=Depends(require_viewer())):
+    """
+    Shift handover report snapshot.
+
+    Returns structured JSON describing the current COP state:
+    active tracks (with threat levels), zones, recent alerts,
+    pending tasks, and annotation counts per track.
+    Intended to be rendered client-side as a printable PDF report.
+    """
+    operator = getattr(current_user, "username", "anonymous")
+
+    # Active tracks with threat summary
+    track_rows = []
+    for tid, tr in STATE["tracks"].items():
+        threat = STATE["threats"].get(tid) or {}
+        anns   = STATE["annotations"].get(tid, [])
+        track_rows.append({
+            "id":           tid,
+            "lat":          (tr.get("kinematics") or {}).get("lat"),
+            "lon":          (tr.get("kinematics") or {}).get("lon"),
+            "threat_level": threat.get("threat_level") or tr.get("threat_level", "LOW"),
+            "score":        threat.get("score"),
+            "action":       threat.get("recommended_action"),
+            "annotation_count": len(anns),
+        })
+    track_rows.sort(key=lambda r: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(r["threat_level"], 3))
+
+    # Active zones
+    zone_rows = [
+        {"id": z.get("id"), "name": z.get("name"), "type": z.get("type", "EXCLUSION")}
+        for z in STATE["zones"].values()
+    ]
+
+    # Recent alerts (last 30 from event tail)
+    recent_alerts = [
+        ev for ev in list(STATE["events_tail"])[-100:]
+        if ev.get("event_type") in ("cop.alert", "cop.ew_alert", "cop.track_merged")
+    ][-30:]
+
+    # Pending tasks
+    pending_tasks = [
+        {
+            "id":          t.get("id"),
+            "track_id":    t.get("track_id"),
+            "action":      t.get("action"),
+            "status":      t.get("status"),
+            "proposed_by": t.get("proposed_by"),
+        }
+        for t in STATE["tasks"].values()
+        if t.get("status") == "PENDING"
+    ]
+
+    return JSONResponse({
+        "generated_at": _utc_now_iso(),
+        "generated_by": operator,
+        "node_id":      os.environ.get("NODE_ID", "cop-node-01"),
+        "tracks":       track_rows,
+        "zones":        zone_rows,
+        "recent_alerts": [ev.get("payload", {}) for ev in recent_alerts],
+        "pending_tasks": pending_tasks,
+        "summary": {
+            "total_tracks": len(track_rows),
+            "high_threats": sum(1 for r in track_rows if r["threat_level"] == "HIGH"),
+            "medium_threats": sum(1 for r in track_rows if r["threat_level"] == "MEDIUM"),
+            "total_zones":  len(zone_rows),
+            "pending_tasks": len(pending_tasks),
+            "annotated_tracks": sum(1 for r in track_rows if r["annotation_count"] > 0),
+        },
+    })
 
 
 @app.get("/api/metrics")

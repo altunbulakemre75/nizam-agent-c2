@@ -109,6 +109,11 @@ function mountTopBar() {
     </div>
     <div class="nz-topbar-right">
       <span id="tb-user-badge" style="display:none"></span>
+      <button id="handover-btn" title="Shift Handover Report" class="nz-write-ctrl"
+        style="padding:2px 8px;font-size:10px;background:rgba(39,174,96,0.18);
+               border:1px solid rgba(39,174,96,0.4);border-radius:6px;color:#2ecc71;
+               cursor:pointer;font-weight:600"
+        onclick="openHandoverModal()">HANDOVER</button>
       <button id="admin-panel-btn" title="User Management"
         style="display:none;padding:2px 8px;font-size:10px;background:rgba(231,76,60,0.2);
                border:1px solid rgba(231,76,60,0.4);border-radius:6px;color:#e74c3c;
@@ -291,8 +296,10 @@ function buildTooltip(track, threat) {
   const mlLevel = ml?.ml_level ?? "-";
   const mlProb  = ml?.ml_probability != null ? `${(ml.ml_probability*100).toFixed(0)}%` : "-";
   const mlColor = THREAT_COLORS[mlLevel] ?? "#6366f1";
+  const annCount = (_ANNOTATIONS.get(id) ?? []).length;
+  const annBadge = annCount > 0 ? ` <span style="color:#90caf9">\u{1F4AC}${annCount}</span>` : "";
   return `<div style="font:12px/1.5 monospace;min-width:175px">
-    <b style="font-size:13px">${id}</b><br>
+    <b style="font-size:13px">${id}</b>${annBadge}<br>
     <span style="color:${THREAT_COLORS[level]??'#aaa'}"> ${level}</span>
     \u00a0score:<b>${score}</b>
     \u00a0<span style="color:${mlColor}">ML:${mlLevel}(${mlProb})</span><br>
@@ -1030,6 +1037,8 @@ const CopEngine = (() => {
       case "cop.waypoints_cleared":return clearWaypoints();
       case "cop.ew_alert":        return pushEWAlert(ev.payload);
       case "cop.track_merged":    return pushTrackMerged(ev.payload);
+      case "cop.annotation":      return _wsAnnotation(ev.payload);
+      case "cop.annotation_removed": return _wsAnnotationRemoved(ev.payload);
     }
   }
   function onEvent(ev){
@@ -1977,6 +1986,9 @@ function mountChatToggle() { /* replaced by AI sidebar tab */ }
 let timelinePopupEl = null;
 let timelineCurrentTrack = null;
 
+// Track annotation store: track_id → [annotation, ...]
+const _ANNOTATIONS = new Map();
+
 function mountTimelinePopup() {
   timelinePopupEl = el("div", { id:"timeline-popup", style:{
     display:"none", position:"fixed", bottom:"60px", left:"50%",
@@ -1995,12 +2007,104 @@ function mountTimelinePopup() {
     </div>
     <canvas id="tl-canvas" width="480" height="140" style="width:100%;height:140px;border-radius:6px;background:rgba(0,0,0,0.3)"></canvas>
     <div id="tl-legend" style="margin-top:4px;opacity:.7;font-size:9px"></div>
+    <div id="tl-ann-section" style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.1);padding-top:8px">
+      <div style="font-weight:600;margin-bottom:6px;font-size:11px;opacity:.8">&#x1F4AC; Operator Notes</div>
+      <div id="tl-ann-list" style="max-height:100px;overflow-y:auto;margin-bottom:6px"></div>
+      <div class="nz-write-ctrl" style="display:flex;gap:6px">
+        <input id="tl-ann-input" type="text" placeholder="Add a note..." maxlength="500"
+          style="flex:1;padding:5px 8px;border-radius:5px;border:1px solid rgba(255,255,255,0.15);
+                 background:rgba(255,255,255,0.06);color:white;font-size:11px;outline:none"/>
+        <button id="tl-ann-btn" style="padding:5px 10px;border-radius:5px;border:none;
+          background:var(--accent);color:white;cursor:pointer;font-size:11px;font-weight:600">Add</button>
+      </div>
+    </div>
   `;
   document.body.appendChild(timelinePopupEl);
   document.getElementById("tl-close").addEventListener("click", () => {
     timelinePopupEl.style.display = "none";
     timelineCurrentTrack = null;
   });
+  document.getElementById("tl-ann-btn").addEventListener("click", _tlAddAnnotation);
+  document.getElementById("tl-ann-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") _tlAddAnnotation();
+  });
+}
+
+function _tlRenderList(listEl, anns) {
+  if (!listEl) return;
+  if (!anns || anns.length === 0) {
+    listEl.innerHTML = '<span style="opacity:.4;font-size:10px">No notes yet.</span>';
+    return;
+  }
+  listEl.innerHTML = anns.map(a => `
+    <div style="padding:4px 6px;margin-bottom:3px;background:rgba(255,255,255,0.05);border-radius:4px">
+      <b style="color:#90caf9">${escHtml(a.author ?? a.username ?? "?")}</b>: ${escHtml(a.text ?? "")}
+      <span style="opacity:.4;font-size:9px;margin-left:6px">${a.created_at ? new Date(a.created_at).toLocaleTimeString() : ""}</span>
+    </div>`).join("");
+  listEl.scrollTop = listEl.scrollHeight;
+}
+
+async function _tlRenderAnnotations(trackId) {
+  const list = document.getElementById("tl-ann-list");
+  if (!list) return;
+  try {
+    const data = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}/annotations`).then(r => r.json());
+    const anns = data.annotations ?? [];
+    _ANNOTATIONS.set(String(trackId), anns);
+    _tlRenderList(list, anns);
+    _updateAnnotationBadge(String(trackId));
+  } catch {
+    list.innerHTML = '<span style="opacity:.4;font-size:10px">Failed to load notes.</span>';
+  }
+}
+
+async function _tlAddAnnotation() {
+  if (!timelineCurrentTrack) return;
+  const inp = document.getElementById("tl-ann-input");
+  const text = inp?.value?.trim();
+  if (!text) return;
+  inp.value = "";
+  try {
+    await authFetch(`/api/tracks/${encodeURIComponent(timelineCurrentTrack)}/annotations`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    await _tlRenderAnnotations(timelineCurrentTrack);
+  } catch (err) {
+    console.warn("annotation add failed", err);
+  }
+}
+
+function _updateAnnotationBadge(trackId) {
+  const m = UI.trackMarkers.get(String(trackId));
+  if (!m) return;
+  const track = UI.tracks.get(String(trackId));
+  const threat = UI.threats.get(String(trackId));
+  if (track) m.setTooltipContent(buildTooltip(track, threat));
+}
+
+function _wsAnnotation(payload) {
+  const tid = String(payload?.track_id ?? "");
+  if (!tid) return;
+  const existing = _ANNOTATIONS.get(tid) ?? [];
+  existing.push(payload);
+  _ANNOTATIONS.set(tid, existing);
+  _updateAnnotationBadge(tid);
+  if (timelineCurrentTrack === tid) {
+    _tlRenderList(document.getElementById("tl-ann-list"), existing);
+  }
+}
+
+function _wsAnnotationRemoved(payload) {
+  const tid  = String(payload?.track_id ?? "");
+  const aid  = payload?.id ?? payload?.annotation_id;
+  if (!tid || aid == null) return;
+  const existing = (_ANNOTATIONS.get(tid) ?? []).filter(a => a.id !== aid);
+  _ANNOTATIONS.set(tid, existing);
+  _updateAnnotationBadge(tid);
+  if (timelineCurrentTrack === tid) {
+    _tlRenderList(document.getElementById("tl-ann-list"), existing);
+  }
 }
 
 function openTimeline(trackId) {
@@ -2009,6 +2113,7 @@ function openTimeline(trackId) {
   document.getElementById("tl-title").textContent = `Timeline: ${trackId}`;
   timelinePopupEl.style.display = "block";
   fetchAndDrawTimeline(trackId);
+  _tlRenderAnnotations(trackId);
 }
 
 /* ── Decision Lineage Modal ─────────────────────────────── */
@@ -3296,6 +3401,208 @@ async function amRefresh(listEl) {
   } catch(e) {
     listEl.textContent = "Error: " + e.message;
   }
+}
+
+/* ── Shift Handover Report ───────────────────────────────── */
+
+let _handoverModalEl = null;
+
+function _mountHandoverModal() {
+  if (_handoverModalEl) return;
+  _handoverModalEl = el("div", { id:"handover-modal", style:{
+    display:"none", position:"fixed", top:"0", left:"0", right:"0", bottom:"0",
+    zIndex:"10100", background:"rgba(0,0,0,0.7)",
+    overflow:"auto", padding:"20px",
+  }});
+  document.body.appendChild(_handoverModalEl);
+  _handoverModalEl.addEventListener("click", e => {
+    if (e.target === _handoverModalEl) _handoverModalEl.style.display = "none";
+  });
+}
+
+async function openHandoverModal() {
+  _mountHandoverModal();
+  _handoverModalEl.innerHTML = `
+    <div style="max-width:800px;margin:0 auto;background:rgba(10,12,25,0.98);
+                border-radius:12px;border:1px solid rgba(100,150,255,0.2);
+                padding:0;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,0.8)">
+      <div style="background:rgba(255,255,255,0.04);padding:14px 20px;
+                  display:flex;justify-content:space-between;align-items:center;
+                  border-bottom:1px solid rgba(255,255,255,0.08)">
+        <span style="font-size:15px;font-weight:700;color:#e0e0e0">Shift Handover Report</span>
+        <div style="display:flex;gap:8px">
+          <button id="ho-print-btn" style="padding:5px 14px;font-size:11px;font-weight:600;
+            background:rgba(39,174,96,0.2);border:1px solid rgba(39,174,96,0.5);
+            border-radius:6px;color:#2ecc71;cursor:pointer">Print / Save PDF</button>
+          <button id="ho-close-btn" style="padding:5px 14px;font-size:11px;
+            background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);
+            border-radius:6px;color:#aaa;cursor:pointer">Close</button>
+        </div>
+      </div>
+      <div id="ho-body" style="padding:20px;font-family:ui-sans-serif,system-ui,Arial;
+                               font-size:12px;color:#e0e0e0;line-height:1.6">
+        <span style="opacity:.5">Loading...</span>
+      </div>
+    </div>
+  `;
+  _handoverModalEl.style.display = "block";
+  document.getElementById("ho-close-btn").addEventListener("click", () => {
+    _handoverModalEl.style.display = "none";
+  });
+  document.getElementById("ho-print-btn").addEventListener("click", _handoverPrint);
+
+  try {
+    const data = await authFetch("/api/handover").then(r => r.json());
+    _renderHandoverBody(document.getElementById("ho-body"), data);
+  } catch(e) {
+    document.getElementById("ho-body").innerHTML =
+      `<span style="color:#e74c3c">Failed to load handover data: ${escHtml(e.message)}</span>`;
+  }
+}
+
+function _renderHandoverBody(bodyEl, d) {
+  const s = d.summary ?? {};
+  const ts = new Date(d.generated_at).toLocaleString();
+  const tlColors = { HIGH:"#e74c3c", MEDIUM:"#f39c12", LOW:"#27ae60" };
+
+  bodyEl.innerHTML = `
+    <!-- Header -->
+    <div style="border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:12px;margin-bottom:16px">
+      <div style="font-size:18px;font-weight:700;color:#fff;margin-bottom:4px">NIZAM COP — Shift Handover</div>
+      <div style="opacity:.6;font-size:11px">
+        Generated: <b>${escHtml(ts)}</b> &nbsp;|&nbsp;
+        Operator: <b>${escHtml(d.generated_by ?? "?")}</b> &nbsp;|&nbsp;
+        Node: <b>${escHtml(d.node_id ?? "?")}</b>
+      </div>
+    </div>
+
+    <!-- Summary KPIs -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px">
+      ${_hoKpi("Total Tracks", s.total_tracks ?? 0, "#4fc3f7")}
+      ${_hoKpi("HIGH Threats", s.high_threats ?? 0, "#e74c3c")}
+      ${_hoKpi("MEDIUM Threats", s.medium_threats ?? 0, "#f39c12")}
+      ${_hoKpi("Active Zones", s.total_zones ?? 0, "#66bb6a")}
+      ${_hoKpi("Pending Tasks", s.pending_tasks ?? 0, "#ff9800")}
+      ${_hoKpi("Annotated Tracks", s.annotated_tracks ?? 0, "#9c27b0")}
+    </div>
+
+    <!-- Tracks table -->
+    <div style="margin-bottom:18px">
+      <div style="font-weight:600;font-size:12px;color:#90caf9;margin-bottom:6px;
+                  border-bottom:1px solid rgba(144,202,249,0.2);padding-bottom:4px">
+        Active Tracks (${(d.tracks ?? []).length})
+      </div>
+      ${(d.tracks ?? []).length === 0
+        ? '<span style="opacity:.4">No active tracks.</span>'
+        : `<table style="width:100%;border-collapse:collapse;font-size:11px">
+            <tr style="opacity:.5;text-align:left">
+              <th style="padding:3px 8px">ID</th>
+              <th style="padding:3px 8px">Threat</th>
+              <th style="padding:3px 8px">Score</th>
+              <th style="padding:3px 8px">Action</th>
+              <th style="padding:3px 8px">Notes</th>
+            </tr>
+            ${(d.tracks ?? []).map(t => `
+              <tr style="border-top:1px solid rgba(255,255,255,0.05)">
+                <td style="padding:3px 8px;font-weight:600;font-family:monospace">${escHtml(t.id)}</td>
+                <td style="padding:3px 8px;color:${tlColors[t.threat_level]??'#aaa'}">${escHtml(t.threat_level ?? "-")}</td>
+                <td style="padding:3px 8px">${t.score != null ? Number(t.score).toFixed(2) : "-"}</td>
+                <td style="padding:3px 8px;opacity:.8">${escHtml(t.action ?? "-")}</td>
+                <td style="padding:3px 8px">${t.annotation_count > 0 ? `\u{1F4AC}${t.annotation_count}` : "-"}</td>
+              </tr>`).join("")}
+          </table>`}
+    </div>
+
+    <!-- Zones -->
+    <div style="margin-bottom:18px">
+      <div style="font-weight:600;font-size:12px;color:#90caf9;margin-bottom:6px;
+                  border-bottom:1px solid rgba(144,202,249,0.2);padding-bottom:4px">
+        Active Zones (${(d.zones ?? []).length})
+      </div>
+      ${(d.zones ?? []).length === 0
+        ? '<span style="opacity:.4">No active zones.</span>'
+        : (d.zones ?? []).map(z =>
+            `<span style="display:inline-block;margin:2px 4px 2px 0;padding:2px 8px;
+              border-radius:12px;background:rgba(102,187,106,0.15);
+              border:1px solid rgba(102,187,106,0.3);font-size:11px">
+              ${escHtml(z.name ?? z.id)} <span style="opacity:.5">(${escHtml(z.type ?? "")})</span>
+            </span>`).join("")}
+    </div>
+
+    <!-- Pending Tasks -->
+    <div style="margin-bottom:18px">
+      <div style="font-weight:600;font-size:12px;color:#90caf9;margin-bottom:6px;
+                  border-bottom:1px solid rgba(144,202,249,0.2);padding-bottom:4px">
+        Pending Tasks (${(d.pending_tasks ?? []).length})
+      </div>
+      ${(d.pending_tasks ?? []).length === 0
+        ? '<span style="opacity:.4">No pending tasks.</span>'
+        : `<table style="width:100%;border-collapse:collapse;font-size:11px">
+            <tr style="opacity:.5;text-align:left">
+              <th style="padding:3px 8px">ID</th>
+              <th style="padding:3px 8px">Track</th>
+              <th style="padding:3px 8px">Action</th>
+              <th style="padding:3px 8px">Proposed By</th>
+            </tr>
+            ${(d.pending_tasks ?? []).map(t => `
+              <tr style="border-top:1px solid rgba(255,255,255,0.05)">
+                <td style="padding:3px 8px;font-family:monospace;font-size:10px;opacity:.7">${escHtml(t.id ?? "-")}</td>
+                <td style="padding:3px 8px;font-weight:600">${escHtml(t.track_id ?? "-")}</td>
+                <td style="padding:3px 8px">${escHtml(t.action ?? "-")}</td>
+                <td style="padding:3px 8px;opacity:.7">${escHtml(t.proposed_by ?? "-")}</td>
+              </tr>`).join("")}
+          </table>`}
+    </div>
+
+    <!-- Recent Alerts -->
+    <div>
+      <div style="font-weight:600;font-size:12px;color:#90caf9;margin-bottom:6px;
+                  border-bottom:1px solid rgba(144,202,249,0.2);padding-bottom:4px">
+        Recent Alerts (last ${(d.recent_alerts ?? []).length})
+      </div>
+      ${(d.recent_alerts ?? []).length === 0
+        ? '<span style="opacity:.4">No recent alerts.</span>'
+        : (d.recent_alerts ?? []).map(a => {
+            const msg  = a.message ?? a.alert_type ?? a.subtype ?? JSON.stringify(a).slice(0,80);
+            const color = (a.threat_level === "HIGH" || a.severity === "HIGH") ? "#e74c3c"
+                        : (a.threat_level === "MEDIUM") ? "#f39c12" : "#aaa";
+            return `<div style="padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);
+                                font-size:11px;color:${color}">
+              ${escHtml(msg)}
+            </div>`;
+          }).join("")}
+    </div>
+  `;
+}
+
+function _hoKpi(label, value, color) {
+  return `<div style="background:rgba(255,255,255,0.04);border-radius:8px;
+                      padding:10px 14px;border:1px solid rgba(255,255,255,0.07);
+                      text-align:center">
+    <div style="font-size:22px;font-weight:700;color:${color}">${value}</div>
+    <div style="font-size:10px;opacity:.6;margin-top:2px">${escHtml(label)}</div>
+  </div>`;
+}
+
+function _handoverPrint() {
+  const body = document.getElementById("ho-body");
+  if (!body) return;
+  const w = window.open("", "_blank", "width=900,height=700");
+  w.document.write(`
+    <!DOCTYPE html><html><head>
+    <meta charset="UTF-8">
+    <title>NIZAM COP — Shift Handover Report</title>
+    <style>
+      body { background:#0a0c19; color:#e0e0e0; font-family: Arial, sans-serif;
+             font-size:12px; padding:20px; margin:0; }
+      table { width:100%; border-collapse:collapse; }
+      th, td { padding:4px 8px; text-align:left; }
+      @media print { body { background:#fff; color:#000; } }
+    </style>
+    </head><body>${body.innerHTML}</body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(() => { w.print(); }, 400);
 }
 
 /* ── Mobile FAB bar (≤767px only, CSS hides it on desktop) ── */
