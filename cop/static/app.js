@@ -2797,6 +2797,241 @@ function mountReplayList() {
   document.body.appendChild(replayListEl);
 }
 
+/* ── Scenario Editor ────────────────────────────────────────── */
+let scenarioModalEl = null;
+let _scenarioEntities = [];  // working copy of entity list
+
+function mountScenarioEditor() {
+  // Button in topbar area
+  const btn = el("button", {
+    id: "scenario-open-btn",
+    onclick: () => openScenarioEditor(),
+    style: {
+      position:"fixed", top:"12px", left:"160px", zIndex:"9999",
+      background:"linear-gradient(135deg,#0ea5e9,#0369a1)", color:"#fff",
+      border:"none", borderRadius:"8px", padding:"8px 14px",
+      cursor:"pointer", fontWeight:"bold", fontSize:"12px",
+      fontFamily:"var(--font)", boxShadow:"0 2px 10px rgba(14,165,233,0.4)",
+    }
+  }, ["Senaryolar"]);
+  document.body.appendChild(btn);
+
+  // Modal
+  scenarioModalEl = el("div", { id:"scenario-modal", style:{
+    display:"none", position:"fixed", inset:"0", zIndex:"10020",
+    background:"rgba(0,0,0,0.88)", overflowY:"auto",
+  }});
+  scenarioModalEl.innerHTML = `
+    <div style="max-width:860px;margin:30px auto;padding:24px 28px;
+         background:var(--bg-1);border-radius:14px;border:1px solid var(--border);color:var(--text-1);font-family:var(--font)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0;font-size:17px;color:var(--text-1)">Senaryo Editoru</h2>
+        <span id="sc-close" style="cursor:pointer;font-size:20px;color:var(--text-3);padding:0 8px">&times;</span>
+      </div>
+      <div style="display:grid;grid-template-columns:240px 1fr;gap:16px">
+        <!-- Left: scenario list -->
+        <div>
+          <div class="nz-section">MEVCUT SENARYOLAR</div>
+          <div id="sc-list" style="display:flex;flex-direction:column;gap:4px;margin-top:6px"></div>
+          <button class="nz-btn" style="width:100%;margin-top:10px;font-size:11px" onclick="scNewScenario()">+ Yeni Senaryo</button>
+        </div>
+        <!-- Right: editor form -->
+        <div id="sc-editor">
+          <div style="color:var(--text-3);font-size:12px;padding:20px 0">Sol taraftan bir senaryo secin veya yeni olusturun.</div>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(scenarioModalEl);
+  document.getElementById("sc-close").addEventListener("click", () => {
+    scenarioModalEl.style.display = "none";
+  });
+}
+
+async function openScenarioEditor() {
+  if (!scenarioModalEl) return;
+  scenarioModalEl.style.display = "block";
+  await scLoadList();
+}
+
+async function scLoadList() {
+  const listEl = document.getElementById("sc-list");
+  if (!listEl) return;
+  listEl.innerHTML = `<span style="color:var(--text-3);font-size:11px">Yukleniyor...</span>`;
+  try {
+    const resp = await fetch("/api/scenarios");
+    const data = await resp.json();
+    const scenarios = data.scenarios || [];
+    if (scenarios.length === 0) {
+      listEl.innerHTML = `<span style="color:var(--text-3);font-size:11px">Senaryo yok</span>`;
+      return;
+    }
+    listEl.innerHTML = "";
+    scenarios.forEach(sc => {
+      const item = el("div", {
+        style: {
+          padding:"7px 10px", borderRadius:"6px", cursor:"pointer",
+          background:"var(--bg-2)", border:"1px solid var(--border)",
+          fontSize:"11px", lineHeight:"1.5",
+        },
+        onclick: () => scLoadEditor(sc.name),
+      });
+      item.innerHTML = `
+        <div style="font-weight:600;color:var(--text-1)">${escHtml(sc.name)}</div>
+        <div style="color:var(--text-3);font-size:10px">${escHtml(sc.description || "")} | ${sc.entity_count} hedef | ${sc.duration_s}s</div>`;
+      listEl.appendChild(item);
+    });
+  } catch(e) {
+    listEl.innerHTML = `<span style="color:var(--danger);font-size:11px">Hata: ${escHtml(e.message)}</span>`;
+  }
+}
+
+async function scLoadEditor(name) {
+  const editorEl = document.getElementById("sc-editor");
+  if (!editorEl) return;
+  try {
+    const resp = await fetch(`/api/scenarios/${encodeURIComponent(name)}`);
+    const sc = await resp.json();
+    _scenarioEntities = (sc.entities || []).map(e => ({...e}));
+    scRenderEditor(sc);
+  } catch(e) {
+    editorEl.innerHTML = `<span style="color:var(--danger)">Hata: ${escHtml(e.message)}</span>`;
+  }
+}
+
+function scNewScenario() {
+  _scenarioEntities = [];
+  scRenderEditor({
+    name: "", description: "", duration_s: 300, rate_hz: 1.0, entities: []
+  });
+}
+
+function scRenderEditor(sc) {
+  const editorEl = document.getElementById("sc-editor");
+  if (!editorEl) return;
+
+  editorEl.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      <div>
+        <label style="font-size:10px;color:var(--text-3)">Ad</label>
+        <input id="sc-name" class="nz-input" style="width:100%;margin-top:2px" value="${escHtml(sc.name || "")}" placeholder="ornek_senaryo">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--text-3)">Aciklama</label>
+        <input id="sc-desc" class="nz-input" style="width:100%;margin-top:2px" value="${escHtml(sc.description || "")}" placeholder="Kisa aciklama">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--text-3)">Sure (saniye)</label>
+        <input id="sc-dur" class="nz-input" type="number" style="width:100%;margin-top:2px" value="${sc.duration_s || 300}">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--text-3)">Hiz (Hz)</label>
+        <input id="sc-rate" class="nz-input" type="number" step="0.1" style="width:100%;margin-top:2px" value="${sc.rate_hz || 1.0}">
+      </div>
+    </div>
+
+    <div class="nz-section" style="margin-bottom:6px">HEDEFLER</div>
+    <div id="sc-entities"></div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button class="nz-btn" style="font-size:11px" onclick="scAddEntity()">+ Hedef Ekle</button>
+      <button class="nz-btn c-ok" style="font-size:11px;margin-left:auto" onclick="scSave()">Kaydet</button>
+      <button class="nz-btn c-danger" style="font-size:11px" onclick="scDelete()">Sil</button>
+    </div>
+    <div id="sc-run-hint" style="margin-top:10px;font-size:10px;color:var(--text-3);font-family:var(--mono);
+      background:var(--bg-2);padding:8px 10px;border-radius:6px;display:none"></div>
+    <div id="sc-msg" style="margin-top:6px;font-size:11px"></div>`;
+
+  scRenderEntities();
+}
+
+function scRenderEntities() {
+  const container = document.getElementById("sc-entities");
+  if (!container) return;
+  if (_scenarioEntities.length === 0) {
+    container.innerHTML = `<div style="color:var(--text-3);font-size:11px;padding:4px 0">Hedef yok — eklemek icin + butonuna basin</div>`;
+    return;
+  }
+  const LABELS = ["drone","aircraft","vehicle","boat","missile"];
+  container.innerHTML = `
+    <div style="display:grid;grid-template-columns:100px 80px 70px 60px 65px 65px 30px;gap:4px;margin-bottom:4px;font-size:9px;color:var(--text-3)">
+      <span>ID</span><span>Tip</span><span>Mesafe(m)</span><span>Az(deg)</span><span>Hiz(m/s)</span><span>Yon(deg)</span><span></span>
+    </div>` +
+    _scenarioEntities.map((e, i) => `
+    <div style="display:grid;grid-template-columns:100px 80px 70px 60px 65px 65px 30px;gap:4px;margin-bottom:3px;align-items:center">
+      <input class="nz-input" style="font-size:10px;padding:3px 5px" value="${escHtml(e.entity_id||"")}" oninput="_scenarioEntities[${i}].entity_id=this.value">
+      <select class="nz-select" style="font-size:10px;padding:3px 4px" onchange="_scenarioEntities[${i}].label=this.value">
+        ${LABELS.map(l=>`<option value="${l}"${e.label===l?" selected":""}>${l}</option>`).join("")}
+      </select>
+      <input class="nz-input" type="number" style="font-size:10px;padding:3px 5px" value="${e.range_m||1000}" oninput="_scenarioEntities[${i}].range_m=+this.value">
+      <input class="nz-input" type="number" style="font-size:10px;padding:3px 5px" value="${e.az_deg||0}" oninput="_scenarioEntities[${i}].az_deg=+this.value">
+      <input class="nz-input" type="number" style="font-size:10px;padding:3px 5px" value="${e.speed_mps||20}" oninput="_scenarioEntities[${i}].speed_mps=+this.value">
+      <input class="nz-input" type="number" style="font-size:10px;padding:3px 5px" value="${e.heading_deg||180}" oninput="_scenarioEntities[${i}].heading_deg=+this.value">
+      <button class="nz-btn c-danger" style="font-size:10px;padding:2px 6px" onclick="scRemoveEntity(${i})">×</button>
+    </div>`).join("");
+}
+
+function scAddEntity() {
+  const i = _scenarioEntities.length;
+  _scenarioEntities.push({
+    entity_id: `E-NEW-${String(i+1).padStart(2,"0")}`,
+    label: "drone", range_m: 1500, az_deg: 0, speed_mps: 20, heading_deg: 180,
+  });
+  scRenderEntities();
+}
+
+function scRemoveEntity(i) {
+  _scenarioEntities.splice(i, 1);
+  scRenderEntities();
+}
+
+async function scSave() {
+  const name = (document.getElementById("sc-name")?.value || "").trim();
+  const msg = document.getElementById("sc-msg");
+  if (!name) { if(msg) { msg.textContent = "Ad gerekli!"; msg.style.color = "var(--danger)"; } return; }
+  const body = {
+    name,
+    description: document.getElementById("sc-desc")?.value || "",
+    duration_s:  +(document.getElementById("sc-dur")?.value  || 300),
+    rate_hz:     +(document.getElementById("sc-rate")?.value || 1.0),
+    entities:    _scenarioEntities,
+  };
+  try {
+    const resp = await fetch("/api/scenarios", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      if(msg) { msg.textContent = "Kaydedildi!"; msg.style.color = "var(--ok)"; }
+      const hint = document.getElementById("sc-run-hint");
+      if (hint) {
+        hint.style.display = "block";
+        hint.textContent = `Calistirmak icin: python start.py --scenario scenarios/${name}.json`;
+      }
+      await scLoadList();
+    } else {
+      if(msg) { msg.textContent = "Hata: " + (data.error || "?"); msg.style.color = "var(--danger)"; }
+    }
+  } catch(e) {
+    if(msg) { msg.textContent = "Hata: " + e.message; msg.style.color = "var(--danger)"; }
+  }
+}
+
+async function scDelete() {
+  const name = (document.getElementById("sc-name")?.value || "").trim();
+  if (!name) return;
+  if (!confirm(`"${name}" senaryosunu silmek istediginize emin misiniz?`)) return;
+  try {
+    const resp = await fetch(`/api/scenarios/${encodeURIComponent(name)}`, { method: "DELETE" });
+    const data = await resp.json();
+    if (data.ok) {
+      document.getElementById("sc-editor").innerHTML = `<div style="color:var(--ok);font-size:12px">Silindi.</div>`;
+      await scLoadList();
+    }
+  } catch(e) {
+    alert("Silinemedi: " + e.message);
+  }
+}
+
 function mountReplayButton() {
   const btn = el("button", {
     id: "replay-open-btn",
@@ -3204,6 +3439,8 @@ function boot(){
   mountChatToggle();
   mountAARModal();
   mountAARButton();
+  // Scenario editor
+  mountScenarioEditor();
   // Replay system
   mountReplayBar();
   mountReplayList();

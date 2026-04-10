@@ -20,9 +20,11 @@ ENV:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import urllib.request
+from pathlib import Path
 
 # Load .env early so LLM_PROVIDER / OLLAMA_URL are available before ai modules import
 try:
@@ -2262,6 +2264,68 @@ async def api_analytics_alerts(limit: int = Query(100, le=5000)):
             for r in rows
         ],
     })
+
+
+# ── Scenario CRUD ─────────────────────────────────────────────
+
+_SCENARIOS_DIR = Path(__file__).parent.parent / "scenarios"
+
+@app.get("/api/scenarios", tags=["system"])
+async def api_scenarios_list():
+    """List all available scenario files."""
+    _SCENARIOS_DIR.mkdir(exist_ok=True)
+    scenarios = []
+    for f in sorted(_SCENARIOS_DIR.glob("*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            scenarios.append({
+                "name":        f.stem,
+                "description": data.get("description", ""),
+                "duration_s":  data.get("duration_s", 300),
+                "rate_hz":     data.get("rate_hz", 1.0),
+                "entity_count": len(data.get("entities", [])),
+            })
+        except Exception:
+            scenarios.append({"name": f.stem, "description": "", "duration_s": 300,
+                              "rate_hz": 1.0, "entity_count": 0})
+    return JSONResponse({"scenarios": scenarios})
+
+
+@app.get("/api/scenarios/{name}", tags=["system"])
+async def api_scenario_get(name: str):
+    """Get a specific scenario by name."""
+    safe = name.replace("/", "").replace("\\", "").replace("..", "")
+    path = _SCENARIOS_DIR / f"{safe}.json"
+    if not path.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+
+@app.post("/api/scenarios", tags=["system"])
+async def api_scenario_save(req: Request, _=Depends(require_operator())):
+    """Save (create or overwrite) a scenario file."""
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+    name = body.get("name", "").strip().replace("/", "").replace("\\", "").replace("..", "")
+    if not name:
+        return JSONResponse({"ok": False, "error": "name required"}, status_code=400)
+    _SCENARIOS_DIR.mkdir(exist_ok=True)
+    path = _SCENARIOS_DIR / f"{name}.json"
+    path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+    return JSONResponse({"ok": True, "name": name})
+
+
+@app.delete("/api/scenarios/{name}", tags=["system"])
+async def api_scenario_delete(name: str, _=Depends(require_operator())):
+    """Delete a scenario file."""
+    safe = name.replace("/", "").replace("\\", "").replace("..", "")
+    path = _SCENARIOS_DIR / f"{safe}.json"
+    if not path.exists():
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    path.unlink()
+    return JSONResponse({"ok": True})
 
 
 # ── WebSocket ─────────────────────────────────────────────────
