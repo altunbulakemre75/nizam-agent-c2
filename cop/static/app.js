@@ -65,46 +65,161 @@ function initMap() {
 
 /* ── Status helpers ─────────────────────────────────────── */
 let statusEl=null, bufEl=null, modeEl=null;
-function setStatus(t)     { if(statusEl) statusEl.textContent=t; }
-function setMode(m)       { UI.mode=m; if(modeEl) modeEl.textContent=`Mode: ${m}`; }
-function setBufferSize(n) { if(bufEl) bufEl.textContent=`Buffer: ${n}`; }
+function setStatus(t) {
+  if(statusEl) statusEl.textContent = t;
+  // Sync WS dot
+  const ok = t.includes("connected") || t.includes("live");
+  _topbarSetWS(ok);
+}
+function setMode(m) {
+  UI.mode = m;
+  if(modeEl) modeEl.textContent = m;
+  _topbarSetMode(m);
+}
+function setBufferSize(n) { if(bufEl) bufEl.textContent = `Buffer: ${n}`; }
+
+/* ── Top bar ─────────────────────────────────────────────── */
+const _topbar = { tracks:null, threats:null, tasks:null, ops:null, wsEl:null, modeEl:null };
+
+function mountTopBar() {
+  const bar = document.createElement("div");
+  bar.id = "topbar";
+  bar.innerHTML = `
+    <span class="nz-logo">NIZAM</span>
+    <span class="nz-logo-sub">COP</span>
+    <div class="nz-topbar-divider"></div>
+    <span id="tb-scenario" class="nz-topbar-scenario">STANDBY</span>
+    <div class="nz-topbar-kpis">
+      <div class="nz-kpi" title="Active tracks">
+        <span class="nz-kpi-val c-accent" id="tb-tracks">0</span>
+        <span class="nz-kpi-label">Tracks</span>
+      </div>
+      <div class="nz-kpi" title="Threat assessments">
+        <span class="nz-kpi-val c-danger" id="tb-threats">0</span>
+        <span class="nz-kpi-label">Threats</span>
+      </div>
+      <div class="nz-kpi" title="Pending tasks">
+        <span class="nz-kpi-val c-warn" id="tb-tasks">0</span>
+        <span class="nz-kpi-label">Tasks</span>
+      </div>
+      <div class="nz-kpi" title="Active operators">
+        <span class="nz-kpi-val" id="tb-ops">1</span>
+        <span class="nz-kpi-label">Operators</span>
+      </div>
+    </div>
+    <div class="nz-topbar-right">
+      <span id="tb-mode" class="nz-mode-badge">LIVE</span>
+      <div class="nz-ws-indicator">
+        <div id="tb-ws-dot" class="nz-ws-dot off"></div>
+        <span id="tb-ws-label" style="font-size:10px;color:var(--text-3)">WS</span>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bar);
+  _topbar.tracks = document.getElementById("tb-tracks");
+  _topbar.threats = document.getElementById("tb-threats");
+  _topbar.tasks   = document.getElementById("tb-tasks");
+  _topbar.ops     = document.getElementById("tb-ops");
+  _topbar.wsEl    = document.getElementById("tb-ws-dot");
+  _topbar.modeEl  = document.getElementById("tb-mode");
+}
+
+function updateTopBar() {
+  if (_topbar.tracks)  _topbar.tracks.textContent  = UI.tracks.size;
+  if (_topbar.threats) _topbar.threats.textContent = UI.threats.size;
+  if (_topbar.tasks)   _topbar.tasks.textContent   = pendingTasks.size;
+  if (_topbar.ops)     _topbar.ops.textContent     = Object.keys(OPERATORS_STATE).length + 1;
+}
+
+function _topbarSetWS(ok) {
+  if (!_topbar.wsEl) return;
+  _topbar.wsEl.className = ok ? "nz-ws-dot" : "nz-ws-dot off";
+}
+
+function _topbarSetMode(m) {
+  if (!_topbar.modeEl) return;
+  _topbar.modeEl.textContent = m;
+  const cls = m === "LIVE" ? "nz-mode-badge"
+            : m === "REPLAY" ? "nz-mode-badge replay"
+            : "nz-mode-badge paused";
+  _topbar.modeEl.className = cls;
+}
+
+function setTopbarScenario(name) {
+  const el = document.getElementById("tb-scenario");
+  if (el) el.textContent = name || "COP";
+}
 
 /* ── Control panel ─────────────────────────────────────── */
 function mountControls() {
-  const panel = el("div", { style: {
-    position:"fixed", top:"12px", left:"12px", zIndex:"9999",
-    background:"rgba(0,0,0,0.65)", color:"white",
-    padding:"10px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    lineHeight:"1.4", minWidth:"220px"
-  }});
-  modeEl   = el("div", {style:{marginTop:"8px"}}, [`Mode: ${UI.mode}`]);
-  statusEl = el("div", {style:{marginTop:"4px",opacity:"0.85"}}, ["WS: connecting..."]);
-  bufEl    = el("div", {style:{marginTop:"4px",opacity:"0.85"}}, ["Buffer: 0"]);
-  panel.appendChild(el("div",{}, [
-    el("button",{style:{marginRight:"6px",cursor:"pointer"},onclick:()=>CopEngine.pause()},["Pause"]),
-    el("button",{style:{marginRight:"6px",cursor:"pointer"},onclick:()=>CopEngine.resume(fetchCompositeSnapshot)},["Resume"]),
-    el("button",{style:{cursor:"pointer"},onclick:async()=>{CopEngine.clearBuffer();await hardReset();}},["Clear/Reset"]),
-  ]));
-  panel.appendChild(modeEl);
-  panel.appendChild(statusEl);
-  panel.appendChild(bufEl);
-  panel.appendChild(el("div",{style:{marginTop:"8px",opacity:"0.7"}},["P=Pause  R=Resume"]));
+  const panel = el("div", {
+    id: "left-controls",
+    class: "nz-panel",
+    style: {
+      position: "fixed", top: "52px", left: "12px",
+      zIndex: "9999", width: "210px",
+    }
+  });
+
+  const header = el("div", { class: "nz-panel-header" }, ["SYSTEM"]);
+
+  const body = el("div", { class: "nz-panel-body", style: { display:"flex", flexDirection:"column", gap:"7px" } });
+
+  // WS status row
+  const wsDot = el("div", { class: "dot off" });
+  statusEl = el("span", { style: { fontSize:"11px", color:"var(--text-2)" } }, ["connecting..."]);
+  const wsRow = el("div", { class: "nz-status-row" }, [wsDot, statusEl]);
+
+  // Mode + buffer
+  modeEl = el("span", { style: { fontSize:"11px", color:"var(--text-2)", fontFamily:"var(--mono)" } }, [UI.mode]);
+  bufEl  = el("span", { style: { fontSize:"10px", color:"var(--text-3)", fontFamily:"var(--mono)" } }, ["buf:0"]);
+  const infoRow = el("div", { class: "nz-status-row" }, [
+    el("span", { style:{ color:"var(--text-3)", fontSize:"10px" }}, ["MODE "]),
+    modeEl,
+    el("span", { style:{ color:"var(--text-3)", marginLeft:"8px", fontSize:"10px" }}, [bufEl]),
+  ]);
+
+  // Buttons
+  const btnRow = el("div", { style: { display:"flex", gap:"4px", flexWrap:"wrap" } });
+  btnRow.appendChild(el("button", { class:"nz-btn", style:{flex:"1"}, onclick:()=>CopEngine.pause()    }, ["Pause"]));
+  btnRow.appendChild(el("button", { class:"nz-btn c-ok", style:{flex:"1"},
+    onclick:()=>CopEngine.resume(fetchCompositeSnapshot) }, ["Resume"]));
+  const resetBtn = el("button", { class:"nz-btn c-danger", style:{width:"100%"},
+    onclick: async()=>{ CopEngine.clearBuffer(); await hardReset(); } }, ["Clear / Reset"]);
+
   const logoutBtn = el("button", {
-    id: "logout-btn",
-    style: { marginTop:"8px", cursor:"pointer", display:"none", fontSize:"11px",
-      background:"rgba(231,76,60,0.3)", border:"1px solid rgba(231,76,60,0.5)",
-      color:"#e74c3c", borderRadius:"4px", padding:"2px 8px" },
-    onclick: () => {
-      AUTH_TOKEN = null; localStorage.removeItem("nizam_jwt"); showLoginModal();
-    },
-  }, ["⏏ Logout"]);
-  panel.appendChild(logoutBtn);
-  // Show logout btn only when auth is enabled
+    id: "logout-btn", class: "nz-btn c-danger",
+    style: { width:"100%", display:"none" },
+    onclick: () => { AUTH_TOKEN=null; localStorage.removeItem("nizam_jwt"); showLoginModal(); },
+  }, ["Logout"]);
+
+  const hint = el("div", { style: { fontSize:"10px", color:"var(--text-3)", letterSpacing:"0.04em" } },
+    ["P = Pause  |  R = Resume"]);
+
+  Object.defineProperty(window, "_leftWsDot", { value: wsDot, writable:true });
+
+  body.appendChild(wsRow);
+  body.appendChild(infoRow);
+  body.appendChild(el("div", { style:{ height:"1px", background:"var(--border)", margin:"0 -10px" } }));
+  body.appendChild(btnRow);
+  body.appendChild(resetBtn);
+  body.appendChild(logoutBtn);
+  body.appendChild(hint);
+
+  panel.appendChild(header);
+  panel.appendChild(body);
+  document.body.appendChild(panel);
+
+  // Keep wsDot in sync with connection state
+  const _syncDot = () => {
+    wsDot.className = UI.wsConnected ? "dot ok" : "dot off";
+  };
+  setInterval(_syncDot, 1000);
+
   fetch("/auth/status").then(r=>r.json()).then(d => {
     if (d.auth_enabled) logoutBtn.style.display = "block";
   }).catch(()=>{});
-  document.body.appendChild(panel);
+
   window.addEventListener("keydown", e => {
     if(e.key==="p"||e.key==="P") CopEngine.pause();
     if(e.key==="r"||e.key==="R") CopEngine.resume(fetchCompositeSnapshot);
@@ -484,6 +599,7 @@ const alertsLog  = [];
 const MAX_EW_ALERTS = 30;
 let ewPanelEl = null;
 const ewLog = [];
+let _ewBadgeCount = 0;
 
 function mountAlertPanel() {
   alertPanelEl = el("div", { id:"alert-panel", style: {
@@ -522,23 +638,20 @@ function pushAlert(p) {
 /* ── EW alert panel ──────────────────────────────────────── */
 function mountEWPanel() {
   ewPanelEl = el("div", { id:"ew-panel", style: {
-    background:"rgba(0,0,0,0.78)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
-    lineHeight:"1.55", maxHeight:"calc(100vh - 80px)", overflowY:"auto",
+    fontFamily:"var(--mono)", fontSize:"11px",
+    lineHeight:"1.6", width:"100%",
   }});
-  ewPanelEl.innerHTML = "<b style='color:#ff6b6b'>⚡ EW Alerts</b><br>"
-    + "<span style='opacity:.5'>No EW events detected</span>";
+  ewPanelEl.innerHTML = "<span style='color:var(--text-3)'>No EW events detected</span>";
   RIGHT_TABS.ew.appendChild(ewPanelEl);
 }
 
 function _ewToast(text, color) {
   const t = el("div", { style: {
-    position:"fixed", top:"60px", left:"50%", transform:"translateX(-50%)",
-    background:color, color:"white", padding:"10px 22px", borderRadius:"8px",
-    fontWeight:"bold", fontSize:"13px", zIndex:"99999",
-    fontFamily:"ui-sans-serif,system-ui,Arial",
-    boxShadow:"0 4px 16px rgba(0,0,0,0.6)", pointerEvents:"none",
+    position:"fixed", top:"54px", left:"50%", transform:"translateX(-50%)",
+    background:color, color:"white", padding:"9px 20px", borderRadius:"6px",
+    fontWeight:"600", fontSize:"12px", zIndex:"99999",
+    fontFamily:"var(--font)", letterSpacing:"0.03em",
+    boxShadow:"0 4px 20px rgba(0,0,0,0.7)", pointerEvents:"none",
     animation:"fadeInDown .2s ease",
   }}, [text]);
   document.body.appendChild(t);
@@ -551,31 +664,43 @@ function pushEWAlert(p) {
   ewLog.unshift({ t, type: p.type, severity: p.severity, track_id: p.track_id, detail: p.detail });
   if (ewLog.length > MAX_EW_ALERTS) ewLog.pop();
 
-  const SEV_COLOR = { CRITICAL: "#e74c3c", HIGH: "#e67e22", MEDIUM: "#f1c40f", LOW: "#27ae60" };
-  const typeIcon  = { GPS_SPOOFING: "🛰️", RADAR_JAMMING: "📡", FALSE_INJECTION: "💉" };
+  const SEV_COLOR = { CRITICAL:"var(--danger)", HIGH:"var(--warn)", MEDIUM:"#f1c40f", LOW:"var(--ok)" };
+  const SEV_BG    = { CRITICAL:"rgba(240,64,64,0.1)", HIGH:"rgba(240,128,48,0.1)", MEDIUM:"rgba(241,196,15,0.08)", LOW:"rgba(48,192,96,0.08)" };
+  const TYPE_LABEL = { GPS_SPOOFING:"GPS SPOOF", RADAR_JAMMING:"RADAR JAM", FALSE_INJECTION:"INJECT" };
 
-  let html = "<b style='color:#ff6b6b'>⚡ EW Alerts</b><br>";
-  ewLog.forEach(a => {
-    const c   = SEV_COLOR[a.severity] || "#e74c3c";
-    const ico = typeIcon[a.type]      || "⚠️";
-    html += `<span style="color:${c}">${ico} <b>${a.type}</b></span>`;
-    if (a.track_id) html += ` <span style="opacity:.7">[${a.track_id}]</span>`;
-    html += ` <span style="opacity:.5">${a.t}</span><br>`;
-    html += `<span style="opacity:.65;margin-left:14px">${(a.detail||"").slice(0,90)}</span><br>`;
-  });
   if (ewPanelEl) {
-    ewPanelEl.innerHTML = html;
-    ewPanelEl.style.outline = `2px solid ${SEV_COLOR[p.severity] || "#e74c3c"}`;
-    setTimeout(() => { ewPanelEl.style.outline = "none"; }, 900);
+    let html = "";
+    ewLog.forEach((a, i) => {
+      const c  = SEV_COLOR[a.severity]  || "var(--danger)";
+      const bg = SEV_BG[a.severity]    || "rgba(240,64,64,0.08)";
+      const lbl = TYPE_LABEL[a.type]   || a.type;
+      html += `<div style="padding:6px 8px;margin-bottom:4px;border-radius:5px;background:${bg};border-left:3px solid ${c}${i===0?';animation:slide-in-right .2s ease':''}">`;
+      html += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">`;
+      html += `<span style="color:${c};font-weight:700;font-size:10px;letter-spacing:.06em">${lbl}</span>`;
+      html += `<span style="color:${c};font-size:9px;opacity:.7">${a.severity}</span>`;
+      if (a.track_id) html += `<span style="color:var(--text-2);font-size:10px">${a.track_id}</span>`;
+      html += `<span style="color:var(--text-3);font-size:9px;margin-left:auto">${a.t}</span>`;
+      html += `</div>`;
+      html += `<div style="color:var(--text-2);font-size:10px;line-height:1.4">${(a.detail||"").slice(0,100)}</div>`;
+      html += `</div>`;
+    });
+    ewPanelEl.innerHTML = html || "<span style='color:var(--text-3)'>No EW events detected</span>";
+  }
+
+  // Badge on tab (only when EW tab not active)
+  const activeTab = document.querySelector(".nz-tab.active");
+  if (!activeTab || activeTab.id !== "rtab-ew") {
+    _ewBadgeCount++;
+    setTabBadge("ew", _ewBadgeCount);
   }
 
   // Switch to EW tab automatically for CRITICAL
   if (p.severity === "CRITICAL") {
     const btn = document.getElementById("rtab-ew");
     if (btn) btn.click();
-    _ewToast(`⚡ ${p.type} — CRITICAL`, "#c0392b");
+    _ewToast(`EW ALERT: ${p.type} — CRITICAL`, "var(--danger)");
   } else if (p.severity === "HIGH") {
-    _ewToast(`⚡ ${p.type}`, "#e67e22");
+    _ewToast(`EW: ${p.type}`, "var(--warn)");
   }
 
   // Highlight the affected track on map
@@ -2753,60 +2878,64 @@ async function checkAuth() {
 
 const RIGHT_TABS = {};
 
+function setTabBadge(tabId, count) {
+  const btn = document.getElementById(`rtab-${tabId}`);
+  if (!btn) return;
+  let badge = btn.querySelector(".nz-tab-badge");
+  if (count <= 0) { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "nz-tab-badge";
+    btn.appendChild(badge);
+  }
+  badge.textContent = count > 99 ? "99+" : String(count);
+}
+
 function mountRightTabContainer() {
   const TAB_DEFS = [
-    { id: "threats", label: "⚡ Threats" },
-    { id: "zones",   label: "📍 Zones"   },
-    { id: "assets",  label: "🔵 Assets"  },
-    { id: "alerts",  label: "🔔 Alerts"  },
-    { id: "ew",      label: "📡 EW"      },
-    { id: "metrics", label: "📊 Metrics" },
+    { id: "threats", label: "Threats" },
+    { id: "zones",   label: "Zones"   },
+    { id: "assets",  label: "Assets"  },
+    { id: "alerts",  label: "Alerts"  },
+    { id: "ew",      label: "EW"      },
+    { id: "metrics", label: "Metrics" },
   ];
   const activeTabId = { v: "threats" };
 
   const container = el("div", { id: "right-sidebar", style: {
-    position: "fixed", top: "12px", right: "12px", zIndex: "9998",
-    width: "295px", maxHeight: "calc(100vh - 24px)",
+    position: "fixed", top: "52px", right: "12px", zIndex: "9998",
+    width: "300px", maxHeight: "calc(100vh - 64px)",
     display: "flex", flexDirection: "column",
-    fontFamily: "ui-sans-serif,system-ui,Arial",
     pointerEvents: "none",
   }});
 
-  const tabBar = el("div", { style: {
-    display: "flex", gap: "3px", marginBottom: "6px", pointerEvents: "auto",
-  }});
-
+  const tabBar = el("div", { class: "nz-tab-bar" });
   const contentMap = {};
 
   function switchTab(tabId) {
     TAB_DEFS.forEach(t => {
       contentMap[t.id].style.display = t.id === tabId ? "flex" : "none";
       const btn = document.getElementById(`rtab-${t.id}`);
-      if (btn) btn.style.background = t.id === tabId
-        ? "rgba(255,255,255,0.20)" : "rgba(0,0,0,0.60)";
+      if (btn) btn.className = t.id === tabId ? "nz-tab active" : "nz-tab";
     });
     activeTabId.v = tabId;
+    // Clear EW badge when EW tab is opened
+    if (tabId === "ew") { _ewBadgeCount = 0; setTabBadge("ew", 0); }
   }
 
   TAB_DEFS.forEach(tab => {
-    const content = el("div", { id: `rtab-content-${tab.id}`, style: {
-      display: tab.id === activeTabId.v ? "flex" : "none",
-      flexDirection: "column", gap: "6px",
-      overflowY: "auto", maxHeight: "calc(100vh - 56px)",
-      pointerEvents: "auto",
-    }});
+    const content = el("div", {
+      id: `rtab-content-${tab.id}`,
+      class: "nz-tab-pane",
+      style: { display: tab.id === activeTabId.v ? "flex" : "none" },
+    });
     contentMap[tab.id] = content;
     RIGHT_TABS[tab.id] = content;
     container.appendChild(content);
 
     const btn = el("button", {
       id: `rtab-${tab.id}`,
-      style: {
-        flex: "1", padding: "5px 2px", cursor: "pointer",
-        background: tab.id === activeTabId.v ? "rgba(255,255,255,0.20)" : "rgba(0,0,0,0.60)",
-        color: "white", border: "1px solid rgba(255,255,255,0.15)",
-        borderRadius: "6px", fontSize: "10px", fontFamily: "inherit",
-      },
+      class: tab.id === activeTabId.v ? "nz-tab active" : "nz-tab",
       onclick: () => switchTab(tab.id),
     }, [tab.label]);
     tabBar.appendChild(btn);
@@ -2819,6 +2948,7 @@ function mountRightTabContainer() {
 /* ── Boot ────────────────────────────────────────────────── */
 
 function boot(){
+  mountTopBar();
   initMap();
   mountControls();
   mountRightTabContainer();
@@ -2851,6 +2981,7 @@ function boot(){
   connectWS();
   refreshAgentHealth();
   setInterval(refreshAgentHealth, 5000);
+  setInterval(updateTopBar, 1000);
   // AI data now streams via WebSocket (cop.ai_update).
   // Keep slow polling as a safety net for when the socket drops.
   setInterval(refreshAI, 15000);
