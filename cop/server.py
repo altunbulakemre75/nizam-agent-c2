@@ -63,9 +63,11 @@ from ai import trajectory as ai_trajectory
 from ai import track_fsm
 from ai import deconfliction as ai_deconfliction
 from ai import ew_detector as ai_ew
+from ai import ew_ml as ai_ew_ml
 from ai import fusion as ai_fusion
 from ai.fusion import SensorMeasurement as FusionMeasurement
 from cop import sync as cop_sync
+from cop import circuit_breaker as cop_cb
 from replay import recorder as replay_recorder
 from replay import player as replay_player
 
@@ -1289,7 +1291,9 @@ async def api_reset(_=Depends(require_operator())):
         ai_lineage.clear()
         ai_deconfliction.reset()
         ai_ew.reset()
+        ai_ew_ml.reset()
         cop_sync.reset()
+        cop_cb.reset()
         ai_aar.start_session()
         snapshot = {
             "event_type": "cop.snapshot",
@@ -1309,36 +1313,49 @@ INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "")
 
 @app.post("/ingest")
 async def ingest(req: Request):
+    client_ip = req.client.host if req.client else "unknown"
+
+    # Circuit breaker — reject before any work if IP is in OPEN/HALF_OPEN probe
+    cb_ok, cb_reason = cop_cb.check(client_ip)
+    if not cb_ok:
+        METRICS["ingest_bad_request"] += 1
+        return JSONResponse({"ok": False, "error": cb_reason}, status_code=503,
+                            headers={"Retry-After": "30"})
+
     # API key guard: when AUTH_ENABLED and INGEST_API_KEY is set,
     # require X-API-Key header for /ingest access.
     if AUTH_ENABLED and INGEST_API_KEY:
         provided = req.headers.get("x-api-key", "")
         if provided != INGEST_API_KEY:
             METRICS["ingest_bad_request"] += 1
+            cop_cb.record_bad(client_ip)
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
 
     # Rate limiting
-    client_ip = req.client.host if req.client else "unknown"
     if not _rate_limit_check(client_ip):
         METRICS["ingest_bad_request"] += 1
+        cop_cb.record_bad(client_ip)
         return JSONResponse({"ok": False, "error": "rate limited"}, status_code=429)
 
     # Size guard — reject payloads > 256 KB
     content_length = req.headers.get("content-length")
     if content_length and int(content_length) > 262_144:
         METRICS["ingest_bad_request"] += 1
+        cop_cb.record_bad(client_ip)
         return JSONResponse({"ok": False, "error": "payload too large"}, status_code=413)
 
     try:
         body = await req.json()
     except Exception:
         METRICS["ingest_bad_request"] += 1
+        cop_cb.record_bad(client_ip)
         return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
     event_type = body.get("event_type")
     payload    = body.get("payload")
 
     if not event_type or payload is None:
         METRICS["ingest_bad_request"] += 1
+        cop_cb.record_bad(client_ip)
         return JSONResponse({"ok": False, "error": "missing event_type/payload"}, status_code=400)
 
     # Validate event_type whitelist
@@ -1346,10 +1363,12 @@ async def ingest(req: Request):
                           "cop.asset", "cop.task", "cop.waypoint"}
     if event_type not in _VALID_EVENT_TYPES:
         METRICS["ingest_bad_request"] += 1
+        cop_cb.record_bad(client_ip)
         return JSONResponse({"ok": False, "error": f"unknown event_type: {event_type}"}, status_code=400)
 
     METRICS["ingest_total"] += 1
     METRICS["ingest_by_type"][event_type] = METRICS["ingest_by_type"].get(event_type, 0) + 1
+    cop_cb.record_success(client_ip)
 
     if isinstance(payload, dict) and "server_time" not in payload:
         payload["server_time"] = _utc_now_iso()
@@ -1451,11 +1470,17 @@ async def ingest(req: Request):
                 if lat is not None and lon is not None and STATE["zones"]:
                     await _check_zone_breaches(str(track_id), float(lat), float(lon))
 
-                # ── EW detection: GPS spoofing + false injection ──────────
+                # ── EW detection: rule-based + statistical ML classifiers ──
                 if lat is not None and lon is not None:
+                    speed_ms  = float(payload.get("speed_ms") or payload.get("speed") or 0.0)
+                    heading   = float(payload.get("heading_deg") or payload.get("heading") or 0.0)
                     ew_alerts = ai_ew.on_track_update(
                         str(track_id), float(lat), float(lon),
                         sensors=sensors,
+                    )
+                    ew_alerts += ai_ew_ml.on_track_update(
+                        str(track_id), float(lat), float(lon),
+                        speed_ms=speed_ms, heading=heading,
                     )
                     for alert in ew_alerts:
                         ai_aar.record_ew_alert(alert)
@@ -1679,7 +1704,9 @@ def _ai_run_tactical_compute(
                        prev_tracks=AI_ML_PREV_TRACKS, dt=_AI_TACTICAL_INTERVAL)
 
     def _run_ew():
-        return _timed("ew", ai_ew.check_mass_jamming, tracks_snap)
+        alerts = _timed("ew", ai_ew.check_mass_jamming, tracks_snap)
+        alerts += ai_ew_ml.check_patterns(tracks_snap)
+        return alerts
 
     # 7 independent tasks — ThreadPoolExecutor with numpy GIL-release
     with ThreadPoolExecutor(max_workers=7, thread_name_prefix="tac") as pool:
@@ -2163,9 +2190,11 @@ async def api_metrics():
             "zones":   len(STATE["zones"]),
             "tasks":   len(STATE["tasks"]),
         },
-        "deconfliction": ai_deconfliction.stats(),
-        "ew":            ai_ew.stats(),
-        "sync":          cop_sync.stats(),
+        "deconfliction":    ai_deconfliction.stats(),
+        "ew":               ai_ew.stats(),
+        "ew_ml":            ai_ew_ml.stats(),
+        "sync":             cop_sync.stats(),
+        "circuit_breaker":  cop_cb.stats(),
     })
 
 
