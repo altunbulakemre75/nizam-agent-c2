@@ -40,6 +40,7 @@ _zone_breach_events: List[Dict] = []     # zone breach alerts
 _task_events: List[Dict] = []            # tasks created
 _key_events: List[Dict] = []             # important moments (ordered)
 _ew_alert_events: List[Dict] = []        # EW attack alerts
+_roe_advisory_events: List[Dict] = []   # ROE advisory events
 _deconfliction_merges: int = 0           # track merge count
 
 _peak_threat_score: int = 0
@@ -219,6 +220,39 @@ def record_task(task: Dict[str, Any]) -> None:
     })
     if len(_task_events) > _MAX_EVENTS:
         del _task_events[:len(_task_events) - _MAX_EVENTS]
+
+
+def record_roe_advisory(advisory: Dict[str, Any]) -> None:
+    """Record a ROE advisory (called once per tactical cycle per active advisory)."""
+    engagement = advisory.get("engagement", "")
+    _roe_advisory_events.append({
+        "track_id":   advisory.get("track_id", ""),
+        "engagement": engagement,
+        "urgency":    advisory.get("urgency", ""),
+        "confidence": advisory.get("confidence"),
+        "reasons":    list(advisory.get("reasons", [])),
+        "t":          time.time(),
+    })
+    if len(_roe_advisory_events) > _MAX_EVENTS:
+        del _roe_advisory_events[:len(_roe_advisory_events) - _MAX_EVENTS]
+
+    # Key event for the most aggressive engagement levels
+    if engagement == "WEAPONS_FREE":
+        _add_key_event(
+            "WEAPONS_FREE",
+            f"WEAPONS_FREE: {advisory.get('track_id')} "
+            f"(guven: {advisory.get('confidence')}%)",
+            severity="CRITICAL",
+            track_id=advisory.get("track_id", ""),
+        )
+    elif engagement == "WEAPONS_TIGHT":
+        _add_key_event(
+            "WEAPONS_TIGHT",
+            f"WEAPONS_TIGHT: {advisory.get('track_id')} "
+            f"— {'; '.join(list(advisory.get('reasons', []))[:1])}",
+            severity="HIGH",
+            track_id=advisory.get("track_id", ""),
+        )
 
 
 # ── Key Events ─────────────────────────────────────────────────────────────
@@ -414,6 +448,23 @@ def generate_report(
         "recent": _ew_alert_events[-5:] if _ew_alert_events else [],
     }
 
+    # ── ROE Advisory Summary ──
+    roe_by_engagement = Counter(e["engagement"] for e in _roe_advisory_events)
+    weapons_free_count = roe_by_engagement.get("WEAPONS_FREE", 0)
+    weapons_tight_count = roe_by_engagement.get("WEAPONS_TIGHT", 0)
+    # Confidence distribution across advisories (unique track_id, last seen value)
+    conf_values = [e["confidence"] for e in _roe_advisory_events
+                   if e.get("confidence") is not None]
+    avg_confidence = round(sum(conf_values) / len(conf_values), 1) if conf_values else None
+    roe_summary = {
+        "total_advisories":     len(_roe_advisory_events),
+        "by_engagement":        dict(roe_by_engagement),
+        "weapons_free_count":   weapons_free_count,
+        "weapons_tight_count":  weapons_tight_count,
+        "avg_confidence":       avg_confidence,
+        "recent":               _roe_advisory_events[-5:] if _roe_advisory_events else [],
+    }
+
     # ── Deconfliction Summary ──
     deconfliction_summary = {
         "total_merges": _deconfliction_merges,
@@ -465,6 +516,7 @@ def generate_report(
         "coordinated_attack_analysis": coord_analysis,
         "zone_breach_analysis": breach_analysis,
         "task_summary": task_summary,
+        "roe_summary": roe_summary,
         "track_summaries": track_summaries[:15],
         "key_event_timeline": key_timeline,
         "risk_assessment": risk_assessment,
@@ -529,6 +581,7 @@ def reset() -> None:
     _threat_events.clear()
     _anomaly_events.clear()
     _ew_alert_events.clear()
+    _roe_advisory_events.clear()
     _coord_attack_events.clear()
     _zone_breach_events.clear()
     _task_events.clear()

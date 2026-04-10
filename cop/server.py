@@ -1846,6 +1846,8 @@ async def _ai_tactical_background_task() -> None:
 
         AI_ROE_ADVISORIES.clear()
         AI_ROE_ADVISORIES.extend(result["roe_advisories"])
+        for adv in AI_ROE_ADVISORIES:
+            ai_aar.record_roe_advisory(adv)
 
         # Broadcast EW jamming alerts individually
         for ew_alert in result.get("ew_alerts", []):
@@ -2208,6 +2210,7 @@ async def api_metrics():
             "max_ms":           METRICS["tactical_max_ms"],
             "p50_ms":           round(_metrics_percentile(recent, 50), 2),
             "p95_ms":           round(_metrics_percentile(recent, 95), 2),
+            "p99_ms":           round(_metrics_percentile(recent, 99), 2),
             "sample_count":     len(recent),
             "module_ms":        dict(METRICS.get("tactical_module_ms", {})),
         },

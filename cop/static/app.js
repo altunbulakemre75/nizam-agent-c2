@@ -841,6 +841,7 @@ function applyAIUpdate(payload) {
   renderBreachPanel(payload.pred_breaches || []);
   renderCoordPanel(payload.coord_attacks || []);
   renderROEPanel(payload.roe_advisories || []);
+  renderConfidencePanel(payload.confidence_scores || {});
   mlPredictions = payload.ml_predictions || {};
   if (typeof payload.ml_available === "boolean") {
     mlModelAvailable = payload.ml_available;
@@ -1557,10 +1558,16 @@ function renderROEPanel(advisories) {
     if(a.is_coordinated) badges.push('<span style="background:#ff0050;padding:0 3px;border-radius:3px;font-size:7px">KOORD</span>');
     if(a.in_kill_zone) badges.push('<span style="background:#e74c3c;padding:0 3px;border-radius:3px;font-size:7px">KILL</span>');
 
+    const confPct = a.confidence != null ? a.confidence : null;
+    const confC = confPct == null ? "#888" : confPct >= 70 ? "#27ae60" : confPct >= 40 ? "#f39c12" : "#e74c3c";
+    const confBadge = confPct != null
+      ? `<span style="color:${confC};font-size:9px;margin-left:4px">${confPct}%</span>`
+      : "";
+
     html += `<div style="border-left:3px solid ${color};padding-left:5px;margin:3px 0">
       <span style="background:${color};padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold;color:#fff">${label}</span>
       <span style="font-weight:bold;margin-left:3px">${a.track_id}</span>
-      ${badges.join(" ")}
+      ${badges.join(" ")}${confBadge}
       <span style="float:right;color:${urgColor};font-size:9px;font-weight:bold">${a.urgency}</span><br>
       <span style="font-size:9px;opacity:.75">${(a.reasons||[]).join("; ")}</span>
     </div>`;
@@ -1573,6 +1580,47 @@ function renderROEPanel(advisories) {
     roePanelEl.style.borderColor = "#e74c3c";
     setTimeout(() => { roePanelEl.style.borderColor = "rgba(155,89,182,0.4)"; }, 1500);
   }
+}
+
+/* ── AI: Confidence Scores panel ──────────────────────── */
+let confPanelEl = null;
+const CONF_GRADE_COLORS = { HIGH:"#27ae60", MEDIUM:"#f39c12", LOW:"#e74c3c" };
+
+function mountConfidencePanel() {
+  confPanelEl = el("div", { id:"conf-panel", class:"nz-card", style:{
+    padding:"8px 10px", maxHeight:"200px", overflowY:"auto",
+  }});
+  confPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">GUVEN SKORU</div>
+    <span style="color:var(--text-3);font-size:10px">Bekleniyor...</span>`;
+  RIGHT_TABS.threats.appendChild(confPanelEl);
+}
+
+function renderConfidencePanel(scores) {
+  if (!confPanelEl) return;
+  const entries = Object.entries(scores || {});
+  if (entries.length === 0) {
+    confPanelEl.innerHTML = '<b style="color:#4fc3f7">\u{1F4CA} Guven Skoru</b><br><span style="opacity:.5">Tehdit yok</span>';
+    return;
+  }
+  const sorted = entries
+    .map(([tid, s]) => ({ tid, confidence: s.confidence ?? 0, grade: s.grade || "LOW" }))
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 8);
+
+  let html = `<b style="color:#4fc3f7">\u{1F4CA} Guven Skoru</b> <span style="opacity:.5">(${entries.length} tehdit)</span><br>`;
+  sorted.forEach(s => {
+    const c = CONF_GRADE_COLORS[s.grade] || "#aaa";
+    const barW = Math.round(s.confidence * 0.8);
+    html += `<div style="margin:2px 0;display:flex;align-items:center;gap:4px">
+      <span style="min-width:72px;font-family:monospace;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.tid.slice(-10)}</span>
+      <span style="background:${c};color:#fff;border-radius:3px;padding:0 4px;font-size:8px;font-weight:bold;min-width:40px;text-align:center">${s.grade}</span>
+      <div style="width:80px;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden;flex-shrink:0">
+        <div style="width:${barW}px;height:100%;background:${c};border-radius:3px"></div>
+      </div>
+      <span style="font-size:10px;opacity:.8;min-width:28px;text-align:right">${s.confidence}%</span>
+    </div>`;
+  });
+  confPanelEl.innerHTML = html;
 }
 
 /* ── AI: Coordinated Attack panel + convergence lines ──── */
@@ -1826,6 +1874,7 @@ function renderMetricsPanel(m) {
   const rps   = (+ing.per_sec || 0).toFixed(1);
   const p50c  = _barColor(+tac.p50_ms||0, 500, 2000);
   const p95c  = _barColor(+tac.p95_ms||0, 500, 2000);
+  const p99c  = _barColor(+tac.p99_ms||0, 1000, 3000);
 
   const row = (label, val, cls="") =>
     `<div class="nz-row"><span class="label">${label}</span><span class="val ${cls}">${val}</span></div>`;
@@ -1857,8 +1906,13 @@ function renderMetricsPanel(m) {
       <div class="nz-section" style="margin-bottom:4px">Tactical Engine</div>
       ${bar("p50", tac.p50_ms, 3000, p50c)}
       ${bar("p95", tac.p95_ms, 3000, p95c)}
+      ${bar("p99", tac.p99_ms, 3000, p99c)}
       ${row("ran / sched", `${_fmtNum(tac.ran)} / ${_fmtNum(tac.scheduled)}`)}
       ${row("last / max", `${_fmtMs(tac.last_ms)} / ${_fmtMs(tac.max_ms)}`)}
+      ${Object.keys(tac.module_ms||{}).length > 0 ? `<div style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">
+        <div style="font-size:9px;opacity:.6;margin-bottom:2px">Modul zamanlamasi</div>
+        ${Object.entries(tac.module_ms||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>row(k,_fmtMs(v))).join("")}
+      </div>` : ""}
     </div>
 
     <div class="nz-card" style="margin-bottom:5px">
@@ -4308,6 +4362,7 @@ function boot(){
   // Phase 5: AI panels
   mountMLPanel();
   mountROEPanel();
+  mountConfidencePanel();
   mountCoordPanel();
   mountBreachPanel();
   mountAnomalyPanel();
