@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml/badge.svg)](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-226%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
+[![Tests](https://img.shields.io/badge/tests-348%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Real-Time Command & Control (C2) / Common Operational Picture (COP) System**
@@ -27,7 +27,9 @@ Runs fully offline. No cloud services required.
 
 **Persists** time-series track and threat events to TimescaleDB hypertables (composite primary key `(id, time)` — partition-aware). Zones, assets, tasks, and waypoints survive server restarts.
 
-**Broadcasts** live state to a tabbed Leaflet browser UI over WebSocket with multi-operator support: track claiming, operator presence, and shared task queue.
+**Synchronises** state across multiple COP nodes via delta-push replication with vector clock conflict resolution and split-brain detection.
+
+**Broadcasts** live state to a tabbed Leaflet browser UI over WebSocket with multi-operator support: track claiming, operator presence, TTS voice alerts, and shared task queue.
 
 ---
 
@@ -42,8 +44,11 @@ Runs fully offline. No cloud services required.
 - Zone system: restricted / kill / friendly polygons with ray-casting breach detection
 - Autonomous task proposal (ENGAGE / OBSERVE) with operator approve / reject workflow
 - Fire control loop: approve ENGAGE → effector impact animation → track removal
+- TTS voice alerts with alarm-fatigue prevention (batch window, dedup, priority queue)
+- Altitude colour mode — track markers colour-coded by altitude band (green → purple)
 - Pause / resume, reset, JSONL replay with time-slider
 - Multi-operator sessions: track claiming, presence indicators, conflict prevention (409)
+- Multi-node federation: delta-push sync, vector clocks, split-brain detection, conflict log
 
 ### AI Decision Support
 
@@ -95,8 +100,10 @@ Each record contains:
 - PostgreSQL / TimescaleDB persistence — hypertables for `track_events`, `threat_events`, `alert_records`
 - JWT authentication with ADMIN / OPERATOR / VIEWER roles (enabled via `AUTH_ENABLED=true`)
 - Docker + Docker Compose (one command: `docker compose up --build`)
-- GitHub Actions CI: 184 pytest tests + end-to-end smoke test
+- Production setup script (`scripts/prod_setup.sh`): TLS cert generation, secret rotation, Docker boot
+- GitHub Actions CI: 348 pytest tests + end-to-end smoke test
 - Runtime metrics endpoint (`/api/metrics`): ingest rate, tactical p50/p95, WS fan-out
+- Tactical engine benchmark (`scripts/bench_tactical.py`): automated p50/p95/p99 measurement with per-module breakdown
 
 ---
 
@@ -175,6 +182,13 @@ flowchart LR
 
     COP -.->|WebSocket| UI
 
+    subgraph FED["Federation"]
+        PEER1[COP Node 2]
+        PEER2[COP Node 3]
+    end
+
+    COP <-.->|delta-push<br/>vector clocks| FED
+
     classDef sensor fill:#1e3a5f,stroke:#4a90e2,color:#fff
     classDef ai fill:#4a1e5f,stroke:#a04ae2,color:#fff
     classDef store fill:#1e5f3a,stroke:#4ae290,color:#fff
@@ -195,11 +209,12 @@ flowchart LR
 ## Repository Layout
 
 ```
-adapters/         real-world sensor adapters (ADS-B, AIS, REST)
+adapters/         real-world sensor adapters (ADS-B, AIS, REST, MQTT)
 agents/           sensor simulation + fusion + cop_publisher
 ai/
+  _fast_math.py           numpy-vectorised geospatial helpers (pairwise dist, heading diff)
   anomaly.py              anomaly + swarm detection
-  coordinated_attack.py   pincer / convergence detection
+  coordinated_attack.py   pincer / convergence / zone-targeted / asset-targeted detection
   lineage.py              SHA-256 hash-chained decision provenance
   llm_advisor.py          Claude / OpenAI operator advisor
   ml_threat.py            RandomForest threat classifier
@@ -212,12 +227,22 @@ ai/
   zone_breach.py          predictive breach + uncertainty cones
   aar.py                  after-action report generator
 auth/             JWT + role-based access
-cop/              FastAPI COP server + Leaflet UI
+cop/
+  server.py               FastAPI COP server (parallel AI engine, fire control, sync)
+  sync.py                 multi-node federation (delta-push, vector clocks, split-brain)
+  static/app.js           Leaflet UI (TTS alerts, altitude mode, nodes panel)
 db/               SQLAlchemy + TimescaleDB models + migrations
 k8s/              Kubernetes manifests
 orchestrator/     agent registry + heartbeat
 scenarios/        single_drone / swarm / coordinated / multi_axis_attack / decoy
-tests/            184 pytest tests
+scripts/
+  bench_tactical.py       tactical engine latency benchmark (p50/p95/p99 + module breakdown)
+  compare_scenarios.py    multi-scenario AAR comparison runner
+  cot_test_sender.py      CoT/ATAK UDP multicast simulator
+  load_test.py            1000-track throughput + latency test
+  prod_setup.sh           TLS cert + secret generation + Docker boot
+  smoke_test.py           end-to-end smoke test
+tests/            348 pytest tests
 train_trajectory.py  synthetic data generator + LSTM training script
 start.py          one-command boot: orchestrator + COP + pipeline
 ```
@@ -265,6 +290,8 @@ Tables are created automatically on first run. TimescaleDB hypertables are enabl
 | `/api/ai/status` | AI subsystem status (LSTM ready, ML model, LLM) |
 | `/api/ai/aar` | After-action report |
 | `/api/operators` | Active operator sessions |
+| `/api/sync/peers` | Federation peer management (add/remove/list) |
+| `/api/sync/conflicts` | Vector clock conflict log (GET/DELETE) |
 | `http://127.0.0.1:8200` | Orchestrator agent health |
 
 ---
@@ -315,32 +342,46 @@ curl http://127.0.0.1:8100/api/ai/lineage/T-R012-A018
 
 ## Performance
 
-Load tested against `multi_axis_attack` (67+ concurrent tracks):
+Load tested against 150+ concurrent tracks:
 
-| Metric | Before | After (v2) |
-|---|---|---|
-| tactical.p50 | 1100 ms | ~120 ms |
-| tactical.p95 | 1920 ms | ~250 ms |
-| tactical.failed | 0 | 0 |
-| ingest failed | 0 | 0 |
-| LSTM inference (per track) | < 5 ms (CPU) | < 5 ms (CPU) |
-| tactical interval | 3.0 s | 1.0 s |
-| operational latency | ~4.1 s | ~1.1 s |
+| Metric | v1 | v2 (parallel) | v3 (vectorised) |
+|---|---|---|---|
+| tactical.p50 | 1100 ms | ~120 ms | < 80 ms |
+| tactical.p95 | 1920 ms | ~250 ms | < 150 ms |
+| coord_attack (dominant module) | — | ~1285 ms | < 50 ms |
+| tactical.failed | 0 | 0 | 0 |
+| ingest failed | 0 | 0 | 0 |
+| LSTM inference (per track) | < 5 ms | < 5 ms | < 5 ms |
+| tactical interval | 3.0 s | 1.0 s | 1.0 s |
+| operational latency | ~4.1 s | ~1.1 s | ~1.1 s |
 
-**v2 optimisations:** 7 sub-modules run in parallel (ThreadPoolExecutor),
-numpy-vectorised O(N²) distance/heading matrices replace Python loops,
+**v2 optimisations:** 7 sub-modules run in parallel (`ThreadPoolExecutor`),
 tactical interval reduced from 3 s → 1 s.
+
+**v3 optimisations:** numpy-vectorised `O(N²)` pairwise distance/heading
+matrices replace Python loops in swarm and coordinated-attack detection;
+zone/asset approach checks batched into single `nearest_polygon_distances()`
+calls (eliminates `O(zones × tracks × steps × vertices)` inner loop);
+HIGH/MEDIUM threat-level pre-filter reduces working set before expensive
+convergence analysis.
+
+Run the benchmark yourself:
+
+```bash
+python scripts/bench_tactical.py --tracks 150 --warmup 10 --samples 30
+```
 
 ---
 
 ## Running Tests
 
 ```bash
-pytest tests/ -v                             # 184 unit tests
+pytest tests/ -v                             # 348 unit tests
 python scripts/smoke_test.py --duration 12   # end-to-end
+python scripts/bench_tactical.py --tracks 150  # tactical engine latency
 ```
 
-CI runs on every push to `main` (GitHub Actions, Python 3.10–3.12).
+CI runs on every push to `main` (GitHub Actions, Python 3.10–3.13).
 
 ---
 
@@ -373,13 +414,54 @@ python scripts/load_test.py --tracks 1000 --duration 30 --rate_hz 2 --workers 32
 
 Measures throughput, p50/p95/p99 latency, and error rate against `/ingest`. Exits non-zero if error rate exceeds 5%.
 
+### Tactical engine benchmark
+
+```bash
+python scripts/bench_tactical.py --tracks 150 --warmup 10 --samples 30
+```
+
+Injects N tracks at a configurable rate, waits for the tactical engine to accumulate samples, then reports p50/p95/p99 and per-module breakdown from `/api/metrics`.
+
+### CoT/ATAK interop test
+
+```bash
+python scripts/cot_test_sender.py --scenario swarm --tracks 8 --duration 30
+```
+
+Sends Cursor-on-Target SA messages over UDP multicast, simulating ATAK devices.
+
+---
+
+## Multi-Node Federation
+
+NIZAM supports multi-node state synchronisation without a shared database. Each node pushes delta snapshots to registered peers. Conflict resolution uses vector clocks:
+
+- **Incoming dominates local** → accept (clean update)
+- **Local dominates incoming** → skip (stale)
+- **Concurrent (split-brain)** → ephemeral data (tracks, threats) uses LWW by server_time; operator data (zones, assets, tasks, waypoints) is accepted + logged to `/api/sync/conflicts` for operator review
+
+Split-brain detection triggers when a peer is unreachable for > 30 s. On reconnection, records modified during the partition window are flagged for audit.
+
+```bash
+# On node 1:
+COP_NODE_ID=cop-node-01 python start.py --port 8100
+
+# On node 2:
+COP_NODE_ID=cop-node-02 python start.py --port 8200
+
+# Register peers:
+curl -X POST http://localhost:8100/api/sync/peers \
+     -H "Content-Type: application/json" \
+     -d '{"url": "http://localhost:8200"}'
+```
+
 ---
 
 ## Scope and Limitations
 
 Technical prototype for demonstration and educational purposes. Does **not** represent an active or deployed military system.
 
-**In scope:** architecture, real-time behavior, AI decision support, multi-sensor fusion, cryptographically-linked decision provenance, LSTM trajectory prediction, TimescaleDB persistence, multi-operator coordination.
+**In scope:** architecture, real-time behavior, AI decision support, multi-sensor fusion, cryptographically-linked decision provenance, LSTM trajectory prediction, TimescaleDB persistence, multi-operator coordination, multi-node federation.
 
 **Out of scope:** classified data handling, fielded-grade security, production key management, live effector integration.
 
@@ -395,4 +477,4 @@ Focus areas: Command & Control Systems, Real-Time Operational Software, COP / IS
 
 ## Keywords
 
-Common Operational Picture · C2 · ISR · Defense Software · Real-Time Systems · Event-Driven Architecture · Multi-Sensor Fusion · AI Decision Support · Decision Lineage · SHA-256 Hash Chain · LSTM Trajectory Prediction · TimescaleDB · Multi-Operator · Anduril Lattice · Palantir Gotham · FastAPI · WebSocket · Leaflet
+Common Operational Picture · C2 · ISR · Defense Software · Real-Time Systems · Event-Driven Architecture · Multi-Sensor Fusion · AI Decision Support · Decision Lineage · SHA-256 Hash Chain · LSTM Trajectory Prediction · TimescaleDB · Multi-Operator · Multi-Node Federation · Vector Clocks · CoT/ATAK · MQTT · Anduril Lattice · Palantir Gotham · FastAPI · WebSocket · Leaflet

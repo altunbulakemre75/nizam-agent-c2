@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
-from ai._fast_math import pairwise_distances as _np_pairwise
+from ai._fast_math import (
+    pairwise_distances as _np_pairwise,
+    nearest_polygon_distances,
+    batch_distances_1_to_n,
+)
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
@@ -30,6 +34,11 @@ ANGLE_SPREAD_DEG      = 60.0    # min angular spread for pincer classification
 ASSET_THREAT_RADIUS_M = 1500.0  # tracks predicted within this of a friendly asset
 
 COOLDOWN_S = 20.0               # don't repeat same alert within N seconds
+
+# Threat levels considered hostile (filters out LOW/unknown before expensive loops)
+_THREAT_FILTER: frozenset = frozenset({"HIGH", "MEDIUM"})
+# Prediction steps to check (12 steps = 60 s look-ahead)
+_MAX_PRED_STEPS = 12
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -113,9 +122,8 @@ def _find_trajectory_convergences(
     if len(track_ids) < MIN_TRACKS_CONVERGE:
         return []
 
-    # For each time step, check all pairs
-    # Predictions have time_ahead_s at 5, 10, 15, ... 60
-    max_steps = min(len(predictions[track_ids[0]]), 12)
+    # For each time step, check all pairs (capped at _MAX_PRED_STEPS for speed)
+    max_steps = min(len(predictions[track_ids[0]]), _MAX_PRED_STEPS)
     convergences: List[Dict[str, Any]] = []
     found_groups: Set[str] = set()  # avoid duplicate groups
 
@@ -217,8 +225,17 @@ def detect_coordinated_attacks(
     warnings: List[Dict[str, Any]] = []
     now = time.time()
 
+    # Filter to HIGH/MEDIUM threat tracks — avoids processing LOW-threat
+    # decoys through the expensive convergence/zone/asset loops.
+    hostile_preds = {
+        tid: pts for tid, pts in predictions.items()
+        if tracks.get(tid, {}).get("threat_level") in _THREAT_FILTER
+    }
+    if len(hostile_preds) < MIN_TRACKS_CONVERGE:
+        hostile_preds = predictions  # fall back if too few hostile tracks
+
     # ── 1. Trajectory convergence detection ────────────────────────────
-    convergences = _find_trajectory_convergences(predictions, tracks)
+    convergences = _find_trajectory_convergences(hostile_preds, tracks)
 
     for conv in convergences:
         tids = conv["track_ids"]
@@ -249,20 +266,45 @@ def detect_coordinated_attacks(
             "time": now,
         })
 
+    # Pre-build flat position arrays once — reused for every zone and asset.
+    # _MAX_PRED_STEPS caps look-ahead to 30 s (6 × 5 s steps).
+    _flat: List[Tuple[str, float, float, int]] = [
+        (tid, pt["lat"], pt["lon"], pt["time_ahead_s"])
+        for tid, pts in hostile_preds.items()
+        for pt in pts[:_MAX_PRED_STEPS]
+        if pt.get("lat") is not None and pt.get("lon") is not None
+    ]
+    if _flat:
+        _fl_lats  = np.array([x[1] for x in _flat], dtype=np.float64)
+        _fl_lons  = np.array([x[2] for x in _flat], dtype=np.float64)
+        _fl_tids  = [x[0] for x in _flat]
+        _fl_times = [x[3] for x in _flat]
+    else:
+        _fl_lats = _fl_lons = np.empty(0, dtype=np.float64)
+        _fl_tids: List[str] = []
+        _fl_times: List[int] = []
+
     # ── 2. Zone-targeted convergence ───────────────────────────────────
     for zid, zone in zones.items():
         coords = zone.get("coordinates", [])
-        if not coords or len(coords) < 3:
+        if not coords or len(coords) < 3 or len(_fl_lats) == 0:
             continue
 
-        # Find tracks predicted to approach this zone
-        approaching: List[Tuple[str, float, int]] = []  # (tid, min_dist, time_ahead)
-        for tid, pts in predictions.items():
-            for pt in pts:
-                dist = _nearest_polygon_dist(pt["lat"], pt["lon"], coords)
-                if dist <= CONVERGENCE_RADIUS_M:
-                    approaching.append((tid, dist, pt["time_ahead_s"]))
-                    break  # first predicted breach point is enough
+        poly_lats = np.array([c[0] for c in coords], dtype=np.float64)
+        poly_lons = np.array([c[1] for c in coords], dtype=np.float64)
+
+        # Single vectorised call replaces O(N × steps × vertices) Python loops
+        dists = nearest_polygon_distances(_fl_lats, _fl_lons, poly_lats, poly_lons)
+        within_idx = np.where(dists <= CONVERGENCE_RADIUS_M)[0]
+
+        # First occurrence per track = earliest step (flat list is time-ordered)
+        app_dict: Dict[str, Tuple[float, int]] = {}
+        for idx in within_idx.tolist():
+            tid = _fl_tids[idx]
+            if tid not in app_dict:
+                app_dict[tid] = (float(dists[idx]), int(_fl_times[idx]))
+
+        approaching = [(tid, d, t) for tid, (d, t) in app_dict.items()]
 
         if len(approaching) >= MIN_TRACKS_CONVERGE:
             tids = sorted([a[0] for a in approaching])
@@ -270,7 +312,6 @@ def detect_coordinated_attacks(
             if not _should_emit(key):
                 continue
 
-            # Compute approach bearings to zone centroid
             z_clat = sum(c[0] for c in coords) / len(coords)
             z_clon = sum(c[1] for c in coords) / len(coords)
             bearings = []
@@ -314,17 +355,22 @@ def detect_coordinated_attacks(
 
     for aid, asset in friendlies.items():
         alat, alon = asset.get("lat"), asset.get("lon")
-        if alat is None or alon is None:
+        if alat is None or alon is None or len(_fl_lats) == 0:
             continue
 
-        # Find tracks predicted to approach this asset
-        approaching: List[Tuple[str, float, int]] = []
-        for tid, pts in predictions.items():
-            for pt in pts:
-                dist = _dist_m(pt["lat"], pt["lon"], alat, alon)
-                if dist <= ASSET_THREAT_RADIUS_M:
-                    approaching.append((tid, dist, pt["time_ahead_s"]))
-                    break
+        # Single vectorised call replaces O(N × steps) Python loops
+        dists = batch_distances_1_to_n(alat, alon, _fl_lats, _fl_lons)
+        within_idx = np.where(dists <= ASSET_THREAT_RADIUS_M)[0]
+
+        # Closest approach per track (minimum distance across all steps)
+        app_dict = {}
+        for idx in within_idx.tolist():
+            tid = _fl_tids[idx]
+            d = float(dists[idx])
+            if tid not in app_dict or d < app_dict[tid][0]:
+                app_dict[tid] = (d, int(_fl_times[idx]))
+
+        approaching = [(tid, d, t) for tid, (d, t) in app_dict.items()]
 
         if len(approaching) >= MIN_TRACKS_CONVERGE:
             tids = sorted([a[0] for a in approaching])

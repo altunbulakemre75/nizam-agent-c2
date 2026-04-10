@@ -10,9 +10,6 @@ Performance: ~100x faster than Python loops for N>50 tracks.
 """
 from __future__ import annotations
 
-import math
-from typing import List, Optional, Tuple
-
 import numpy as np
 
 DEG_TO_M = 111_320.0
@@ -145,10 +142,6 @@ def nearest_polygon_distances(
     V = len(poly_lats)
 
     for k in range(V):
-        # Distance from each outside point to vertex k
-        d = batch_distances_1_to_n(0, 0,
-                                    np.zeros(1), np.zeros(1))  # dummy
-        # Use simpler: distance to each vertex
         vd = batch_distances_1_to_n(poly_lats[k], poly_lons[k], o_lats, o_lons)
         result[outside_idx] = np.minimum(result[outside_idx], vd)
 
