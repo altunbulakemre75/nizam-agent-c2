@@ -47,8 +47,10 @@ class TestEvaluateTrack:
             "intent": intent, "threat_level": threat_level,
         }
 
-    def _make_threat(self, level="MEDIUM", score=50, intent="unknown"):
-        return {"threat_level": level, "score": score, "intent": intent}
+    def _make_threat(self, level="MEDIUM", score=50, intent="unknown",
+                     confidence=50):
+        return {"threat_level": level, "score": score, "intent": intent,
+                "confidence": confidence}
 
     def test_returns_none_without_position(self):
         track = {"lat": None, "lon": None}
@@ -59,7 +61,7 @@ class TestEvaluateTrack:
         """HIGH threat inside kill zone → WEAPONS_FREE."""
         # Point inside zone-kill: [41.025-41.030, 28.980-28.990]
         track = self._make_track(41.027, 28.985, threat_level="HIGH")
-        threat = self._make_threat("HIGH", 85, "attack")
+        threat = self._make_threat("HIGH", 85, "attack", confidence=80)
         result = roe.evaluate_track("T1", track, threat,
                                     sample_zones, sample_assets, set())
         assert result["engagement"] == "WEAPONS_FREE"
@@ -70,7 +72,7 @@ class TestEvaluateTrack:
         # Place track very close to asset-hq (41.015, 28.979)
         track = self._make_track(41.0152, 28.9792, intent="attack",
                                  threat_level="HIGH")
-        threat = self._make_threat("HIGH", 90, "attack")
+        threat = self._make_threat("HIGH", 90, "attack", confidence=80)
         result = roe.evaluate_track("T1", track, threat,
                                     sample_zones, sample_assets, set())
         assert result["engagement"] == "WEAPONS_FREE"
@@ -113,7 +115,7 @@ class TestEvaluateTrack:
     def test_medium_coordinated_escalates(self, sample_zones, sample_assets):
         """MEDIUM threat + coordinated attack → escalated engagement."""
         track = self._make_track(41.050, 29.050, threat_level="MEDIUM")
-        threat = self._make_threat("MEDIUM", 50)
+        threat = self._make_threat("MEDIUM", 50, confidence=80)
         result = roe.evaluate_track("T1", track, threat,
                                     sample_zones, sample_assets, {"T1"})
         # Rule 8 sets WEAPONS_TIGHT, then coordinated modifier +1 → WEAPONS_FREE

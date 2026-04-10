@@ -58,6 +58,7 @@ from ai import timeline as ai_timeline
 from ai import aar as ai_aar
 from ai import roe as ai_roe
 from ai import ml_threat as ai_ml
+from ai import confidence as ai_confidence
 from ai import lineage as ai_lineage
 from ai import trajectory as ai_trajectory
 from ai import track_fsm
@@ -1727,10 +1728,25 @@ def _ai_run_tactical_compute(
                 log.warning("[cop] tactical sub-module %s failed: %s", key, exc)
                 _results[key] = [] if key != "ml_predictions" and key != "uncertainty_cones" else {}
 
-    # ── Group B: ROE depends on coord_attacks ───────────────────────
-    coord_attacks = _results.get("coord_attacks", [])
+    # ── Group B: Confidence scoring, then ROE (depends on confidence) ──
+    coord_attacks  = _results.get("coord_attacks", [])
+    ml_predictions = _results.get("ml_predictions", {})
+    ew_alerts_flat = list(_results.get("ew_alerts", []))
+
+    # Confidence scores fuse ML probability + EW penalties + track quality.
+    # Returns enriched threat dicts with "confidence" and "confidence_grade".
+    enriched_threats = _timed(
+        "confidence",
+        ai_confidence.score_batch,
+        tracks=tracks_snap,
+        threats=threats_snap,
+        ml_predictions=ml_predictions,
+        ew_alerts=ew_alerts_flat,
+    )
+
+    # ROE now receives confidence-enriched threats so its gates can apply.
     roe_advs = _timed("roe", ai_roe.evaluate_all,
-                       tracks=tracks_snap, threats=threats_snap,
+                       tracks=tracks_snap, threats=enriched_threats,
                        zones=zones_snap, assets=assets_snap,
                        coord_attacks=coord_attacks)
 
@@ -1740,9 +1756,10 @@ def _ai_run_tactical_compute(
         "pred_breaches":     list(_results.get("pred_breaches", [])),
         "uncertainty_cones": dict(_results.get("uncertainty_cones", {})),
         "coord_attacks":     list(coord_attacks),
-        "ml_predictions":    _results.get("ml_predictions", {}),
+        "ml_predictions":    ml_predictions,
+        "enriched_threats":  enriched_threats,
         "roe_advisories":    list(roe_advs),
-        "ew_alerts":         list(_results.get("ew_alerts", [])),
+        "ew_alerts":         ew_alerts_flat,
         "_timings_ms":       _timings,
     }
 
@@ -1818,6 +1835,15 @@ async def _ai_tactical_background_task() -> None:
             AI_ML_PREV_TRACKS.clear()
             AI_ML_PREV_TRACKS.update({k: dict(v) for k, v in tracks_snap.items()})
 
+        # Stamp confidence onto live STATE["threats"] so /api/threats and
+        # WebSocket clients see the up-to-date score without a full re-ingest.
+        async with STATE_LOCK:
+            for tid, enriched in result.get("enriched_threats", {}).items():
+                if tid in STATE["threats"]:
+                    STATE["threats"][tid]["confidence"]           = enriched["confidence"]
+                    STATE["threats"][tid]["confidence_grade"]     = enriched["confidence_grade"]
+                    STATE["threats"][tid]["confidence_breakdown"] = enriched["confidence_breakdown"]
+
         AI_ROE_ADVISORIES.clear()
         AI_ROE_ADVISORIES.extend(result["roe_advisories"])
 
@@ -1842,6 +1868,14 @@ async def _ai_tactical_background_task() -> None:
                 "roe_advisories":    AI_ROE_ADVISORIES,
                 "ml_predictions":    AI_ML_PREDICTIONS,
                 "ml_available":      ai_ml.is_available(),
+                "confidence_scores": {
+                    tid: {
+                        "confidence": t.get("confidence"),
+                        "grade":      t.get("confidence_grade"),
+                    }
+                    for tid, t in STATE["threats"].items()
+                    if t.get("confidence") is not None
+                },
                 "server_time":       _utc_now_iso(),
             },
         })

@@ -48,6 +48,12 @@ LONG_RANGE_M     = 3000.0   # beyond engagement range
 # Cooldown for advisory changes per track
 COOLDOWN_S = 10.0
 
+# Confidence gates — applied AFTER the decision matrix
+# Below LOW_CONFIDENCE: engagement capped at WEAPONS_HOLD
+CONFIDENCE_LOW_THRESHOLD        = 35
+# Below WEAPONS_FREE_CONFIDENCE: WEAPONS_FREE downgraded to WEAPONS_TIGHT
+CONFIDENCE_WEAPONS_FREE_MIN     = 65
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _dist_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -112,6 +118,8 @@ def evaluate_track(
     score = int((threat or {}).get("score", (threat or {}).get("threat_score", 0)))
     intent = track.get("intent", (threat or {}).get("intent", "unknown"))
     speed = track.get("speed") or track.get("kinematics", {}).get("speed_mps") or 0
+    # Confidence from ai/confidence.py (stamped onto threat dict by tactical task)
+    confidence = int((threat or {}).get("confidence", 50))
 
     # ── Zone context ──
     in_kill_zone = False
@@ -250,6 +258,25 @@ def evaluate_track(
         reasons.append(f"Skor cok yuksek ({score})")
         urgency = "HIGH"
 
+    # ── Confidence gates (applied last, after all other rules) ──────────────
+    # Gate 1: WEAPONS_FREE requires HIGH confidence — GPS/EW uncertainty too
+    #         great to authorise lethal engagement without human confirmation.
+    if engagement == "WEAPONS_FREE" and confidence < CONFIDENCE_WEAPONS_FREE_MIN:
+        engagement = "WEAPONS_TIGHT"
+        reasons.append(
+            f"WEAPONS_FREE icin guven skoru yetersiz ({confidence}% < {CONFIDENCE_WEAPONS_FREE_MIN}%)"
+        )
+        if urgency == "CRITICAL":
+            urgency = "HIGH"
+
+    # Gate 2: LOW confidence caps engagement at WEAPONS_HOLD regardless of rules.
+    if confidence < CONFIDENCE_LOW_THRESHOLD and _LEVEL_INDEX.get(engagement, 0) > 3:
+        engagement = "WEAPONS_HOLD"
+        reasons.append(
+            f"Dusuk guven skoru — tehdit degerlendirmesi guvensiz ({confidence}%)"
+        )
+        urgency = "MEDIUM" if urgency in ("CRITICAL", "HIGH") else urgency
+
     advisory = {
         "track_id": track_id,
         "engagement": engagement,
@@ -265,6 +292,7 @@ def evaluate_track(
         "is_coordinated": is_coordinated,
         "nearest_asset": nearest_asset_name,
         "nearest_asset_dist_m": round(min_asset_dist) if min_asset_dist < float("inf") else None,
+        "confidence": confidence,
         "message": _build_message(track_id, engagement, urgency, reasons),
         "time": time.time(),
     }
