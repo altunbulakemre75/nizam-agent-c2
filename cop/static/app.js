@@ -859,6 +859,69 @@ function applyAIUpdate(payload) {
 }
 
 /* ── Zone breach alert panel ─────────────────────────────── */
+/* ── ROE Escalation banner ───────────────────────────────── */
+let _escalationBannerEl = null;
+const _escalationLog = [];
+const MAX_ESCALATIONS = 20;
+
+function mountEscalationBanner() {
+  _escalationBannerEl = el("div", {
+    id: "esc-banner",
+    style: {
+      display: "none",
+      position: "fixed", top: "0", left: "0", right: "0", zIndex: "99999",
+      background: "#c0392b", color: "#fff",
+      padding: "8px 16px", fontSize: "13px", fontWeight: "bold",
+      textAlign: "center", letterSpacing: "0.5px",
+      borderBottom: "2px solid #e74c3c",
+      cursor: "pointer",
+    },
+  });
+  _escalationBannerEl.title = "Tıkla: onaylandı olarak işaretle";
+  _escalationBannerEl.addEventListener("click", () => _dismissEscalationBanner());
+  document.body.appendChild(_escalationBannerEl);
+}
+
+function pushEscalation(p) {
+  const t = p.server_time
+    ? new Date(p.server_time).toLocaleTimeString()
+    : new Date().toLocaleTimeString();
+  _escalationLog.unshift({ t, ...p });
+  if (_escalationLog.length > MAX_ESCALATIONS) _escalationLog.pop();
+
+  // Show / refresh banner
+  if (_escalationBannerEl) {
+    const icon = p.level === "CRITICAL" ? "\u{1F6A8}" : "\u26A0\uFE0F";
+    _escalationBannerEl.textContent =
+      `${icon} ${p.message}  [${t}]  — Tıkla/ack et`;
+    _escalationBannerEl.style.display = "block";
+    _escalationBannerEl.style.background =
+      p.level === "CRITICAL" ? "#7b241c" : "#c0392b";
+    // Auto-dismiss after 60s if not clicked
+    clearTimeout(_escalationBannerEl._timer);
+    _escalationBannerEl._timer = setTimeout(
+      () => { if (_escalationBannerEl) _escalationBannerEl.style.display = "none"; },
+      60000,
+    );
+  }
+
+  // Play alarm audio (reuse EW alarm if available)
+  if (typeof playAlarm === "function") {
+    playAlarm(p.level === "CRITICAL" ? "critical" : "warning");
+  }
+}
+
+function _dismissEscalationBanner() {
+  const latest = _escalationLog[0];
+  if (latest?.track_id) {
+    fetch(`/api/roe/${encodeURIComponent(latest.track_id)}/ack`, {
+      method: "POST",
+      headers: _authHeaders(),
+    }).catch(() => {});
+  }
+  if (_escalationBannerEl) _escalationBannerEl.style.display = "none";
+}
+
 const MAX_ALERTS = 20;
 let alertPanelEl = null;
 const alertsLog  = [];
@@ -1180,6 +1243,7 @@ const CopEngine = (() => {
       case "cop.waypoint_removed":return removeWaypoint(ev.payload?.id);
       case "cop.waypoints_cleared":return clearWaypoints();
       case "cop.ew_alert":        return pushEWAlert(ev.payload);
+      case "cop.escalation":      return pushEscalation(ev.payload);
       case "cop.track_merged":    return pushTrackMerged(ev.payload);
       case "cop.annotation":      return _wsAnnotation(ev.payload);
       case "cop.annotation_removed": return _wsAnnotationRemoved(ev.payload);
@@ -4360,6 +4424,7 @@ function boot(){
   mountAssetPanel();
   mountMissionPanel();
   // Phase 5: AI panels
+  mountEscalationBanner();
   mountMLPanel();
   mountROEPanel();
   mountConfidencePanel();

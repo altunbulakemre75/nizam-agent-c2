@@ -67,6 +67,7 @@ from ai import ew_detector as ai_ew
 from ai import ew_ml as ai_ew_ml
 from ai import fusion as ai_fusion
 from ai.fusion import SensorMeasurement as FusionMeasurement
+from ai import escalation as ai_escalation
 from cop import sync as cop_sync
 from cop import circuit_breaker as cop_cb
 from replay import recorder as replay_recorder
@@ -229,6 +230,10 @@ STATE_LOCK   = asyncio.Lock()
 OPERATORS: Dict[str, Dict] = {}
 TRACK_CLAIMS: Dict[str, str] = {}
 WS_OPERATORS: Dict[int, str] = {}   # id(websocket) → operator_id
+
+# ── Track position history (rolling breadcrumb trail) ────────────────────────
+_TRACK_HISTORY_MAX = 50    # max positions kept per track
+_track_histories: Dict[str, List[Dict]] = {}
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -919,6 +924,10 @@ async def api_task_approve(task_id: str, req: Request, current_user=Depends(requ
     if action == "ENGAGE" and target_id:
         asyncio.create_task(_run_effector_impact(str(target_id), task["id"]))
 
+    # Operator action counts as acknowledgement for escalation engine
+    if target_id:
+        ai_escalation.acknowledge(str(target_id), operator_id)
+
     asyncio.create_task(cop_audit.log_action(
         username=operator_id,
         role=getattr(current_user, "role", ""),
@@ -1002,6 +1011,8 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
         AI_TRAJECTORIES.pop(target_id, None)
         ai_trajectory.drop_track(target_id)
         AI_ML_PREDICTIONS.pop(target_id, None)
+        _track_histories.pop(target_id, None)
+        ai_escalation.resolve(target_id)
 
     # 4) Tell the UI to drop the marker.
     await broadcast({
@@ -1040,11 +1051,15 @@ async def api_task_reject(task_id: str, req: Request, current_user=Depends(requi
     _append_event_tail(ev)
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task_update(task)))
+    reject_track_id = task.get("track_id")
+    if reject_track_id:
+        ai_escalation.acknowledge(str(reject_track_id), operator_id)
+
     asyncio.create_task(cop_audit.log_action(
         username=operator_id,
         role=getattr(current_user, "role", ""),
         action="REJECT_TASK", resource_type="task", resource_id=task_id,
-        detail={"track_id": task.get("track_id")},
+        detail={"track_id": reject_track_id},
         ip=req.client.host if req.client else "",
     ))
     return JSONResponse({"ok": True, "task": task})
@@ -1293,6 +1308,8 @@ async def api_reset(_=Depends(require_operator())):
         ai_deconfliction.reset()
         ai_ew.reset()
         ai_ew_ml.reset()
+        ai_escalation.reset()
+        _track_histories.clear()
         cop_sync.reset()
         cop_cb.reset()
         ai_aar.start_session()
@@ -1468,6 +1485,14 @@ async def ingest(req: Request):
                 STATE["tracks"][str(track_id)] = payload
                 lat = payload.get("lat")
                 lon = payload.get("lon")
+                # ── Rolling breadcrumb trail ──────────────────────────────────
+                if lat is not None and lon is not None:
+                    _tid = str(track_id)
+                    hist = _track_histories.setdefault(_tid, [])
+                    hist.append({"lat": round(float(lat), 6), "lon": round(float(lon), 6)})
+                    if len(hist) > _TRACK_HISTORY_MAX:
+                        del hist[:len(hist) - _TRACK_HISTORY_MAX]
+                    payload["history"] = list(hist)
                 if lat is not None and lon is not None and STATE["zones"]:
                     await _check_zone_breaches(str(track_id), float(lat), float(lon))
 
@@ -1849,6 +1874,14 @@ async def _ai_tactical_background_task() -> None:
         for adv in AI_ROE_ADVISORIES:
             ai_aar.record_roe_advisory(adv)
 
+        # ── Escalation check — unanswered advisory alarm ──────────────────
+        escalations = ai_escalation.check(AI_ROE_ADVISORIES)
+        for esc in escalations:
+            await broadcast({
+                "event_type": "cop.escalation",
+                "payload":    {**esc, "server_time": _utc_now_iso()},
+            })
+
         # Broadcast EW jamming alerts individually
         for ew_alert in result.get("ew_alerts", []):
             ai_aar.record_ew_alert(ew_alert)
@@ -2065,7 +2098,24 @@ async def api_ai_roe():
     return JSONResponse({
         "count": len(AI_ROE_ADVISORIES),
         "advisories": AI_ROE_ADVISORIES,
+        "escalation_pending": ai_escalation.get_pending(),
     })
+
+
+@app.post("/api/roe/{track_id}/ack")
+async def api_roe_ack(track_id: str, req: Request,
+                      current_user=Depends(require_operator())):
+    """Operator explicitly acknowledges a ROE advisory escalation."""
+    operator_id = getattr(current_user, "username", None) or "operator"
+    acked = ai_escalation.acknowledge(track_id, operator_id)
+    asyncio.create_task(cop_audit.log_action(
+        username=operator_id,
+        role=getattr(current_user, "role", ""),
+        action="ROE_ACK", resource_type="track", resource_id=track_id,
+        detail={"track_id": track_id},
+        ip=req.client.host if req.client else "",
+    ))
+    return JSONResponse({"ok": True, "track_id": track_id, "acknowledged": acked})
 
 
 @app.get("/api/ai/aar")
