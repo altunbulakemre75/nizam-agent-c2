@@ -3058,9 +3058,10 @@ async function openAdminPanel() {
   const paneUsers     = el("div", { id:"am-pane-users" });
   const paneAudit     = el("div", { id:"am-pane-audit",     style:{ display:"none" }});
   const paneAnalytics = el("div", { id:"am-pane-analytics", style:{ display:"none" }});
-  const panes = { users: paneUsers, audit: paneAudit, analytics: paneAnalytics };
+  const paneWebhooks  = el("div", { id:"am-pane-webhooks",  style:{ display:"none" }});
+  const panes = { users: paneUsers, audit: paneAudit, analytics: paneAnalytics, webhooks: paneWebhooks };
   const tabBtns = {};
-  ["users","audit","analytics"].forEach(id => {
+  ["users","audit","analytics","webhooks"].forEach(id => {
     const btn = el("button", {
       class: id === "users" ? "nz-btn c-ok" : "nz-btn",
       style: { fontSize:"11px", padding:"4px 10px" },
@@ -3071,6 +3072,7 @@ async function openAdminPanel() {
         tabBtns[id].className = "nz-btn c-ok";
         if (id === "audit")     amLoadAudit(paneAudit);
         if (id === "analytics") amLoadAnalytics(paneAnalytics);
+        if (id === "webhooks")  amLoadWebhooks(paneWebhooks);
       },
     }, [id.charAt(0).toUpperCase() + id.slice(1)]);
     tabBtns[id] = btn;
@@ -3105,7 +3107,7 @@ async function openAdminPanel() {
     onclick: () => modal.remove(),
   }, ["Close"]);
 
-  box.append(title, tabBar, paneUsers, paneAudit, paneAnalytics, closeBtn);
+  box.append(title, tabBar, paneUsers, paneAudit, paneAnalytics, paneWebhooks, closeBtn);
   modal.appendChild(box);
   document.body.appendChild(modal);
   modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
@@ -3195,6 +3197,63 @@ function amSparkCard(label, data, valFn, color) {
   card.appendChild(el("div",{style:{fontSize:"10px",color:"var(--text-3)",textAlign:"right"}},
     [`total: ${total}`]));
   return card;
+}
+
+async function amLoadWebhooks(pane) {
+  pane.innerHTML = "";
+  pane.appendChild(el("div",{class:"nz-section",style:{marginBottom:"8px"}},["Outbound Webhooks"]));
+  pane.appendChild(el("div",{style:{color:"var(--text-3)",fontSize:"10px",marginBottom:"10px"}},
+    ["POST to these URLs on: HIGH threat, zone breach, EW alert"]));
+
+  const listEl = el("div", { id:"wh-list" });
+  pane.appendChild(listEl);
+
+  // Add form
+  const urlIn = el("input",{ type:"url", placeholder:"https://hooks.slack.com/...",
+    class:"nz-input", style:{marginBottom:"6px"} });
+  const addBtn = el("button",{ class:"nz-btn c-ok", style:{width:"100%"},
+    onclick: async () => {
+      const url = urlIn.value.trim();
+      if (!url) return;
+      const r = await authFetch("/api/webhooks",{ method:"POST", body:JSON.stringify({url}) });
+      if (r.ok) { urlIn.value=""; await whRefresh(listEl); }
+      else { const e=await r.json(); alert(e.error || "Error"); }
+    }
+  },["+ Add URL"]);
+  pane.append(urlIn, addBtn);
+  await whRefresh(listEl);
+}
+
+async function whRefresh(listEl) {
+  listEl.innerHTML = "";
+  try {
+    const r = await authFetch("/api/webhooks");
+    if (!r.ok) { listEl.textContent = "Cannot load."; return; }
+    const { webhooks } = await r.json();
+    if (!webhooks.length) {
+      listEl.appendChild(el("div",{style:{color:"var(--text-3)",fontSize:"11px",marginBottom:"8px"}},
+        ["No webhooks registered."]));
+      return;
+    }
+    webhooks.forEach(url => {
+      const delBtn = el("button",{ class:"nz-btn c-danger",
+        style:{fontSize:"10px",padding:"2px 7px"},
+        onclick: async () => {
+          await authFetch("/api/webhooks",{ method:"DELETE", body:JSON.stringify({url}) });
+          await whRefresh(listEl);
+        }
+      },["Del"]);
+      const row = el("div",{style:{
+        display:"flex",alignItems:"center",gap:"8px",padding:"4px 0",
+        borderBottom:"1px solid var(--border)",marginBottom:"4px",
+      }});
+      row.append(
+        el("span",{style:{flex:1,fontSize:"10px",color:"var(--text-2)",wordBreak:"break-all"}},[url]),
+        delBtn
+      );
+      listEl.appendChild(row);
+    });
+  } catch(e) { listEl.textContent = "Error: " + e.message; }
 }
 
 async function amRefresh(listEl) {

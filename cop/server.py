@@ -88,6 +88,7 @@ except ImportError:
 
 from cop import audit as cop_audit
 from cop import analytics as cop_analytics
+from cop import webhooks as cop_webhooks
 from cop.ratelimit import RateLimitMiddleware
 
 DB_ENABLED = _DB_AVAILABLE and bool(os.environ.get("DATABASE_URL"))
@@ -607,6 +608,7 @@ async def _check_zone_breaches(track_id: str, lat: float, lon: float) -> None:
         await broadcast(alert)
         asyncio.create_task(_db_write(_persist_alert(alert_payload)))
         ai_aar.record_zone_breach(alert_payload)
+        asyncio.create_task(cop_webhooks.dispatch("cop.zone_breach", alert_payload))
 
 
 # ── Autonomous tasking ────────────────────────────────────────────────────────
@@ -662,6 +664,12 @@ async def _auto_task(threat_id: str, threat_payload: Dict[str, Any]) -> None:
     await broadcast(ev)
     asyncio.create_task(_db_write(_persist_task(task)))
     ai_aar.record_task(task)
+    if level == "HIGH":
+        asyncio.create_task(cop_webhooks.dispatch("cop.threat_high", {
+            "track_id": threat_id, "action": action,
+            "threat_level": level, "intent": intent,
+            "score": task["score"],
+        }))
 
     # Decision lineage: record the auto-task creation against the track.
     try:
@@ -1341,10 +1349,12 @@ async def ingest(req: Request):
                     )
                     for alert in ew_alerts:
                         ai_aar.record_ew_alert(alert)
+                        _ew_payload = {**alert, "server_time": _utc_now_iso()}
                         asyncio.create_task(broadcast({
                             "event_type": "cop.ew_alert",
-                            "payload":    {**alert, "server_time": _utc_now_iso()},
+                            "payload":    _ew_payload,
                         }))
+                        asyncio.create_task(cop_webhooks.dispatch("cop.ew_alert", _ew_payload))
 
                 # ── Phase 5: AI hooks on track update ──
                 if lat is not None and lon is not None:
@@ -2450,6 +2460,46 @@ async def api_analytics_alerts(hours: int = Query(24, ge=1, le=168), db=Depends(
 async def api_analytics_audit(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
     """Audit action count per hour for the last N hours."""
     return JSONResponse({"data": await cop_analytics.audit_summary(db, hours=hours)})
+
+
+# ── Webhooks ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/webhooks", tags=["system"])
+async def api_webhooks_list(_=Depends(require_operator())):
+    """List registered webhook URLs."""
+    return JSONResponse({"webhooks": cop_webhooks.list_webhooks()})
+
+
+@app.post("/api/webhooks", tags=["system"])
+async def api_webhooks_register(req: Request, current_user=Depends(require_operator())):
+    """Register a new webhook URL."""
+    body = await req.json()
+    url = (body.get("url") or "").strip()
+    if not url.startswith("http"):
+        return JSONResponse({"ok": False, "error": "url must start with http(s)"}, status_code=400)
+    added = cop_webhooks.register(url)
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "anonymous"),
+        role=getattr(current_user, "role", ""),
+        action="REGISTER_WEBHOOK", resource_type="webhook", resource_id=url,
+        ip=req.client.host if req.client else "",
+    ))
+    return JSONResponse({"ok": True, "added": added, "url": url})
+
+
+@app.delete("/api/webhooks", tags=["system"])
+async def api_webhooks_remove(req: Request, current_user=Depends(require_operator())):
+    """Remove a registered webhook URL."""
+    body = await req.json()
+    url = (body.get("url") or "").strip()
+    removed = cop_webhooks.unregister(url)
+    asyncio.create_task(cop_audit.log_action(
+        username=getattr(current_user, "username", "anonymous"),
+        role=getattr(current_user, "role", ""),
+        action="REMOVE_WEBHOOK", resource_type="webhook", resource_id=url,
+        ip=req.client.host if req.client else "",
+    ))
+    return JSONResponse({"ok": removed})
 
 
 # ── WebSocket ─────────────────────────────────────────────────
