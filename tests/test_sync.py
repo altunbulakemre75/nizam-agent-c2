@@ -70,8 +70,9 @@ class TestPeerManagement:
 
 class TestBuildDelta:
     def _state(self):
-        now_iso = "2026-04-10T12:00:00+00:00"
-        old_iso = "2026-04-10T11:00:00+00:00"
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        old_iso = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc).isoformat()
         return {
             "tracks": {
                 "T-1": {"id": "T-1", "server_time": now_iso},
