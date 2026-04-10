@@ -31,18 +31,38 @@ log = logging.getLogger("nizam.ai.llm")
 
 # ── Configuration ───────────────────────────────────────────────────────────
 
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic").lower()
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+# All config read at call time — never at import time
+def _provider() -> str:
+    return os.environ.get("LLM_PROVIDER", "anthropic").lower()
 
-LLM_MODEL = os.environ.get("LLM_MODEL", "")
+def _anthropic_key() -> str:
+    return os.environ.get("ANTHROPIC_API_KEY", "")
 
-LLM_ENABLED = bool(
-    (LLM_PROVIDER == "ollama") or
-    ANTHROPIC_API_KEY or
-    OPENAI_API_KEY
-)
+def _openai_key() -> str:
+    return os.environ.get("OPENAI_API_KEY", "")
+
+def _ollama_url() -> str:
+    return os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+def _model() -> str:
+    return os.environ.get("LLM_MODEL", "")
+
+def _enabled() -> bool:
+    p = _provider()
+    return bool(p == "ollama" or _anthropic_key() or _openai_key())
+
+# server.py reads ai_llm.LLM_ENABLED and ai_llm.LLM_PROVIDER as attributes.
+# Expose them as module-level properties via a descriptor module trick.
+import sys as _sys
+import types as _types
+
+class _Module(_types.ModuleType):
+    @property
+    def LLM_ENABLED(self) -> bool: return _enabled()
+    @property
+    def LLM_PROVIDER(self) -> str:  return _provider()
+
+_sys.modules[__name__].__class__ = _Module
 
 # System prompt for the tactical advisor
 SYSTEM_PROMPT = """Sen NIZAM COP sisteminin taktik danismanisin. Gorevlerin:
@@ -179,12 +199,12 @@ async def _call_anthropic(messages: List[Dict], system: str) -> str:
     """Call Claude API via httpx."""
     import httpx
 
-    model = LLM_MODEL or "claude-sonnet-4-20250514"
+    model = _model() or "claude-sonnet-4-20250514"
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
-                "x-api-key": ANTHROPIC_API_KEY,
+                "x-api-key": _anthropic_key(),
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
@@ -204,13 +224,13 @@ async def _call_openai(messages: List[Dict], system: str) -> str:
     """Call OpenAI API via httpx."""
     import httpx
 
-    model = LLM_MODEL or "gpt-4o"
+    model = _model() or "gpt-4o"
     all_messages = [{"role": "system", "content": system}] + messages
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Authorization": f"Bearer {_openai_key()}",
                 "Content-Type": "application/json",
             },
             json={
@@ -228,11 +248,11 @@ async def _call_ollama(messages: List[Dict], system: str) -> str:
     """Call local Ollama instance (OpenAI-compatible endpoint)."""
     import httpx
 
-    model = LLM_MODEL or "llama3.2"
+    model = _model() or "llama3.2"
     all_messages = [{"role": "system", "content": system}] + messages
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
-            f"{OLLAMA_URL}/v1/chat/completions",
+            f"{_ollama_url()}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
             json={
                 "model": model,
@@ -247,13 +267,14 @@ async def _call_ollama(messages: List[Dict], system: str) -> str:
 
 async def _call_llm(messages: List[Dict], system: str) -> str:
     """Route to configured LLM provider."""
-    if LLM_PROVIDER == "ollama":
+    p = _provider()
+    if p == "ollama":
         return await _call_ollama(messages, system)
-    if LLM_PROVIDER == "openai" and OPENAI_API_KEY:
+    if p == "openai" and _openai_key():
         return await _call_openai(messages, system)
-    elif ANTHROPIC_API_KEY:
+    elif _anthropic_key():
         return await _call_anthropic(messages, system)
-    elif OPENAI_API_KEY:
+    elif _openai_key():
         return await _call_openai(messages, system)
     raise ValueError("No LLM API key configured")
 
@@ -279,7 +300,7 @@ async def get_briefing(
     """
     context = _build_context(tracks, threats, assets, zones, anomalies, recommendations)
 
-    if not LLM_ENABLED:
+    if not _enabled():
         return {"briefing": _fallback_brief(context), "llm_used": False}
 
     try:
@@ -311,7 +332,7 @@ async def chat(
     """
     context = _build_context(tracks, threats, assets, zones, anomalies, recommendations)
 
-    if not LLM_ENABLED:
+    if not _enabled():
         return {"answer": _fallback_chat(question, context), "llm_used": False}
 
     try:
@@ -351,11 +372,11 @@ async def parse_command(
 
     Returns {"actions": [...], "explanation": str, "llm_used": bool}
     """
-    if not LLM_ENABLED:
+    if not _enabled():
         return {
             "actions": [],
-            "explanation": "Komut isleme icin LLM API key gerekli. "
-                           "ANTHROPIC_API_KEY veya OPENAI_API_KEY tanimlayin.",
+            "explanation": "Komut isleme icin LLM gerekli. "
+                           "ANTHROPIC_API_KEY, OPENAI_API_KEY veya LLM_PROVIDER=ollama tanimlayin.",
             "llm_used": False,
         }
 
