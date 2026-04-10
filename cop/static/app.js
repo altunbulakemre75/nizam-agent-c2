@@ -414,6 +414,55 @@ function upsertThreat(threat) {
     const pl=UI.trackPolylines.get(id);
     if(pl) pl.setStyle({color:THREAT_COLORS[level]??"#2980b9"});
   }
+  _scheduleRenderThreatList();
+}
+
+/* ── Threat list panel (1.3) ─────────────────────────────── */
+let threatListEl = null;
+let _threatListTimer = null;
+function _scheduleRenderThreatList() {
+  if (_threatListTimer) return;
+  _threatListTimer = setTimeout(() => { _threatListTimer = null; renderThreatList(); }, 200);
+}
+
+function mountThreatList() {
+  threatListEl = el("div", { id:"threat-list" });
+  threatListEl.innerHTML = `<div style="color:var(--text-3);font-size:11px;padding:8px 0">No threats assessed yet</div>`;
+  RIGHT_TABS.threats.insertBefore(threatListEl, RIGHT_TABS.threats.firstChild);
+}
+
+function renderThreatList() {
+  if (!threatListEl) return;
+  const threats = [...UI.threats.values()]
+    .sort((a,b) => (b.score??0) - (a.score??0))
+    .slice(0, 20);
+  if (!threats.length) {
+    threatListEl.innerHTML = `<div style="color:var(--text-3);font-size:11px;padding:4px 0">No threats assessed yet</div>`;
+    return;
+  }
+  const IM = INTENT_META;
+  let html = `<div class="nz-section">Live Threats (${threats.length})</div>`;
+  threats.forEach(t => {
+    const level = t.threat_level ?? "LOW";
+    const lc    = { HIGH:"var(--danger)", MEDIUM:"var(--warn)", LOW:"var(--ok)" }[level] ?? "var(--text-3)";
+    const im    = IM[t.intent ?? "unknown"] ?? IM.unknown;
+    const tti   = t.tti_s != null ? `${t.tti_s}s` : "–";
+    const score = t.score != null ? (+t.score).toFixed(2) : "–";
+    const act   = t.recommended_action ?? "–";
+    html += `<div class="nz-threat-card ${level}" onclick="UI.map&&UI.trackMarkers.get('${t.id}')&&UI.map.panTo(UI.trackMarkers.get('${t.id}').getLatLng())">
+      <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">
+        <span style="font-weight:600;font-family:var(--mono);font-size:11px">${t.id}</span>
+        <span class="nz-level ${level}">${level}</span>
+        <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:${lc}">${score}</span>
+      </div>
+      <div style="color:var(--text-2);font-size:10px;display:flex;gap:8px">
+        <span>TTI <b style="color:var(--text-1)">${tti}</b></span>
+        <span style="color:${im.color}">${im.icon} ${im.label}</span>
+        <span style="margin-left:auto;color:var(--text-3)">${act}</span>
+      </div>
+    </div>`;
+  });
+  threatListEl.innerHTML = html;
 }
 
 /* ── Zones ────────────────────────────────────────────────── */
@@ -544,6 +593,7 @@ function applySnapshot(payload) {
   (payload?.assets    ?? []).forEach(a => upsertAsset(a));
   (payload?.waypoints ?? []).forEach(w => upsertWaypoint(w));
   (payload?.tasks     ?? []).forEach(t => pushTask(t));
+  renderThreatList();
 
   // Multi-operator state (if present in the snapshot)
   if (payload?.operators) {
@@ -602,13 +652,8 @@ const ewLog = [];
 let _ewBadgeCount = 0;
 
 function mountAlertPanel() {
-  alertPanelEl = el("div", { id:"alert-panel", style: {
-    background:"rgba(0,0,0,0.72)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
-    lineHeight:"1.5", maxHeight:"220px", overflowY:"auto",
-  }});
-  alertPanelEl.innerHTML = "<b>Zone Alerts</b><br><span style='opacity:.5'>No breaches yet</span>";
+  alertPanelEl = el("div", { id:"alert-panel", style:{ width:"100%" } });
+  alertPanelEl.innerHTML = `<div class="nz-section">Zone Alerts</div><div style="color:var(--text-3);font-size:11px;padding:4px 0">No breaches yet</div>`;
   RIGHT_TABS.alerts.appendChild(alertPanelEl);
 }
 
@@ -616,23 +661,21 @@ function pushAlert(p) {
   const t = p.server_time ? new Date(p.server_time).toLocaleTimeString() : new Date().toLocaleTimeString();
   alertsLog.unshift({t, track_id:p.track_id, zone_name:p.zone_name, zone_type:p.zone_type});
   if(alertsLog.length>MAX_ALERTS) alertsLog.pop();
-  const zc={kill:"#e74c3c",restricted:"#f39c12",friendly:"#27ae60"};
-  let html="<b>Zone Alerts</b><br>";
+  const ZC = { kill:"var(--danger)", restricted:"var(--warn)", friendly:"var(--ok)" };
+  let html = `<div class="nz-section">Zone Alerts <span style="font-weight:400;color:var(--text-3)">(${alertsLog.length})</span></div>`;
   alertsLog.forEach(a => {
-    const ac = zc[a.zone_type] || '#e74c3c';
-    html += '<span style="color:' + ac + '">\u25A0</span> '
-          + '<b>' + a.track_id + '</b> - ' + a.zone_name
-          + ' <span style="opacity:.6">' + a.t + '</span><br>';
+    const c = ZC[a.zone_type] || "var(--danger)";
+    html += `<div class="nz-card" style="border-left:3px solid ${c};margin-bottom:3px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <span style="font-weight:600;color:${c};font-family:var(--mono);font-size:11px">${a.track_id}</span>
+        <span style="color:var(--text-2)">${a.zone_name}</span>
+        <span style="margin-left:auto;color:var(--text-3);font-size:10px">${a.t}</span>
+      </div>
+    </div>`;
   });
-  alertPanelEl.innerHTML=html;
-  const color=zc[p.zone_type]??"#e74c3c";
-  alertPanelEl.style.outline=`2px solid ${color}`;
-  setTimeout(()=>{alertPanelEl.style.outline="none";},800);
+  if (alertPanelEl) alertPanelEl.innerHTML = html;
   const marker=UI.trackMarkers.get(p.track_id);
-  if(marker){
-    const e=marker.getElement();
-    if(e){e.style.filter="drop-shadow(0 0 8px red)";setTimeout(()=>{e.style.filter="";},1000);}
-  }
+  if(marker){ const e=marker.getElement(); if(e){e.style.filter="drop-shadow(0 0 8px red)";setTimeout(()=>{e.style.filter="";},1000);} }
 }
 
 /* ── EW alert panel ──────────────────────────────────────── */
@@ -728,55 +771,46 @@ let taskPanelEl = null;
 const pendingTasks = new Map();  // task_id -> task
 
 function mountTaskPanel() {
-  taskPanelEl = el("div", { id:"task-panel", style: {
-    position:"fixed", top:"12px", left:"260px", zIndex:"9999",
-    background:"rgba(0,0,0,0.75)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
-    lineHeight:"1.6", minWidth:"240px", maxWidth:"320px",
-    maxHeight:"320px", overflowY:"auto",
-  }});
-  taskPanelEl.innerHTML = "<b>Task Queue</b><br><span style='opacity:.5'>No tasks yet</span>";
-  document.body.appendChild(taskPanelEl);
+  taskPanelEl = el("div", { id:"task-panel", style:{ width:"100%" } });
+  taskPanelEl.innerHTML = `<div class="nz-section">Task Queue</div><div style="color:var(--text-3);font-size:11px;padding:4px 0">No pending tasks</div>`;
+  RIGHT_TABS.tasks.appendChild(taskPanelEl);
 }
 
-const ACTION_COLORS = { ENGAGE:"#e74c3c", OBSERVE:"#f39c12", EVADE:"#3498db" };
+const ACTION_COLORS = { ENGAGE:"var(--danger)", OBSERVE:"var(--warn)", EVADE:"var(--accent)" };
+const ACTION_BG     = { ENGAGE:"rgba(240,64,64,0.1)", OBSERVE:"rgba(240,128,48,0.1)", EVADE:"rgba(79,127,255,0.1)" };
 
 function _renderTaskPanel() {
   if(!taskPanelEl) return;
   const tasks=[...pendingTasks.values()];
   if(tasks.length===0){
-    taskPanelEl.innerHTML="<b>Task Queue</b><br><span style='opacity:.5'>No pending tasks</span>";
+    taskPanelEl.innerHTML=`<div class="nz-section">Task Queue</div><div style="color:var(--text-3);font-size:11px;padding:4px 0">No pending tasks</div>`;
     return;
   }
-  let html="<b>Task Queue</b> <span style='opacity:.6'>"+tasks.length+" pending</span><br><br>";
+  let html=`<div class="nz-section">Task Queue <span style="font-weight:400;color:var(--text-3)">(${tasks.length})</span></div>`;
   tasks.slice(0,8).forEach(t => {
-    const c=ACTION_COLORS[t.action]??"#aaa";
-    const tti=t.tti_s!=null?` TTI:${t.tti_s}s`:"";
-    const intent=INTENT_META[t.intent]?.label??t.intent??"?";
-    const owner=TRACK_CLAIMS[t.track_id];
-    const locked=owner && owner!==MY_OPERATOR_ID;
-    const claimBadge=owner?`<span style="font-size:9px;color:${_opColor(owner)};margin-left:4px">${locked?'🔒':''} ${owner}</span>`:"";
-    html+=`<div data-task-id="${t.id}" data-track-id="${t.track_id||''}"
-      style="border-left:3px solid ${c};padding-left:6px;margin-bottom:6px">
-      <span style="color:${c};font-weight:bold">${t.action}</span>
-      &nbsp;<b>${t.track_id}</b>${claimBadge}<br>
-      <span style="opacity:.7">${t.threat_level} | ${intent}${tti} | score:${t.score}</span><br>
-      <button data-id="${t.id}" data-act="approve" data-action="approve"
-        ${locked?"disabled":""} title="${locked?`Claimed by ${owner}`:''}"
-        style="background:#27ae60;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:${locked?'not-allowed':'pointer'};margin-right:4px;font-size:10px;opacity:${locked?'0.35':'1'}">
-        Approve
-      </button>
-      <button data-id="${t.id}" data-act="reject" data-action="reject"
-        ${locked?"disabled":""} title="${locked?`Claimed by ${owner}`:''}"
-        style="background:#e74c3c;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:${locked?'not-allowed':'pointer'};font-size:10px;opacity:${locked?'0.35':'1'}">
-        Reject
-      </button>
+    const c   = ACTION_COLORS[t.action] ?? "var(--text-2)";
+    const bg  = ACTION_BG[t.action]    ?? "rgba(255,255,255,0.03)";
+    const tti = t.tti_s!=null ? `TTI ${t.tti_s}s` : "";
+    const intent = INTENT_META[t.intent]?.label ?? t.intent ?? "?";
+    const owner  = TRACK_CLAIMS[t.track_id];
+    const locked = owner && owner !== MY_OPERATOR_ID;
+    const lockIcon = locked ? " \uD83D\uDD12" : "";
+    html+=`<div class="nz-task-card" style="border-left:3px solid ${c};background:${bg}">
+      <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+        <span class="action-badge" style="background:${bg};color:${c};border:1px solid ${c}">${t.action}</span>
+        <span style="font-weight:600;font-family:var(--mono);font-size:11px">${t.track_id}</span>
+        ${owner?`<span style="font-size:9px;color:${_opColor(owner)}">${lockIcon} ${owner}</span>`:""}
+        <span style="margin-left:auto;font-size:10px;color:var(--text-3)">${t.score??""}</span>
+      </div>
+      <div style="font-size:10px;color:var(--text-2);margin-bottom:4px">${t.threat_level ?? ""} · ${intent} · ${tti}</div>
+      <div style="display:flex;gap:4px">
+        <button class="nz-btn c-ok" data-id="${t.id}" data-act="approve" ${locked?"disabled":""} style="flex:1;opacity:${locked?'0.3':'1'}">Approve</button>
+        <button class="nz-btn c-danger" data-id="${t.id}" data-act="reject" ${locked?"disabled":""} style="flex:1;opacity:${locked?'0.3':'1'}">Reject</button>
+      </div>
     </div>`;
   });
   taskPanelEl.innerHTML=html;
 
-  // Attach button handlers
   taskPanelEl.querySelectorAll("button[data-id]").forEach(btn => {
     btn.addEventListener("click", async () => {
       if(btn.disabled) return;
@@ -813,25 +847,20 @@ let assetPanelEl=null;
 let assetPlacingType=null;
 
 function mountAssetPanel() {
-  assetPanelEl = el("div", { id:"asset-panel", style:{
-    background:"rgba(0,0,0,0.68)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    lineHeight:"1.5",
-  }});
+  assetPanelEl = el("div", { id:"asset-panel", style:{ width:"100%" } });
 
-  const mkBtn=(label,type,color)=>el("button",{
-    style:{display:"block",width:"100%",marginBottom:"4px",cursor:"pointer",
-           background:color,color:"#fff",border:"none",borderRadius:"4px",padding:"3px 6px"},
+  const mkBtn=(label,type,colorClass)=>el("button",{
+    class:`nz-btn ${colorClass}`, style:{width:"100%",marginBottom:"4px"},
     onclick:()=>startAssetPlace(type)
   },[label]);
 
-  assetPanelEl.appendChild(el("b",{},["Assets"]));
-  assetPanelEl.appendChild(el("br"));
-  assetPanelEl.appendChild(mkBtn("+ Place Friendly","friendly","#2980b9"));
-  assetPanelEl.appendChild(mkBtn("+ Place Hostile","hostile","#e74c3c"));
-  assetPanelEl.appendChild(mkBtn("+ Place Unknown","unknown","#7f8c8d"));
-  const hint=el("div",{style:{marginTop:"4px",opacity:"0.65",fontSize:"10px"}},["Click map to place"]);
+  const header = el("div", { class:"nz-section" }, ["Place Asset"]);
+  const hint = el("div",{style:{marginTop:"4px",color:"var(--text-3)",fontSize:"10px"}},["Click map to place"]);
+
+  assetPanelEl.appendChild(header);
+  assetPanelEl.appendChild(mkBtn("+ Friendly","friendly","c-ok"));
+  assetPanelEl.appendChild(mkBtn("+ Hostile","hostile","c-danger"));
+  assetPanelEl.appendChild(el("button",{class:"nz-btn",style:{width:"100%",marginBottom:"4px"},onclick:()=>startAssetPlace("unknown")},["+ Unknown"]));
   assetPanelEl.appendChild(hint);
   RIGHT_TABS.assets.appendChild(assetPanelEl);
 
@@ -859,23 +888,17 @@ function mountAssetPanel() {
 let missionPanelEl=null, missionDrawing=false, missionOrder=0;
 
 function mountMissionPanel() {
-  missionPanelEl = el("div",{id:"mission-panel",style:{
-    background:"rgba(0,0,0,0.68)", color:"white",
-    padding:"8px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    lineHeight:"1.5",
-  }});
+  missionPanelEl = el("div",{id:"mission-panel",style:{ width:"100%", marginTop:"6px" }});
 
-  const hint=el("div",{style:{marginTop:"4px",opacity:"0.65",fontSize:"10px"}},["Click map to add waypoints"]);
-  const btnStart=el("button",{style:{marginRight:"4px",cursor:"pointer"},onclick:startMission},["Plan Mission"]);
-  const btnDone =el("button",{style:{marginRight:"4px",cursor:"pointer",display:"none"},onclick:stopMission},["Done"]);
-  const btnClear=el("button",{style:{cursor:"pointer"},onclick:async()=>{
+  const hint=el("div",{style:{color:"var(--text-3)",fontSize:"10px",marginTop:"4px"}},["Click map to add waypoints"]);
+  const btnStart=el("button",{class:"nz-btn c-ok",  style:{marginRight:"4px"},onclick:startMission},["Plan Mission"]);
+  const btnDone =el("button",{class:"nz-btn",style:{marginRight:"4px",display:"none"},onclick:stopMission},["Done"]);
+  const btnClear=el("button",{class:"nz-btn c-danger",onclick:async()=>{
     await fetch("/api/waypoints",{method:"DELETE"}); clearWaypoints(); missionOrder=0;
   }},["Clear"]);
 
-  missionPanelEl.appendChild(el("b",{},["Mission"]));
-  missionPanelEl.appendChild(el("br"));
-  missionPanelEl.appendChild(el("div",{},[btnStart,btnDone,btnClear]));
+  missionPanelEl.appendChild(el("div",{class:"nz-section"},["Mission Planning"]));
+  missionPanelEl.appendChild(el("div",{style:{display:"flex",gap:"4px",flexWrap:"wrap"}},[btnStart,btnDone,btnClear]));
   missionPanelEl.appendChild(hint);
   RIGHT_TABS.assets.appendChild(missionPanelEl);
 
@@ -984,20 +1007,14 @@ function connectWS(){
 /* ── Zone draw panel ─────────────────────────────────────── */
 let zoneDrawPoints=[],zoneDrawMarkers=[],zoneDrawing=false;
 function mountZonePanel(){
-  const panel=el("div",{style:{
-    background:"rgba(0,0,0,0.65)",color:"white",
-    padding:"8px 12px",borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial",fontSize:"12px",
-    lineHeight:"1.5",
-  }});
-  const typeSelect=el("select",{style:{marginBottom:"4px",width:"100%",borderRadius:"4px",padding:"2px"}});
+  const panel=el("div",{style:{ width:"100%" }});
+  const typeSelect=el("select",{class:"nz-select",style:{marginBottom:"6px"}});
   ["restricted","kill","friendly"].forEach(t=>typeSelect.appendChild(el("option",{value:t},[t])));
-  const nameInput=el("input",{type:"text",placeholder:"Zone name",
-    style:{width:"100%",marginBottom:"4px",borderRadius:"4px",padding:"2px",boxSizing:"border-box"}});
-  const btnDraw  =el("button",{style:{marginRight:"4px",cursor:"pointer"}},["Draw Zone"]);
-  const btnSave  =el("button",{style:{marginRight:"4px",cursor:"pointer",display:"none"}},["Save"]);
-  const btnCancel=el("button",{style:{cursor:"pointer",display:"none"}},["Cancel"]);
-  const hint     =el("div",{style:{marginTop:"4px",opacity:"0.7",fontSize:"11px"}},[""]);
+  const nameInput=el("input",{type:"text",placeholder:"Zone name...",class:"nz-input",style:{marginBottom:"6px"}});
+  const btnDraw  =el("button",{class:"nz-btn",  style:{marginRight:"4px"}},["Draw Zone"]);
+  const btnSave  =el("button",{class:"nz-btn c-ok", style:{marginRight:"4px",display:"none"}},["Save"]);
+  const btnCancel=el("button",{class:"nz-btn c-danger",style:{display:"none"}},["Cancel"]);
+  const hint     =el("div",{style:{marginTop:"4px",color:"var(--text-3)",fontSize:"10px"}},[""]);
   btnDraw.addEventListener("click",()=>{
     zoneDrawPoints=[];zoneDrawMarkers=[];zoneDrawing=true;
     btnDraw.style.display="none";btnSave.style.display="";btnCancel.style.display="";
@@ -1012,9 +1029,10 @@ function mountZonePanel(){
     await fetch("/api/zones",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(zone)});
     cancelDraw();
   });
-  panel.appendChild(el("b",{},["Zones"]));panel.appendChild(el("br"));
+  panel.appendChild(el("div",{class:"nz-section"},["Draw Zone"]));
   panel.appendChild(nameInput);panel.appendChild(typeSelect);
-  panel.appendChild(el("div",{},[btnDraw,btnSave,btnCancel]));panel.appendChild(hint);
+  panel.appendChild(el("div",{style:{display:"flex",gap:"4px"}},[btnDraw,btnSave,btnCancel]));
+  panel.appendChild(hint);
   RIGHT_TABS.zones.appendChild(panel);
   UI.map.on("click",e=>{
     if(!zoneDrawing||assetPlacingType||missionDrawing) return;
@@ -1521,13 +1539,8 @@ function _metricsBar(label, val, max, color) {
 }
 
 function mountMetricsPanel() {
-  metricsPanelEl = el("div", { id:"metrics-panel", style:{
-    background:"rgba(0,0,0,0.78)", color:"white",
-    padding:"10px 12px", borderRadius:"10px",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"10px",
-    lineHeight:"1.5",
-  }});
-  metricsPanelEl.innerHTML = "<b>📊 Server Metrics</b><br><span style='opacity:.5'>Loading…</span>";
+  metricsPanelEl = el("div", { id:"metrics-panel", style:{ width:"100%" } });
+  metricsPanelEl.innerHTML = `<div class="nz-section">Server Metrics</div><div style="color:var(--text-3);font-size:11px">Loading...</div>`;
   RIGHT_TABS.metrics.appendChild(metricsPanelEl);
 
   // Start polling
@@ -1550,85 +1563,69 @@ async function refreshMetrics() {
   }
 }
 
+function _barColor(val, warn, crit) {
+  if (val >= crit) return "var(--danger)";
+  if (val >= warn) return "var(--warn)";
+  return "var(--ok)";
+}
+
 function renderMetricsPanel(m) {
   if (!metricsPanelEl) return;
-  const ing  = m.ingest    || {};
-  const tac  = m.tactical  || {};
-  const ws   = m.websocket || {};
-  const st   = m.state     || {};
-
+  const ing = m.ingest    || {};
+  const tac = m.tactical  || {};
+  const ws  = m.websocket || {};
+  const st  = m.state     || {};
   const upMin = ((m.uptime_s || 0) / 60).toFixed(1);
   const rps   = (+ing.per_sec || 0).toFixed(1);
+  const p50c  = _barColor(+tac.p50_ms||0, 500, 2000);
+  const p95c  = _barColor(+tac.p95_ms||0, 500, 2000);
 
-  // p95 health: <500ms green, <2000ms amber, >=2000ms red
-  const p95 = +tac.p95_ms || 0;
-  const p95Color = p95 < 500 ? "#27ae60" : p95 < 2000 ? "#f39c12" : "#e74c3c";
-  const p50 = +tac.p50_ms || 0;
-  const p50Color = p50 < 500 ? "#27ae60" : p50 < 2000 ? "#f39c12" : "#e74c3c";
+  const row = (label, val, cls="") =>
+    `<div class="nz-row"><span class="label">${label}</span><span class="val ${cls}">${val}</span></div>`;
 
-  let typesHtml = "";
-  for (const [k, v] of Object.entries(ing.by_type || {})) {
-    typesHtml += `<div style="display:flex;justify-content:space-between;opacity:.75">
-      <span>${k}</span><span>${_fmtNum(v)}</span></div>`;
-  }
-  if (!typesHtml) typesHtml = "<div style='opacity:.5'>—</div>";
+  const bar = (label, val, max, color) => {
+    const pct = Math.min(100, Math.round(((val||0)/max)*100));
+    return `<div class="nz-bar-wrap">
+      <span class="nz-bar-label">${label}</span>
+      <div class="nz-bar-track"><div class="nz-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="nz-bar-val">${_fmtMs(val)}</span>
+    </div>`;
+  };
+
+  let typesHtml = Object.entries(ing.by_type||{})
+    .map(([k,v]) => row(k, _fmtNum(v))).join("") || row("–","–");
 
   metricsPanelEl.innerHTML = `
-    <b>📊 Server Metrics</b>
-    <span style="opacity:.5;float:right">${upMin}m up</span>
-    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
+    <div class="nz-section">Server Metrics <span style="float:right;font-weight:400">${upMin}m up</span></div>
 
-    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">Ingest</div>
-    <div style="display:flex;justify-content:space-between">
-      <span>total</span><span>${_fmtNum(ing.total)}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between">
-      <span>per second</span><span style="color:#3498db">${rps}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;opacity:.7">
-      <span>bad request</span><span>${_fmtNum(ing.bad_request)}</span>
-    </div>
-    <div style="margin-top:3px;font-size:9px">${typesHtml}</div>
-
-    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
-    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">Tactical Engine</div>
-    ${_metricsBar("p50", tac.p50_ms, 3000, p50Color)}
-    ${_metricsBar("p95", tac.p95_ms, 3000, p95Color)}
-    <div style="display:flex;justify-content:space-between;opacity:.75">
-      <span>last / max</span>
-      <span>${_fmtMs(tac.last_ms)} / ${_fmtMs(tac.max_ms)}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;opacity:.75">
-      <span>ran / scheduled</span>
-      <span>${_fmtNum(tac.ran)} / ${_fmtNum(tac.scheduled)}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;opacity:.65;font-size:9px">
-      <span>skipped (rate/overlap/fail)</span>
-      <span>${_fmtNum(tac.rate_skipped)} / ${_fmtNum(tac.overlap_skipped)} / ${_fmtNum(tac.failed)}</span>
+    <div class="nz-card" style="margin-bottom:5px">
+      <div class="nz-section" style="margin-bottom:4px">Ingest</div>
+      ${row("total", _fmtNum(ing.total), "c-accent")}
+      ${row("per second", rps, "c-ok")}
+      ${row("bad", _fmtNum(ing.bad_request))}
+      <div style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">${typesHtml}</div>
     </div>
 
-    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
-    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">WebSocket</div>
-    <div style="display:flex;justify-content:space-between">
-      <span>clients</span><span style="color:#9b59b6">${_fmtNum(ws.clients)}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;opacity:.75">
-      <span>broadcasts / sent</span>
-      <span>${_fmtNum(ws.broadcasts)} / ${_fmtNum(ws.messages_sent)}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;opacity:.65;font-size:9px">
-      <span>send failures</span><span>${_fmtNum(ws.send_failures)}</span>
+    <div class="nz-card" style="margin-bottom:5px">
+      <div class="nz-section" style="margin-bottom:4px">Tactical Engine</div>
+      ${bar("p50", tac.p50_ms, 3000, p50c)}
+      ${bar("p95", tac.p95_ms, 3000, p95c)}
+      ${row("ran / sched", `${_fmtNum(tac.ran)} / ${_fmtNum(tac.scheduled)}`)}
+      ${row("last / max", `${_fmtMs(tac.last_ms)} / ${_fmtMs(tac.max_ms)}`)}
     </div>
 
-    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.1);margin:6px 0">
-    <div style="font-weight:bold;opacity:.8;margin-bottom:2px">State</div>
-    <div style="display:flex;justify-content:space-between">
-      <span>tracks / threats</span>
-      <span>${_fmtNum(st.tracks)} / ${_fmtNum(st.threats)}</span>
+    <div class="nz-card" style="margin-bottom:5px">
+      <div class="nz-section" style="margin-bottom:4px">WebSocket</div>
+      ${row("clients", _fmtNum(ws.clients), "c-accent")}
+      ${row("broadcasts", _fmtNum(ws.broadcasts))}
+      ${row("sent / fail", `${_fmtNum(ws.messages_sent)} / ${_fmtNum(ws.send_failures)}`)}
     </div>
-    <div style="display:flex;justify-content:space-between;opacity:.75">
-      <span>assets / zones / tasks</span>
-      <span>${_fmtNum(st.assets)} / ${_fmtNum(st.zones)} / ${_fmtNum(st.tasks)}</span>
+
+    <div class="nz-card">
+      <div class="nz-section" style="margin-bottom:4px">State</div>
+      ${row("tracks", _fmtNum(st.tracks), "c-accent")}
+      ${row("threats", _fmtNum(st.threats), "c-danger")}
+      ${row("assets / zones / tasks", `${_fmtNum(st.assets)} / ${_fmtNum(st.zones)} / ${_fmtNum(st.tasks)}`)}
     </div>
   `;
 }
@@ -2896,6 +2893,7 @@ function mountRightTabContainer() {
     { id: "threats", label: "Threats" },
     { id: "zones",   label: "Zones"   },
     { id: "assets",  label: "Assets"  },
+    { id: "tasks",   label: "Tasks"   },
     { id: "alerts",  label: "Alerts"  },
     { id: "ew",      label: "EW"      },
     { id: "metrics", label: "Metrics" },
@@ -2947,11 +2945,51 @@ function mountRightTabContainer() {
 
 /* ── Boot ────────────────────────────────────────────────── */
 
+function mountCoordBar() {
+  const bar = document.createElement("div");
+  bar.id = "coord-bar";
+  bar.innerHTML = `<span id="cb-lat">–</span><span class="sep">°N</span>
+    <span id="cb-lon">–</span><span class="sep">°E</span>
+    <span class="sep">|</span>
+    <span id="cb-zoom">z10</span>
+    <span class="sep">|</span>
+    <span id="cb-tile" style="cursor:pointer;color:var(--accent)" title="Toggle tile layer">OSM</span>`;
+  document.body.appendChild(bar);
+
+  // Tile layers
+  const TILES = {
+    OSM: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom:19, attribution:"&copy; OSM" }),
+    SAT: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom:19, attribution:"&copy; Esri" }),
+  };
+  let currentTile = "OSM";
+  TILES.OSM.addTo(UI.map);
+
+  document.getElementById("cb-tile").addEventListener("click", () => {
+    TILES[currentTile].remove();
+    currentTile = currentTile === "OSM" ? "SAT" : "OSM";
+    TILES[currentTile].addTo(UI.map);
+    document.getElementById("cb-tile").textContent = currentTile;
+  });
+
+  UI.map.on("mousemove", e => {
+    const lat = document.getElementById("cb-lat");
+    const lon = document.getElementById("cb-lon");
+    if (lat) lat.textContent = e.latlng.lat.toFixed(4);
+    if (lon) lon.textContent = e.latlng.lng.toFixed(4);
+  });
+  UI.map.on("zoomend", () => {
+    const z = document.getElementById("cb-zoom");
+    if (z) z.textContent = `z${UI.map.getZoom()}`;
+  });
+}
+
 function boot(){
   mountTopBar();
   initMap();
   mountControls();
   mountRightTabContainer();
+  mountThreatList();
+  mountCoordBar();
   mountZonePanel();
   mountAgentPanel();
   mountAlertPanel();

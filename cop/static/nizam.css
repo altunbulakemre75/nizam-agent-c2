@@ -356,6 +356,131 @@ html, body {
 
 .nz-animate-in { animation: slide-in-right 0.2s ease; }
 
+/* ── Form inputs ────────────────────────────────────────── */
+.nz-input, .nz-select {
+  width: 100%;
+  padding: 5px 8px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-1);
+  font-family: var(--font);
+  font-size: 11px;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.nz-input::placeholder { color: var(--text-3); }
+.nz-input:focus, .nz-select:focus { border-color: var(--border-hi); }
+.nz-select option { background: var(--bg-2); color: var(--text-1); }
+
+/* ── Info card ───────────────────────────────────────────── */
+.nz-card {
+  padding: 7px 9px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  line-height: 1.5;
+  transition: background 0.15s;
+}
+.nz-card:hover { background: rgba(255,255,255,0.05); }
+.nz-card + .nz-card { margin-top: 4px; }
+
+/* ── Section header inside a pane ───────────────────────── */
+.nz-section {
+  font-size: 9px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-3);
+  padding: 4px 0 3px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 5px;
+}
+
+/* ── Key-value row ───────────────────────────────────────── */
+.nz-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; padding: 2px 0;
+}
+.nz-row .label { color: var(--text-2); }
+.nz-row .val   { color: var(--text-1); font-family: var(--mono); font-size: 10px; }
+.nz-row .val.c-accent { color: var(--accent); }
+.nz-row .val.c-danger { color: var(--danger); }
+.nz-row .val.c-warn   { color: var(--warn);   }
+.nz-row .val.c-ok     { color: var(--ok);     }
+
+/* ── Mini progress bar ───────────────────────────────────── */
+.nz-bar-wrap {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; padding: 2px 0;
+}
+.nz-bar-label { color: var(--text-2); min-width: 32px; }
+.nz-bar-track {
+  flex: 1; height: 5px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px; overflow: hidden;
+}
+.nz-bar-fill  { height: 100%; border-radius: 3px; transition: width 0.4s; }
+.nz-bar-val   { color: var(--text-2); min-width: 46px; text-align: right; font-family: var(--mono); }
+
+/* ── Threat badge (level) ────────────────────────────────── */
+.nz-level {
+  display: inline-block;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.07em;
+  padding: 1px 5px; border-radius: 3px; text-transform: uppercase;
+}
+.nz-level.HIGH   { background: rgba(240,64,64,0.18); color: var(--danger); border: 1px solid rgba(240,64,64,0.3); }
+.nz-level.MEDIUM { background: rgba(240,128,48,0.18); color: var(--warn);   border: 1px solid rgba(240,128,48,0.3); }
+.nz-level.LOW    { background: rgba(48,192,96,0.18);  color: var(--ok);     border: 1px solid rgba(48,192,96,0.3);  }
+
+/* ── Coordinate status bar ───────────────────────────────── */
+#coord-bar {
+  position: fixed;
+  bottom: 8px; left: 50%; transform: translateX(-50%);
+  z-index: 9990;
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 14px;
+  background: rgba(7,9,15,0.88);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-family: var(--mono); font-size: 10px; color: var(--text-2);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  white-space: nowrap;
+}
+#coord-bar .sep { color: var(--text-3); }
+
+/* ── Task Queue tab pane ─────────────────────────────────── */
+.nz-task-card {
+  padding: 7px 9px;
+  background: rgba(255,255,255,0.03);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.nz-task-card .action-badge {
+  display: inline-block;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 1px 6px; border-radius: 3px;
+  text-transform: uppercase;
+}
+
+/* ── Threat list cards ───────────────────────────────────── */
+#threat-list { width: 100%; }
+.nz-threat-card {
+  padding: 6px 9px;
+  border-radius: var(--r-sm);
+  border-left: 3px solid var(--text-3);
+  background: rgba(255,255,255,0.025);
+  margin-bottom: 3px;
+  font-size: 11px; line-height: 1.4;
+  cursor: pointer; transition: background 0.15s;
+}
+.nz-threat-card:hover { background: rgba(255,255,255,0.05); }
+.nz-threat-card.HIGH   { border-left-color: var(--danger); background: rgba(240,64,64,0.06); }
+.nz-threat-card.MEDIUM { border-left-color: var(--warn);   background: rgba(240,128,48,0.06); }
+.nz-threat-card.LOW    { border-left-color: var(--ok);     }
+
 /* ── Threat badge on map ─────────────────────────────────── */
 .nz-threat-badge {
   position: absolute;
