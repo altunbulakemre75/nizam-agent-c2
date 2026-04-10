@@ -480,6 +480,11 @@ const MAX_ALERTS = 20;
 let alertPanelEl = null;
 const alertsLog  = [];
 
+/* ── EW / Electronic Warfare alert state ────────────────── */
+const MAX_EW_ALERTS = 30;
+let ewPanelEl = null;
+const ewLog = [];
+
 function mountAlertPanel() {
   alertPanelEl = el("div", { id:"alert-panel", style: {
     background:"rgba(0,0,0,0.72)", color:"white",
@@ -512,6 +517,85 @@ function pushAlert(p) {
     const e=marker.getElement();
     if(e){e.style.filter="drop-shadow(0 0 8px red)";setTimeout(()=>{e.style.filter="";},1000);}
   }
+}
+
+/* ── EW alert panel ──────────────────────────────────────── */
+function mountEWPanel() {
+  ewPanelEl = el("div", { id:"ew-panel", style: {
+    background:"rgba(0,0,0,0.78)", color:"white",
+    padding:"8px 12px", borderRadius:"10px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"11px",
+    lineHeight:"1.55", maxHeight:"calc(100vh - 80px)", overflowY:"auto",
+  }});
+  ewPanelEl.innerHTML = "<b style='color:#ff6b6b'>⚡ EW Alerts</b><br>"
+    + "<span style='opacity:.5'>No EW events detected</span>";
+  RIGHT_TABS.ew.appendChild(ewPanelEl);
+}
+
+function _ewToast(text, color) {
+  const t = el("div", { style: {
+    position:"fixed", top:"60px", left:"50%", transform:"translateX(-50%)",
+    background:color, color:"white", padding:"10px 22px", borderRadius:"8px",
+    fontWeight:"bold", fontSize:"13px", zIndex:"99999",
+    fontFamily:"ui-sans-serif,system-ui,Arial",
+    boxShadow:"0 4px 16px rgba(0,0,0,0.6)", pointerEvents:"none",
+    animation:"fadeInDown .2s ease",
+  }}, [text]);
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 4500);
+}
+
+function pushEWAlert(p) {
+  const now = new Date();
+  const t = p.server_time ? new Date(p.server_time).toLocaleTimeString() : now.toLocaleTimeString();
+  ewLog.unshift({ t, type: p.type, severity: p.severity, track_id: p.track_id, detail: p.detail });
+  if (ewLog.length > MAX_EW_ALERTS) ewLog.pop();
+
+  const SEV_COLOR = { CRITICAL: "#e74c3c", HIGH: "#e67e22", MEDIUM: "#f1c40f", LOW: "#27ae60" };
+  const typeIcon  = { GPS_SPOOFING: "🛰️", RADAR_JAMMING: "📡", FALSE_INJECTION: "💉" };
+
+  let html = "<b style='color:#ff6b6b'>⚡ EW Alerts</b><br>";
+  ewLog.forEach(a => {
+    const c   = SEV_COLOR[a.severity] || "#e74c3c";
+    const ico = typeIcon[a.type]      || "⚠️";
+    html += `<span style="color:${c}">${ico} <b>${a.type}</b></span>`;
+    if (a.track_id) html += ` <span style="opacity:.7">[${a.track_id}]</span>`;
+    html += ` <span style="opacity:.5">${a.t}</span><br>`;
+    html += `<span style="opacity:.65;margin-left:14px">${(a.detail||"").slice(0,90)}</span><br>`;
+  });
+  if (ewPanelEl) {
+    ewPanelEl.innerHTML = html;
+    ewPanelEl.style.outline = `2px solid ${SEV_COLOR[p.severity] || "#e74c3c"}`;
+    setTimeout(() => { ewPanelEl.style.outline = "none"; }, 900);
+  }
+
+  // Switch to EW tab automatically for CRITICAL
+  if (p.severity === "CRITICAL") {
+    const btn = document.getElementById("rtab-ew");
+    if (btn) btn.click();
+    _ewToast(`⚡ ${p.type} — CRITICAL`, "#c0392b");
+  } else if (p.severity === "HIGH") {
+    _ewToast(`⚡ ${p.type}`, "#e67e22");
+  }
+
+  // Highlight the affected track on map
+  if (p.track_id) {
+    const marker = UI.trackMarkers.get(p.track_id);
+    if (marker) {
+      const e = marker.getElement();
+      if (e) {
+        e.style.filter = "drop-shadow(0 0 10px #e74c3c)";
+        setTimeout(() => { e.style.filter = ""; }, 1500);
+      }
+    }
+  }
+}
+
+function pushTrackMerged(p) {
+  // Deconfliction: canonical_id absorbed alias_id
+  // Show a brief info toast; no separate panel needed
+  const msg = `🔀 Merged ${p.alias_id || "?"} → ${p.canonical_id || "?"} (score ${(p.score||0).toFixed(2)})`;
+  _ewToast(msg, "#2980b9");
 }
 
 /* ── Phase 3: Task / action-queue panel ─────────────────── */
@@ -721,6 +805,8 @@ const CopEngine = (() => {
       case "cop.waypoint":        return upsertWaypoint(ev.payload);
       case "cop.waypoint_removed":return removeWaypoint(ev.payload?.id);
       case "cop.waypoints_cleared":return clearWaypoints();
+      case "cop.ew_alert":        return pushEWAlert(ev.payload);
+      case "cop.track_merged":    return pushTrackMerged(ev.payload);
     }
   }
   function onEvent(ev){
@@ -2673,6 +2759,7 @@ function mountRightTabContainer() {
     { id: "zones",   label: "📍 Zones"   },
     { id: "assets",  label: "🔵 Assets"  },
     { id: "alerts",  label: "🔔 Alerts"  },
+    { id: "ew",      label: "📡 EW"      },
     { id: "metrics", label: "📊 Metrics" },
   ];
   const activeTabId = { v: "threats" };
@@ -2738,6 +2825,7 @@ function boot(){
   mountZonePanel();
   mountAgentPanel();
   mountAlertPanel();
+  mountEWPanel();
   mountTaskPanel();
   mountAssetPanel();
   mountMissionPanel();
