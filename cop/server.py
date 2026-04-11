@@ -215,6 +215,38 @@ app.include_router(reset_router)
 app.include_router(ingest_router)
 app.include_router(ws_router)
 
+# ── CORS middleware ────────────────────────────────────────────────────────
+# Whitelist of allowed origins, comma-separated. In dev, defaults to common
+# localhost ports so the vanilla-JS frontend can hit /api/* and /ws cleanly.
+# In prod, set ALLOWED_ORIGINS explicitly. Never use "*" — credentials need
+# specific origins, and the wildcard combined with credentialed requests is
+# silently blocked by browsers anyway.
+from fastapi.middleware.cors import CORSMiddleware
+
+_DEFAULT_DEV_ORIGINS = (
+    "http://localhost:8100,"
+    "http://127.0.0.1:8100,"
+    "http://localhost:5173,"
+    "http://127.0.0.1:5173"
+)
+_origins_csv = os.environ.get("ALLOWED_ORIGINS", _DEFAULT_DEV_ORIGINS)
+_allowed_origins = [o.strip() for o in _origins_csv.split(",") if o.strip()]
+
+if "*" in _allowed_origins:
+    raise RuntimeError(
+        "ALLOWED_ORIGINS contains '*'. Wildcard origin is unsafe with "
+        "credentialed requests and silently blocked by browsers. "
+        "Use an explicit comma-separated list instead."
+    )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins     = _allowed_origins,
+    allow_credentials = True,
+    allow_methods     = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers     = ["Authorization", "Content-Type", "X-API-Key"],
+)
+
 # Rate limiting middleware (write endpoints only)
 app.add_middleware(RateLimitMiddleware)
 
