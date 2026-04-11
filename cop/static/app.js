@@ -1518,6 +1518,7 @@ const CopEngine = (() => {
       case "cop.ew_suppress_active": return playNLEffect({...ev.payload, action:"EW"}, "#9b59b6");
       case "cop.effector_outcome":   return pushEffectorOutcome(ev.payload);
       case "cop.effector_status":    return applyEffectorStatus(ev.payload);
+      case "cop.bda":                return pushBDAOutcome(ev.payload);
       case "cop.track_merged":       return pushTrackMerged(ev.payload);
       case "cop.annotation":      return _wsAnnotation(ev.payload);
       case "cop.annotation_removed": return _wsAnnotationRemoved(ev.payload);
@@ -3365,6 +3366,68 @@ function pushEffectorOutcome(payload) {
   renderEffectorStatusPanel({}, []);   // re-render outcome section
 }
 
+/* ── BDA Panel ─────────────────────────────────────────────── */
+const _bdaLog = [];
+let _bdaPanelEl = null;
+
+const _BDA_COLORS = {
+  DESTROYED:      "#27ae60",
+  DESTROYED_LATE: "#2ecc71",
+  EVADED:         "#e74c3c",
+  MISS:           "#f39c12",
+};
+
+function mountBDAPanel() {
+  _bdaPanelEl = el("div", {id:"bda-panel", class:"nz-card", style:{
+    width:"100%", marginBottom:"4px", display:"none",
+  }});
+  _bdaPanelEl.innerHTML = `
+    <div class="nz-section" style="margin-bottom:4px">
+      BDA <span style="opacity:.5;font-weight:400;font-size:9px">Battle Damage Assessment</span>
+    </div>
+    <div id="bda-body" style="font-size:10px"></div>`;
+  const aiTab = RIGHT_TABS["ai"];
+  if (aiTab) aiTab.appendChild(_bdaPanelEl);
+}
+
+function renderBDAPanel() {
+  if (!_bdaPanelEl) return;
+  if (_bdaLog.length === 0) { _bdaPanelEl.style.display = "none"; return; }
+  _bdaPanelEl.style.display = "";
+  const body = document.getElementById("bda-body");
+  if (!body) return;
+  body.innerHTML = _bdaLog.slice(0, 8).map(r => {
+    const col = _BDA_COLORS[r.outcome] || "#aaa";
+    const ago = Math.round((Date.now() - r._t) / 1000);
+    const icon = r.outcome === "DESTROYED" || r.outcome === "DESTROYED_LATE" ? "\u2713" :
+                 r.outcome === "EVADED" ? "\u2715" : "\u23F3";
+    return `<div style="display:flex;justify-content:space-between;align-items:center;
+                         padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+      <div>
+        <span style="color:${col};margin-right:4px">${icon}</span>
+        <span style="font-family:var(--mono);font-size:9px">${escHtml((r.track_id||"?").slice(-10))}</span>
+        <span style="opacity:.4;margin-left:4px;font-size:8px">${escHtml(r.operator||"")}</span>
+      </div>
+      <div style="text-align:right">
+        <span style="color:${col};font-weight:bold;font-size:9px">${escHtml(r.outcome)}</span>
+        <span style="opacity:.4;margin-left:4px;font-size:8px">${ago}s</span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function pushBDAOutcome(payload) {
+  if (!payload?.outcome) return;
+  _bdaLog.unshift({...payload, _t: Date.now()});
+  if (_bdaLog.length > 30) _bdaLog.length = 30;
+  renderBDAPanel();
+  // Flash the panel briefly to catch operator attention
+  if (_bdaPanelEl) {
+    _bdaPanelEl.style.outline = "1px solid " + (_BDA_COLORS[payload.outcome] || "#aaa");
+    setTimeout(() => { if (_bdaPanelEl) _bdaPanelEl.style.outline = ""; }, 1500);
+  }
+}
+
 function applyEffectorStatus(payload) {
   if (!payload?.effector_id) return;
   // Update local status map and re-render
@@ -5114,6 +5177,7 @@ function boot(){
   mountBFTPanel();
   mountEffectorStatusPanel();
   mountDriftPanel();
+  mountBDAPanel();
   // Federation nodes panel
   mountNodesPanel();
   _refreshNodesPanel();

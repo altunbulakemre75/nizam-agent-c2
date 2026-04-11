@@ -2,21 +2,29 @@
 ais_adapter.py  —  AIS maritime sensor adapter for NIZAM
 
 Reads AIS (Automatic Identification System) vessel positions from:
-  --source tcp    : NMEA-0183 TCP stream (AISHub, Kystverket, local VHF receiver)
-  --source serial : COM port / /dev/ttyUSB0 (VHF radio + AIS decoder)
-  --source file   : NMEA sentence file (for testing, one sentence per line)
+  --source tcp       : NMEA-0183 TCP stream (AISHub, SignalK, local VHF receiver)
+  --source serial    : COM port / /dev/ttyUSB0 (VHF radio + AIS decoder)
+  --source aisstream : aisstream.io WebSocket API (free, requires --ais_api_key)
+  --source file      : NMEA sentence file (for testing, one sentence per line)
 
-Decodes AIS message types 1, 2, 3 (Class A position reports)
-and type 18 (Class B position reports) without external libraries.
+Decodes AIS message types 1, 2, 3 (Class A) and 18 (Class B) without external libs.
+aisstream.io source uses a stdlib-only WebSocket client (no extra deps).
 
-Outputs track.update JSONL to stdout → pipe into cop_publisher.py
+Output modes:
+  stdout (default)    : JSONL → pipe into cop_publisher.py
+  --cop_url http://.. : POST directly to COP /api/ingest (no pipe needed)
 
 Usage:
   # TCP stream (e.g. AISHub relay or local SignalK/OpenCPN)
   python adapters/ais_adapter.py --source tcp --host 127.0.0.1 --port 10110
 
+  # aisstream.io — Bosphorus bounding box, direct to COP
+  python adapters/ais_adapter.py --source aisstream \\
+    --ais_api_key YOUR_KEY --cop_url http://localhost:8100 \\
+    --lat_min 40.5 --lat_max 41.5 --lon_min 28.0 --lon_max 30.0
+
   # Serial port (Windows: COM3, Linux: /dev/ttyUSB0)
-  python adapters/ais_adapter.py --source serial --port COM3 --baud 38400
+  python adapters/ais_adapter.py --source serial --serial_port COM3 --baud 38400
 
   # File replay
   python adapters/ais_adapter.py --source file --file data/ais_sample.nmea
@@ -25,13 +33,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
+import os
 import socket
+import ssl
 import sys
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +278,203 @@ def make_track_event(vessel: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# HTTP POST output (--cop_url mode)
+# ---------------------------------------------------------------------------
+
+def _emit(ev: Dict[str, Any], cop_url: str, api_key: str) -> None:
+    """Write event to stdout or POST directly to COP /api/ingest."""
+    line = json.dumps(ev, ensure_ascii=False)
+    if not cop_url:
+        print(line, flush=True)
+        return
+    data = line.encode()
+    req = urllib.request.Request(
+        f"{cop_url.rstrip('/')}/api/ingest",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "NIZAM-ais-adapter/1.0",
+            **({"X-API-Key": api_key} if api_key else {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception as exc:
+        print(f"[ais] POST error: {exc}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Stdlib-only WebSocket client (for aisstream.io — no extra deps)
+# ---------------------------------------------------------------------------
+
+def _ws_recv_n(sock: socket.socket, n: int) -> bytes:
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("WebSocket connection closed")
+        data += chunk
+    return data
+
+
+def _ws_recv_frame(sock: socket.socket) -> Optional[str]:
+    """Read one WebSocket frame. Returns text payload or None (non-text frame)."""
+    header = _ws_recv_n(sock, 2)
+    opcode     = header[0] & 0x0F
+    payload_len = header[1] & 0x7F
+    if payload_len == 126:
+        payload_len = int.from_bytes(_ws_recv_n(sock, 2), "big")
+    elif payload_len == 127:
+        payload_len = int.from_bytes(_ws_recv_n(sock, 8), "big")
+    payload = _ws_recv_n(sock, payload_len)
+    if opcode == 8:   # Close
+        raise ConnectionError("Server sent WebSocket close frame")
+    if opcode == 9:   # Ping → send Pong
+        sock.sendall(b"\x8a\x00")
+        return None
+    if opcode in (1, 0):  # Text or continuation
+        return payload.decode("utf-8", errors="replace")
+    return None
+
+
+def _ws_send_text(sock: socket.socket, text: str) -> None:
+    """Send a masked WebSocket text frame (client → server masking is required)."""
+    data = text.encode("utf-8")
+    mask = os.urandom(4)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+    header = bytearray([0x81])
+    n = len(data)
+    if n < 126:
+        header.append(0x80 | n)
+    elif n < 65536:
+        header += bytearray([0x80 | 126, n >> 8, n & 0xFF])
+    else:
+        header += bytearray([0x80 | 127]) + n.to_bytes(8, "big")
+    sock.sendall(bytes(header) + mask + masked)
+
+
+def _ws_connect(url: str) -> socket.socket:
+    """Open a WebSocket connection (ws:// or wss://) using stdlib only."""
+    use_ssl = url.startswith("wss://")
+    host_path = url[6:] if use_ssl else url[5:]
+    default_port = 443 if use_ssl else 80
+    if "/" in host_path:
+        host, path = host_path.split("/", 1)
+        path = "/" + path
+    else:
+        host, path = host_path, "/"
+    if ":" in host:
+        host, port_s = host.rsplit(":", 1)
+        port = int(port_s)
+    else:
+        port = default_port
+
+    raw = socket.create_connection((host, port), timeout=30)
+    if use_ssl:
+        ctx = ssl.create_default_context()
+        raw = ctx.wrap_socket(raw, server_hostname=host)  # type: ignore[assignment]
+
+    key = base64.b64encode(hashlib.sha1(os.urandom(16)).digest()).decode()
+    handshake = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    ).encode()
+    raw.sendall(handshake)
+
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        chunk = raw.recv(4096)
+        if not chunk:
+            raise ConnectionError("Server closed during WS handshake")
+        resp += chunk
+    if b"101" not in resp:
+        raise ConnectionError(f"WS upgrade failed: {resp[:200]!r}")
+    return raw  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# aisstream.io source
+# ---------------------------------------------------------------------------
+
+_AISSTREAM_URL = "wss://stream.aisstream.io/v0/stream"
+
+
+def parse_aisstream_msg(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Parse an aisstream.io JSON message into normalised vessel fields."""
+    msg_type = msg.get("MessageType", "")
+    meta      = msg.get("MetaData", {})
+    inner     = msg.get("Message", {}).get(msg_type, {})
+
+    if msg_type not in ("PositionReport", "StandardClassBPositionReport",
+                        "ExtendedClassBPositionReport"):
+        return None
+
+    mmsi = str(meta.get("MMSI") or inner.get("Mmsi", ""))
+    if not mmsi:
+        return None
+    lat = meta.get("latitude") or inner.get("Latitude")
+    lon = meta.get("longitude") or inner.get("Longitude")
+    if lat is None or lon is None:
+        return None
+
+    sog = float(inner.get("Sog") or 0)
+    cog = float(inner.get("Cog") or 0)
+    hdg = inner.get("TrueHeading", 511)
+    nav = inner.get("NavigationalStatus", 15)
+    heading = float(hdg) if isinstance(hdg, (int, float)) and int(hdg) < 360 else cog
+    vessel_class = "B" if "ClassB" in msg_type or "Extended" in msg_type else "A"
+
+    return {
+        "mmsi":        mmsi,
+        "lat":         round(float(lat), 7),
+        "lon":         round(float(lon), 7),
+        "speed_mps":   sog * 0.514444,
+        "heading_deg": round(heading, 1),
+        "nav_status":  nav,
+        "vessel_class": vessel_class,
+    }
+
+
+def read_aisstream(
+    api_key: str,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
+) -> Iterator[Dict[str, Any]]:
+    """Yield parsed vessel dicts from aisstream.io WebSocket (reconnects on error)."""
+    sub = json.dumps({
+        "APIKey": api_key,
+        "BoundingBoxes": [[[lat_min, lon_min], [lat_max, lon_max]]],
+    })
+    while True:
+        try:
+            print(f"[ais] connecting to aisstream.io …", file=sys.stderr)
+            sock = _ws_connect(_AISSTREAM_URL)
+            _ws_send_text(sock, sub)
+            print(f"[ais] aisstream.io connected, bbox=[{lat_min},{lon_min}→{lat_max},{lon_max}]",
+                  file=sys.stderr)
+            while True:
+                text = _ws_recv_frame(sock)
+                if text is None:
+                    continue
+                try:
+                    msg = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                vessel = parse_aisstream_msg(msg)
+                if vessel:
+                    yield vessel
+        except Exception as exc:
+            print(f"[ais] aisstream.io error: {exc} — reconnecting in 5s", file=sys.stderr)
+            time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 
@@ -325,20 +535,55 @@ def read_file(path: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="AIS maritime → NIZAM track.update adapter")
-    ap.add_argument("--source", choices=["tcp", "serial", "file"], default="tcp")
-    ap.add_argument("--host", default="127.0.0.1", help="TCP host")
-    ap.add_argument("--port", default=10110, type=int, help="TCP port")
-    ap.add_argument("--serial_port", default="COM3", help="Serial port (--source serial)")
-    ap.add_argument("--baud", default=38400, type=int)
-    ap.add_argument("--file", default="data/ais_sample.nmea", help="NMEA file (--source file)")
-    ap.add_argument("--lat_min", type=float, default=-90.0)
-    ap.add_argument("--lat_max", type=float, default=90.0)
-    ap.add_argument("--lon_min", type=float, default=-180.0)
-    ap.add_argument("--lon_max", type=float, default=180.0)
+    ap.add_argument("--source", choices=["tcp", "serial", "aisstream", "file"],
+                    default="tcp")
+    ap.add_argument("--host",        default="127.0.0.1", help="TCP host")
+    ap.add_argument("--port",        default=10110, type=int, help="TCP port")
+    ap.add_argument("--serial_port", default="COM3",  help="Serial port (--source serial)")
+    ap.add_argument("--baud",        default=38400,   type=int)
+    ap.add_argument("--file",        default="data/ais_sample.nmea",
+                    help="NMEA file (--source file)")
+    ap.add_argument("--ais_api_key", default="",
+                    help="aisstream.io API key (--source aisstream)")
+    ap.add_argument("--lat_min",     type=float, default=36.0,
+                    help="Bounding box min latitude  (default: Turkey south)")
+    ap.add_argument("--lat_max",     type=float, default=42.5,
+                    help="Bounding box max latitude  (default: Turkey north)")
+    ap.add_argument("--lon_min",     type=float, default=26.0,
+                    help="Bounding box min longitude (default: Turkey west)")
+    ap.add_argument("--lon_max",     type=float, default=45.0,
+                    help="Bounding box max longitude (default: Turkey east)")
+    ap.add_argument("--cop_url",     default="",
+                    help="POST directly to COP (e.g. http://localhost:8100). "
+                         "If omitted, output is JSONL on stdout.")
+    ap.add_argument("--api_key",     default="",
+                    help="X-API-Key for COP ingest (when --cop_url is set)")
     args = ap.parse_args()
 
-    print(f"[ais] source={args.source}", file=sys.stderr)
+    cop_url = args.cop_url or ""
+    print(f"[ais] source={args.source} "
+          f"bbox=[{args.lat_min},{args.lon_min}→{args.lat_max},{args.lon_max}] "
+          f"output={'COP HTTP' if cop_url else 'stdout'}",
+          file=sys.stderr)
 
+    count = 0
+
+    if args.source == "aisstream":
+        if not args.ais_api_key:
+            print("[ais] ERROR: --ais_api_key required for --source aisstream", file=sys.stderr)
+            print("[ais] Get a free key at https://aisstream.io", file=sys.stderr)
+            sys.exit(1)
+        for vessel in read_aisstream(args.ais_api_key,
+                                     args.lat_min, args.lat_max,
+                                     args.lon_min, args.lon_max):
+            ev = make_track_event(vessel)
+            _emit(ev, cop_url, args.api_key)
+            count += 1
+            if count % 50 == 0:
+                print(f"[ais] {count} vessel tracks emitted", file=sys.stderr)
+        return
+
+    # NMEA sentence-based sources (tcp / serial / file)
     if args.source == "tcp":
         sentences = read_tcp(args.host, args.port)
     elif args.source == "serial":
@@ -346,20 +591,16 @@ def main() -> None:
     else:
         sentences = read_file(args.file)
 
-    count = 0
     for sentence in sentences:
         vessel = decode_nmea_sentence(sentence)
         if vessel is None:
             continue
-
-        # Bounding box filter
         if not (args.lat_min <= vessel["lat"] <= args.lat_max):
             continue
         if not (args.lon_min <= vessel["lon"] <= args.lon_max):
             continue
-
         ev = make_track_event(vessel)
-        print(json.dumps(ev, ensure_ascii=False), flush=True)
+        _emit(ev, cop_url, args.api_key)
         count += 1
         if count % 50 == 0:
             print(f"[ais] {count} vessel tracks emitted", file=sys.stderr)

@@ -73,6 +73,7 @@ from ai import blue_force as ai_blue_force
 from ai import nonlethal as ai_nonlethal
 from ai import drift as ai_drift
 from ai import retrainer as ai_retrainer
+from ai import bda as ai_bda
 from cop.otel import init_tracing, span as otel_span
 from cop import sync as cop_sync
 from cop import weather as cop_weather
@@ -143,7 +144,19 @@ async def lifespan(_app: FastAPI):
     rec_path = replay_recorder.start(scenario_name)
     log.info("[cop] Recording started: %s", rec_path)
 
-    # 7) Start peer sync push loop (no-op if no peers registered)
+    # 7) BDA monitor loop — checks pending miss outcomes every 10 s
+    async def _bda_monitor_loop() -> None:
+        while True:
+            await asyncio.sleep(10)
+            async with STATE_LOCK:
+                alive = set(STATE["tracks"].keys())
+            finalized = ai_bda.check_pending(alive)
+            for rec in finalized:
+                await broadcast({"event_type": "cop.bda", "payload": rec})
+                log.info("[bda] %s → %s", rec["track_id"], rec["outcome"])
+    _bda_task = asyncio.create_task(_bda_monitor_loop())
+
+    # 8) Start peer sync push loop (no-op if no peers registered)
     _sync_task = cop_sync.start_push_loop(lambda: STATE)
     # Pre-register peers from env: COP_PEERS=http://node2:8100,http://node3:8100
     for peer_url in os.environ.get("COP_PEERS", "").split(","):
@@ -153,6 +166,7 @@ async def lifespan(_app: FastAPI):
 
     yield
 
+    _bda_task.cancel()
     _sync_task.cancel()
 
     # Stop recording on shutdown
@@ -1076,43 +1090,63 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
     except Exception:
         pass
 
-    # 2) Simulate weapon flight time.
+    # 2) BDA — roll hit probability before weapon lands.
+    engaged_at = _utc_now_iso()
+    async with STATE_LOCK:
+        task_snap = STATE["tasks"].get(task_id, {})
+    hit = ai_bda.roll_outcome(
+        task_id       = task_id,
+        track_id      = target_id,
+        action        = "ENGAGE",
+        operator      = task_snap.get("resolved_by", ""),
+        engaged_at    = engaged_at,
+    )
+
+    # 3) Simulate weapon flight time.
     await asyncio.sleep(_EFFECTOR_IMPACT_DELAY_S)
 
-    # 3) FSM → DESTROYED. Remove target from state.
-    track_fsm.on_destroyed(target_id)
-    async with STATE_LOCK:
-        STATE["tracks"].pop(target_id, None)
-        STATE["threats"].pop(target_id, None)
-        AI_PREDICTIONS.pop(target_id, None)
-        AI_TRAJECTORIES.pop(target_id, None)
-        ai_trajectory.drop_track(target_id)
-        AI_ML_PREDICTIONS.pop(target_id, None)
-        _track_histories.pop(target_id, None)
-        ai_escalation.resolve(target_id)
+    outcome_label = "hit" if hit else "miss"
 
-    # 4) Tell the UI to drop the marker.
-    await broadcast({
-        "event_type": "cop.track_removed",
-        "payload": {
-            "id":          target_id,
-            "reason":      "engaged",
-            "task_id":     task_id,
-            "server_time": _utc_now_iso(),
-        },
-    })
-    # Record outcome and update effector status
+    if hit:
+        # 4a) FSM → DESTROYED. Remove target from state.
+        track_fsm.on_destroyed(target_id)
+        async with STATE_LOCK:
+            STATE["tracks"].pop(target_id, None)
+            STATE["threats"].pop(target_id, None)
+            AI_PREDICTIONS.pop(target_id, None)
+            AI_TRAJECTORIES.pop(target_id, None)
+            ai_trajectory.drop_track(target_id)
+            AI_ML_PREDICTIONS.pop(target_id, None)
+            _track_histories.pop(target_id, None)
+            ai_escalation.resolve(target_id)
+
+        # Tell the UI to drop the marker.
+        await broadcast({
+            "event_type": "cop.track_removed",
+            "payload": {
+                "id":          target_id,
+                "reason":      "engaged",
+                "task_id":     task_id,
+                "server_time": _utc_now_iso(),
+            },
+        })
+        log.info("[fire] engage %s: target %s DESTROYED", task_id, target_id)
+    else:
+        # 4b) Miss — track survives; BDA monitor will confirm EVADED/DESTROYED_LATE.
+        track_fsm.on_engage(target_id)   # revert ENGAGING → back to tracked
+        log.info("[fire] engage %s: target %s MISS — monitoring for BDA", task_id, target_id)
+
+    # Record outcome in legacy EFFECTOR_OUTCOMES list and update effector status.
     async with STATE_LOCK:
         EFFECTOR_OUTCOMES.append({
             "task_id":   task_id,
             "track_id":  target_id,
             "action":    "ENGAGE",
-            "outcome":   "hit",
+            "outcome":   outcome_label,
             "timestamp": _utc_now_iso(),
         })
         if len(EFFECTOR_OUTCOMES) > 50:
             EFFECTOR_OUTCOMES[:] = EFFECTOR_OUTCOMES[-50:]
-        # Find assigned effector and set to COOLDOWN
         for a in AI_ASSIGNMENT.get("assignments", []):
             if a.get("threat_id") == target_id:
                 eid = a["effector_id"]
@@ -1123,17 +1157,18 @@ async def _run_effector_impact(target_id: str, task_id: str) -> None:
                 }
                 asyncio.create_task(_effector_cooldown_reset(eid))
                 break
+
     await broadcast({
         "event_type": "cop.effector_outcome",
         "payload": {
-            "task_id":   task_id,
-            "track_id":  target_id,
-            "action":    "ENGAGE",
-            "outcome":   "hit",
+            "task_id":     task_id,
+            "track_id":    target_id,
+            "action":      "ENGAGE",
+            "outcome":     outcome_label,
+            "bda_pending": not hit,
             "server_time": _utc_now_iso(),
         },
     })
-    log.info("[fire] engage %s: target %s neutralized", task_id, target_id)
 
 
 async def _effector_cooldown_reset(effector_id: str) -> None:
@@ -1574,6 +1609,7 @@ async def api_reset(_=Depends(require_operator())):
         ai_ew.reset()
         ai_ew_ml.reset()
         ai_escalation.reset()
+        ai_bda.clear()
         _track_histories.clear()
         cop_sync.reset()
         cop_cb.reset()
@@ -3321,6 +3357,17 @@ async def api_effector_telemetry(
             },
         })
     return JSONResponse({"ok": True, "effector_id": effector_id, "status": status})
+
+
+@app.get("/api/bda", tags=["bda"])
+async def api_bda():
+    """Battle Damage Assessment records — finalized outcomes and pending miss checks."""
+    return JSONResponse({
+        "records":     ai_bda.get_all(),
+        "pending":     ai_bda.get_pending(),
+        "summary":     ai_bda.summary(),
+        "server_time": _utc_now_iso(),
+    })
 
 
 @app.get("/api/effectors/telemetry", tags=["effectors"])

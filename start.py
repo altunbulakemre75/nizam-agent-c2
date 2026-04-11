@@ -94,6 +94,51 @@ def run_orchestrator(host: str, port: int) -> None:
 # Pipeline subprocess (delegates to run_pipeline.py)
 # ---------------------------------------------------------------------------
 
+def run_cot_adapter(args: argparse.Namespace, cop_url: str) -> subprocess.Popen:
+    """Launch adapters/cot_adapter.py — posts directly to COP via HTTP."""
+    cmd = [
+        sys.executable, str(ROOT / "adapters" / "cot_adapter.py"),
+        "--source",  args.cot_source,
+        "--cop_url", cop_url,
+    ]
+    if args.cot_source == "udp":
+        cmd += ["--mcast_group", args.cot_mcast_group,
+                "--udp_port",    str(args.cot_udp_port)]
+    elif args.cot_source == "tcp":
+        cmd += ["--tcp_host", args.cot_tcp_host,
+                "--tcp_port", str(args.cot_tcp_port)]
+    if args.cot_output_host:
+        cmd += ["--cot_output_host",  args.cot_output_host,
+                "--cot_output_port",  str(args.cot_output_port)]
+        if args.cot_output_mcast:
+            cmd.append("--cot_output_mcast")
+    if args.mqtt_api_key:
+        cmd += ["--api_key", args.mqtt_api_key]
+    return subprocess.Popen(cmd, stderr=sys.stderr)
+
+
+def run_ais_adapter(args: argparse.Namespace, cop_url: str) -> subprocess.Popen:
+    """Launch adapters/ais_adapter.py — posts directly to COP via HTTP."""
+    cmd = [
+        sys.executable, str(ROOT / "adapters" / "ais_adapter.py"),
+        "--source",  args.ais_source,
+        "--lat_min", str(args.ais_lat_min),
+        "--lat_max", str(args.ais_lat_max),
+        "--lon_min", str(args.ais_lon_min),
+        "--lon_max", str(args.ais_lon_max),
+        "--cop_url", cop_url,
+    ]
+    if args.ais_source == "aisstream":
+        if not args.ais_api_key:
+            print("[start] WARNING: --ais_api_key missing for aisstream source", file=sys.stderr)
+        cmd += ["--ais_api_key", args.ais_api_key]
+    elif args.ais_source == "tcp":
+        cmd += ["--host", args.ais_host, "--port", str(args.ais_port)]
+    if args.mqtt_api_key:
+        cmd += ["--api_key", args.mqtt_api_key]
+    return subprocess.Popen(cmd, stderr=sys.stderr)
+
+
 def run_adsb_adapter(args: argparse.Namespace, cop_url: str) -> subprocess.Popen:
     """Launch adapters/adsb_adapter.py — posts directly to COP via HTTP."""
     cmd = [
@@ -170,6 +215,38 @@ def main() -> None:
                     help="MQTT topic to subscribe (repeatable; default: nizam/tracks)")
     ap.add_argument("--mqtt_api_key", default="",
                     help="X-API-Key value for COP /api/ingest (when AUTH is enabled)")
+    # CoT/ATAK adapter (optional TAK device feed)
+    ap.add_argument("--cot_source",
+                    choices=["udp", "tcp"],
+                    default=None,
+                    help="Enable CoT/ATAK adapter (udp=multicast SA, tcp=TAK Server)")
+    ap.add_argument("--cot_mcast_group", default="239.2.3.1",
+                    help="UDP multicast group for CoT SA (default: 239.2.3.1)")
+    ap.add_argument("--cot_udp_port",    type=int, default=4242,
+                    help="UDP port for CoT SA (default: 4242)")
+    ap.add_argument("--cot_tcp_host",    default="localhost",
+                    help="TAK Server host (--cot_source tcp)")
+    ap.add_argument("--cot_tcp_port",    type=int, default=8087,
+                    help="TAK Server TCP port (default: 8087)")
+    ap.add_argument("--cot_output_host", default="",
+                    help="Echo NIZAM tracks back as CoT SA to this host/group")
+    ap.add_argument("--cot_output_port", type=int, default=6969,
+                    help="CoT SA output port (default: 6969)")
+    ap.add_argument("--cot_output_mcast", action="store_true",
+                    help="Use multicast for CoT SA output")
+    # AIS maritime adapter (optional real vessel feed)
+    ap.add_argument("--ais_source",
+                    choices=["aisstream", "tcp"],
+                    default=None,
+                    help="Enable AIS adapter (aisstream=aisstream.io WebSocket, tcp=NMEA TCP)")
+    ap.add_argument("--ais_api_key", default="",
+                    help="aisstream.io API key (free at aisstream.io)")
+    ap.add_argument("--ais_host",    default="127.0.0.1", help="AIS TCP host")
+    ap.add_argument("--ais_port",    type=int, default=10110, help="AIS TCP port")
+    ap.add_argument("--ais_lat_min", type=float, default=36.0)
+    ap.add_argument("--ais_lat_max", type=float, default=42.5)
+    ap.add_argument("--ais_lon_min", type=float, default=26.0)
+    ap.add_argument("--ais_lon_max", type=float, default=45.0)
     # ADS-B adapter (optional real aircraft feed)
     ap.add_argument("--adsb_source",
                     choices=["opensky", "adsbfi", "airplaneslive", "dump1090"],
@@ -229,7 +306,19 @@ def main() -> None:
     print("[start] Starting agent pipeline...", file=sys.stderr)
     pipeline = run_pipeline(args)
 
-    # -- 4) MQTT adapter (optional) -----------------------------------------
+    # -- 4) CoT/ATAK adapter (optional) -------------------------------------
+    cot_proc = None
+    if args.cot_source:
+        print(f"[start] Starting CoT/ATAK adapter  source={args.cot_source}", file=sys.stderr)
+        cot_proc = run_cot_adapter(args, ui_url)
+
+    # -- 5) AIS adapter (optional) ------------------------------------------
+    ais_proc = None
+    if args.ais_source:
+        print(f"[start] Starting AIS adapter  source={args.ais_source}", file=sys.stderr)
+        ais_proc = run_ais_adapter(args, ui_url)
+
+    # -- 5) MQTT adapter (optional) -----------------------------------------
     mqtt_proc = None
     if args.mqtt_broker:
         topics = args.mqtt_topic or ["nizam/tracks"]
@@ -261,7 +350,7 @@ def main() -> None:
         except subprocess.TimeoutExpired:
             pipeline.kill()
     finally:
-        for proc in (mqtt_proc, adsb_proc):
+        for proc in (cot_proc, ais_proc, mqtt_proc, adsb_proc):
             if proc is not None:
                 try:
                     proc.terminate()
