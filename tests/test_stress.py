@@ -103,10 +103,12 @@ class TestTacticalLatencyUnderLoad:
     track counts and asserts that p99 latency stays inside sane bounds.
     """
 
+    # Thresholds are ~2.5x observed baseline (41/51/59 ms p95 on a laptop).
+    # Tight enough to catch regressions, loose enough to survive CI jitter.
     @pytest.mark.parametrize("n_tracks,max_p95_ms", [
-        (10,  1500),
-        (50,  3000),
-        (100, 6000),
+        (10,  100),
+        (50,  130),
+        (100, 150),
     ])
     def test_tactical_compute_scales(self, n_tracks, max_p95_ms):
         tracks  = _make_tracks(n_tracks)
@@ -150,10 +152,13 @@ class TestAssignmentScaling:
     the C implementation and fail if anyone accidentally reverts it.
     """
 
+    # Thresholds are ~3x observed MAX across multiple runs (p99 is noisy at
+    # small sample counts). Would catch a pure-Python Hungarian revert
+    # instantly (it blew up to 9+ seconds at 150x150).
     @pytest.mark.parametrize("n_threats,n_effectors,max_ms", [
-        (40,  40,  200),
-        (100, 100, 500),
-        (150, 150, 1000),
+        (40,  40,  20),
+        (100, 100, 150),
+        (150, 150, 300),
     ])
     def test_assignment_scales_sublinear_in_seconds(self, n_threats, n_effectors, max_ms):
         tracks  = _make_tracks(n_threats)
@@ -294,11 +299,11 @@ class TestIngestConcurrency:
         # Regression guard: the ingest handler itself must yield fast.
         # Design invariant: heavy work (tactical, DB, webhooks) is scheduled
         # via asyncio.create_task, so the handler returns in sub-ms. Baseline
-        # on a laptop is p95 ~0.5-1 ms. 50 ms gives 50-100x headroom for
-        # slower CI runners but still catches "someone added blocking work
-        # to /ingest" regressions.
-        assert p95 < 50.0, (
-            f"Ingest p95 regression: {p95:.1f}ms > 50ms "
+        # on a laptop is p95 ~0.5-1.5 ms. 10 ms is ~7x headroom — tight enough
+        # to catch "someone added blocking work to /ingest" regressions
+        # while still surviving Windows ProactorEventLoop jitter.
+        assert p95 < 10.0, (
+            f"Ingest p95 regression: {p95:.1f}ms > 10ms "
             f"(p50={p50:.1f} p99={p99:.1f}) — /ingest is blocking the event loop. "
             f"Did someone add sync DB/HTTP/CPU work without asyncio.create_task?"
         )
