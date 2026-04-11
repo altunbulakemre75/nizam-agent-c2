@@ -1145,13 +1145,23 @@ async def ingest(req: Request):
         METRICS["ingest_bad_request"] += 1
         cop_cb.record_bad(client_ip)
         return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
-    event_type = body.get("event_type")
-    payload    = body.get("payload")
 
-    if not event_type or payload is None:
+    # Pydantic shape validation — rejects malformed envelopes cleanly instead
+    # of letting them detonate inside the fusion engine. Uses the permissive
+    # EventEnvelope (extra="allow") so downstream dict code keeps working.
+    from pydantic import ValidationError
+    from schemas.models import EventEnvelope
+    try:
+        envelope = EventEnvelope.model_validate(body)
+    except ValidationError as exc:
         METRICS["ingest_bad_request"] += 1
         cop_cb.record_bad(client_ip)
-        return JSONResponse({"ok": False, "error": "missing event_type/payload"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "error": "schema validation failed", "detail": exc.errors()[:3]},
+            status_code=400,
+        )
+    event_type = envelope.event_type
+    payload    = envelope.payload
 
     # Validate event_type whitelist
     _VALID_EVENT_TYPES = {"cop.track", "cop.threat", "cop.zone", "cop.alert",
