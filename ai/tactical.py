@@ -120,10 +120,94 @@ def generate_recommendations(
     hostile_tracks = {k: v for k, v in tracks.items()
                       if threats.get(k, {}).get("threat_level") in ("HIGH", "MEDIUM")}
 
+    # ── 0. TYPE-SPECIFIC HARD RULES ─────────────────────────────────────
+    # Missiles, fixed-wing, and vessels have fundamentally different threat
+    # profiles than drones. Apply type-specific overrides before the generic
+    # rules so we don't try to INTERCEPT a Mach-0.8 cruise missile with a
+    # quadcopter or shoot down a civilian airliner.
+    missile_tracks: set = set()
+    fixed_wing_tracks: set = set()
+    vessel_tracks: set = set()
+    for tid, track in tracks.items():
+        label = (track.get("classification", {}).get("label") or "").lower()
+        if label == "missile":
+            missile_tracks.add(tid)
+        elif label == "fixed_wing":
+            fixed_wing_tracks.add(tid)
+        elif label == "vessel":
+            vessel_tracks.add(tid)
+
+    for tid in missile_tracks:
+        track = tracks[tid]
+        kin = track.get("kinematics", {})
+        speed = abs(kin.get("radial_velocity_mps") or track.get("speed") or 0)
+        range_m = kin.get("range_m") or 0
+        tti_s = round(range_m / speed, 1) if (range_m and speed > 0) else None
+        key = f"MISSILE_ALERT:{tid}"
+        if _should_emit(key):
+            tti_txt = f"TTI {tti_s}s — " if tti_s else ""
+            recs.append({
+                "type": "MISSILE_ALERT",
+                "priority": 0,  # above INTERCEPT
+                "track_id": tid,
+                "distance_m": round(range_m),
+                "speed_mps": round(speed, 1),
+                "tti_s": tti_s,
+                "message": (f"FUZE TESPIT: {tid} — {round(speed)} m/s, "
+                            f"{tti_txt}SIGINAK EMRI — INTERCEPT YOK (yuksek hiz)"),
+                "time": now,
+            })
+
+    for tid in fixed_wing_tracks:
+        if threats.get(tid, {}).get("threat_level") not in ("HIGH", "MEDIUM"):
+            continue
+        track = tracks[tid]
+        cls = track.get("classification", {}) or {}
+        callsign = cls.get("callsign", "")
+        key = f"FIXEDWING_OBSERVE:{tid}"
+        if _should_emit(key):
+            tag = f" ({callsign})" if callsign else ""
+            recs.append({
+                "type": "MONITOR",
+                "priority": 3,
+                "track_id": tid,
+                "message": (f"{tid} sabit kanat{tag} yuksek skor — "
+                            f"ROE onayi olmadan AUTO-INTERCEPT yapma (sivil trafik olabilir)"),
+                "time": now,
+            })
+
+    for tid in vessel_tracks:
+        track = tracks[tid]
+        tlat, tlon = track.get("lat"), track.get("lon")
+        if tlat is None or tlon is None:
+            continue
+        in_kill = False
+        for zid, zone in zones.items():
+            if zone.get("type") != "kill":
+                continue
+            coords = zone.get("coordinates", [])
+            if coords and _point_in_polygon(tlat, tlon, coords):
+                in_kill = True
+                break
+        if not in_kill:
+            continue  # vessels outside kill zones are not threats by default
+        key = f"VESSEL_KILLZONE:{tid}"
+        if _should_emit(key):
+            recs.append({
+                "type": "ZONE_WARNING",
+                "priority": 2,
+                "track_id": tid,
+                "message": f"{tid} (gemi) kill zone icinde — ROE dogrula",
+                "time": now,
+            })
+
     # ── 1. INTERCEPT: assign nearest friendly to high threats ────────────
     for tid, track in hostile_tracks.items():
         threat = threats.get(tid, {})
         if threat.get("threat_level") != "HIGH":
+            continue
+        # Skip type-specific handled tracks
+        if tid in missile_tracks or tid in fixed_wing_tracks or tid in vessel_tracks:
             continue
         tlat, tlon = track.get("lat"), track.get("lon")
         if tlat is None or tlon is None:

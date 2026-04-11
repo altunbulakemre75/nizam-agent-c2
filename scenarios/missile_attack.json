@@ -1,0 +1,24 @@
+{
+  "name": "missile_attack",
+  "description": "Supersonic missile inbound + slower escort drone — tests taxonomy handling",
+  "duration_s": 60,
+  "rate_hz": 2.0,
+  "entities": [
+    {
+      "entity_id": "E-MISSILE-01",
+      "label": "missile",
+      "range_m": 9000.0,
+      "az_deg": 340.0,
+      "speed_mps": 320.0,
+      "heading_deg": 180.0
+    },
+    {
+      "entity_id": "E-DRONE-01",
+      "label": "drone",
+      "range_m": 1600.0,
+      "az_deg": 15.0,
+      "speed_mps": 22.0,
+      "heading_deg": 180.0
+    }
+  ]
+}

@@ -78,8 +78,8 @@ def make_track_event(
             "lon": round(lon, 7),
             "status": "CONFIRMED",
             "classification": {
-                "label": "aircraft",
-                "confidence": 0.99,
+                "label": "fixed_wing",
+                "conf": 0.99,
                 "callsign": callsign.strip() if callsign else "",
                 "squawk": squawk or "",
             },

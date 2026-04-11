@@ -258,7 +258,7 @@ def make_track_event(vessel: Dict[str, Any]) -> Dict[str, Any]:
             "status": "CONFIRMED",
             "classification": {
                 "label": "vessel",
-                "confidence": 0.99,
+                "conf": 0.99,
                 "vessel_class": vessel["vessel_class"],
                 "nav_status": nav_label,
                 "mmsi": vessel["mmsi"],

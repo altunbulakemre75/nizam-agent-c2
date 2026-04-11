@@ -116,9 +116,46 @@ def _get_feature_importances() -> Optional[Dict[str, float]]:
     return {name: float(arr[i]) for i, name in enumerate(_ml.FEATURE_NAMES) if i < len(arr)}
 
 
+ENTITY_TYPE_LABELS = {
+    "drone":      ("Drone / UAV",       "warm"),
+    "helicopter": ("Helikopter",        "warm"),
+    "fixed_wing": ("Sabit kanat ucak",  "warm"),
+    "missile":    ("FUZE / ROKET",      "hot"),
+    "vessel":     ("Gemi / Tekne",      "cold"),
+    "vehicle":    ("Kara araci",        "warm"),
+    "bird":       ("Kus (hatali alarm)", "cold"),
+    "balloon":    ("Balon",             "cold"),
+    "unknown":    ("Bilinmiyor",        "cold"),
+}
+
+
+def _entity_type_row(track: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Build a top-row descriptor for the track's entity type."""
+    if not track:
+        return None
+    cls = track.get("classification") or {}
+    label = (cls.get("label") or "").lower()
+    if not label:
+        return None
+    display, severity = ENTITY_TYPE_LABELS.get(label, (label.title(), "cold"))
+    conf = cls.get("conf")
+    conf_txt = f" (%{int(round(conf * 100))} guven)" if isinstance(conf, (int, float)) else ""
+    callsign = cls.get("callsign")
+    extra = f" — {callsign}" if callsign else ""
+    return {
+        "name": "entity_type",
+        "label": "Varlik tipi",
+        "value": label,
+        "note": f"{display}{conf_txt}{extra}",
+        "severity": severity,
+        "importance": 1.0,  # always shown first
+    }
+
+
 def explain_track(
     track_id: str,
     ml_prediction: Optional[Dict[str, Any]] = None,
+    track: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build an operator-facing explanation for why a track scored the way it did.
@@ -140,6 +177,9 @@ def explain_track(
     features = _ml.get_features(track_id)
     importances = _get_feature_importances()
 
+    # Entity type row — always shown first, even if the ML model is cold
+    entity_row = _entity_type_row(track)
+
     if features is None or importances is None:
         return {
             "track_id": track_id,
@@ -147,8 +187,9 @@ def explain_track(
             "reason": "No cached feature vector or trained model for this track yet.",
             "ml_level": (ml_prediction or {}).get("ml_level"),
             "ml_probability": (ml_prediction or {}).get("ml_probability"),
-            "top_features": [],
-            "summary": "Bu iz için ML tahmini henüz hazır değil.",
+            "top_features": [entity_row] if entity_row else [],
+            "summary": (entity_row["note"] if entity_row
+                        else "Bu iz için ML tahmini henüz hazır değil."),
         }
 
     # Pair values with feature names
@@ -185,6 +226,10 @@ def explain_track(
     severity_rank = {"hot": 0, "warm": 1, "cold": 2}
     rows.sort(key=lambda r: (severity_rank.get(r["severity"], 3), -r["importance"]))
     top = rows[:6]
+
+    # Prepend entity type row so the operator sees *what* before *why*
+    if entity_row:
+        top = [entity_row] + top
 
     # Build a 1-sentence summary from the top hot/warm features
     hot_bits = [r["label"] + " — " + r["note"] for r in top if r["severity"] in ("hot", "warm")][:3]

@@ -334,8 +334,23 @@ def main() -> None:
                 tr.radial_velocity_mps = float(det.get("radial_velocity_mps", 0.0))
 
                 tr.add_to_history(tr.range_m, tr.az_deg, ts)
+
+                # ── Missile kinematic classifier ────────────────────────────
+                # Radar-only signal: inbound radial velocity ≥ 150 m/s is a
+                # very strong missile/projectile indicator (no drone class
+                # operates in this regime). Do not downgrade an existing EO
+                # or scenario-provided label once it is confidently set.
+                vr_abs = abs(tr.radial_velocity_mps)
+                if vr_abs >= 150.0 and tr.label_conf < 0.95:
+                    tr.label      = "missile"
+                    tr.label_conf = min(0.99, 0.75 + (vr_abs - 150.0) / 600.0)
+                elif vr_abs >= 70.0 and tr.label in ("drone", "unknown") and tr.label_conf < 0.80:
+                    # Sustained high-speed but sub-missile: likely fixed-wing
+                    tr.label      = "fixed_wing"
+                    tr.label_conf = 0.70
+
                 tr.touch_sensor("RADAR",
-                    f"r={tr.range_m:.0f}m az={tr.az_deg:.1f}° vr={tr.radial_velocity_mps:.1f}m/s intent={tr.intent}")
+                    f"r={tr.range_m:.0f}m az={tr.az_deg:.1f}° vr={tr.radial_velocity_mps:.1f}m/s intent={tr.intent} cls={tr.label}")
 
                 emit(tr, cid, ts, ["RADAR"])
             continue

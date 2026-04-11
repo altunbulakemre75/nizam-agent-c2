@@ -2357,7 +2357,8 @@ async def api_ai_explain(track_id: str):
     and a one-sentence summary, plus the last 5 lineage records for the track.
     """
     ml_pred = AI_ML_PREDICTIONS.get(str(track_id))
-    result = ai_explain.explain_track(track_id, ml_prediction=ml_pred)
+    track = STATE["tracks"].get(str(track_id))
+    result = ai_explain.explain_track(track_id, ml_prediction=ml_pred, track=track)
     chain = ai_lineage.get_chain(track_id)
     result["lineage_tail"] = chain[-5:] if chain else []
     result["lineage_count"] = len(chain)
