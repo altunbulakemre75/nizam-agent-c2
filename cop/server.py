@@ -60,6 +60,7 @@ from ai import roe as ai_roe
 from ai import ml_threat as ai_ml
 from ai import confidence as ai_confidence
 from ai import lineage as ai_lineage
+from ai import explain as ai_explain
 from ai import trajectory as ai_trajectory
 from ai import track_fsm
 from ai import deconfliction as ai_deconfliction
@@ -2346,6 +2347,21 @@ async def api_ai_lineage(track_id: str):
     chain = ai_lineage.get_chain(track_id)
     summary = ai_lineage.get_summary(track_id)
     return JSONResponse({"track_id": track_id, "summary": summary, "chain": chain})
+
+
+@app.get("/api/ai/explain/{track_id}")
+async def api_ai_explain(track_id: str):
+    """Operator-facing explanation: why is this track the threat level it is?
+
+    Returns the top contributing features with Turkish labels + severity coding
+    and a one-sentence summary, plus the last 5 lineage records for the track.
+    """
+    ml_pred = AI_ML_PREDICTIONS.get(str(track_id))
+    result = ai_explain.explain_track(track_id, ml_prediction=ml_pred)
+    chain = ai_lineage.get_chain(track_id)
+    result["lineage_tail"] = chain[-5:] if chain else []
+    result["lineage_count"] = len(chain)
+    return JSONResponse(result)
 
 
 @app.get("/api/ai/lineage")

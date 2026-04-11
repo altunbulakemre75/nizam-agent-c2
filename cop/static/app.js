@@ -2548,6 +2548,112 @@ async function openLineage(trackId) {
 
 /* _esc → modules/utils.js (escText) */
 
+/* ── Why? (Operator-facing explanation) modal ──────────── */
+let _explainModalEl = null;
+
+function mountExplainModal() {
+  _explainModalEl = el("div", { id:"explain-modal", style:{
+    display:"none", position:"fixed", top:"50%", left:"50%",
+    transform:"translate(-50%,-50%)", zIndex:"10003",
+    background:"rgba(8,12,28,0.97)", color:"white",
+    padding:"14px 18px", borderRadius:"12px",
+    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
+    border:"1px solid rgba(255,200,80,0.4)",
+    boxShadow:"0 8px 40px rgba(0,0,0,0.85)",
+    minWidth:"440px", maxWidth:"560px", maxHeight:"72vh",
+    overflowY:"auto",
+  }});
+  _explainModalEl.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <b id="exp-title" style="color:#ffc857;font-size:13px">Neden bu seviye?</b>
+      <span id="exp-close" style="cursor:pointer;opacity:.6;font-size:16px">\u2715</span>
+    </div>
+    <div id="exp-body" style="line-height:1.55"></div>`;
+  document.body.appendChild(_explainModalEl);
+  document.getElementById("exp-close").addEventListener("click", () => {
+    _explainModalEl.style.display = "none";
+  });
+}
+
+const _SEVERITY_COLORS = { hot:"#e74c3c", warm:"#f39c12", cold:"#7a8590" };
+const _SEVERITY_ICONS  = { hot:"\u{1F525}", warm:"\u26A0", cold:"\u00B7" };
+
+async function openExplain(trackId) {
+  if (!_explainModalEl) return;
+  document.getElementById("exp-title").textContent = `Neden bu seviye? \u2014 ${trackId}`;
+  document.getElementById("exp-body").innerHTML = '<div style="opacity:.5">Yukleniyor...</div>';
+  _explainModalEl.style.display = "block";
+
+  try {
+    const r = await fetch(`/api/ai/explain/${encodeURIComponent(trackId)}`).then(r => r.json());
+    const body = document.getElementById("exp-body");
+    if (!r.model_available) {
+      body.innerHTML = `<div style="opacity:.6">${escHtml(r.reason || "ML tahmini bu iz icin hazir degil.")}</div>`;
+      return;
+    }
+
+    const mlColor = THREAT_COLORS[r.ml_level] || "#6366f1";
+    const probPct = r.ml_probability != null ? Math.round(r.ml_probability * 100) : "?";
+
+    let html = "";
+
+    // Header: ML level + probability
+    html += `<div style="display:flex;gap:10px;align-items:center;padding:8px 10px;
+                         background:${mlColor}18;border:1px solid ${mlColor}55;
+                         border-radius:8px;margin-bottom:10px">
+      <div style="font-size:22px;font-weight:bold;color:${mlColor}">${r.ml_level || "?"}</div>
+      <div style="flex:1">
+        <div style="opacity:.85">${escHtml(r.summary || "")}</div>
+        <div style="font-size:10px;opacity:.55;margin-top:2px">Model guveni: <b>${probPct}%</b></div>
+      </div>
+    </div>`;
+
+    // Top features table
+    html += `<div style="margin-bottom:8px;opacity:.7;font-size:10px;text-transform:uppercase;letter-spacing:.5px">En etkili faktorler</div>`;
+    html += `<div style="display:flex;flex-direction:column;gap:4px">`;
+    for (const f of (r.top_features || [])) {
+      const col = _SEVERITY_COLORS[f.severity] || "#7a8590";
+      const icon = _SEVERITY_ICONS[f.severity] || "";
+      const impPct = Math.round((f.importance || 0) * 100);
+      html += `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;
+                           background:${col}12;border-left:3px solid ${col};border-radius:4px">
+        <span style="font-size:13px">${icon}</span>
+        <div style="flex:1">
+          <div style="font-weight:600;color:${col}">${escHtml(f.label)}</div>
+          <div style="font-size:10px;opacity:.8">${escHtml(f.note)}</div>
+        </div>
+        <div style="font-size:9px;opacity:.45;text-align:right">
+          <div>Agirlik</div>
+          <div style="font-weight:bold">${impPct}%</div>
+        </div>
+      </div>`;
+    }
+    html += `</div>`;
+
+    // Lineage tail
+    if ((r.lineage_tail || []).length > 0) {
+      html += `<div style="margin-top:12px;opacity:.7;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Son kararlar (${r.lineage_count || 0})</div>`;
+      html += `<div style="margin-top:4px;border-left:2px solid rgba(150,200,255,0.25);padding-left:8px">`;
+      for (const rec of r.lineage_tail) {
+        const c = _stageColors[rec.stage] || "#aaa";
+        const icon = _stageIcon(rec.stage);
+        html += `<div style="margin:3px 0;font-size:10px">
+          ${icon} <b style="color:${c}">${(rec.stage || "?").toUpperCase()}</b>
+          <span style="opacity:.75">${escHtml(rec.summary || "")}</span>
+        </div>`;
+      }
+      html += `</div>
+        <div style="margin-top:6px;text-align:right">
+          <span onclick="openLineage('${escHtml(trackId)}')" style="cursor:pointer;color:#4fc3f7;font-size:10px;text-decoration:underline">Tam zinciri gor \u2192</span>
+        </div>`;
+    }
+
+    body.innerHTML = html;
+  } catch (e) {
+    document.getElementById("exp-body").innerHTML = `<div style="color:#f55">Hata: ${escHtml(e.message)}</div>`;
+  }
+}
+
 /* ── Multi-operator ─────────────────────────────────────── */
 
 let operatorPanelEl = null;
@@ -2574,6 +2680,7 @@ function showTrackContextMenu(mouseEvent, trackId) {
     boxShadow:"0 4px 16px rgba(0,0,0,0.6)", minWidth:"160px", overflow:"hidden",
   }});
   const items = [
+    {label: "💡 Neden bu seviye?", action: () => openExplain(trackId)},
     {label: "🔍 Decision Lineage", action: () => openLineage(trackId)},
     {label: isMine ? "🔓 Release Claim" : "🔒 Claim Track", action: () => claimTrack(trackId)},
   ];
@@ -5249,6 +5356,7 @@ function boot(){
   mountTacticalPanel();
   mountTimelinePopup();
   mountLineageModal();
+  mountExplainModal();
   mountOperatorPanel();
   mountAIAdvisorPanel();
   mountChatPanel();
