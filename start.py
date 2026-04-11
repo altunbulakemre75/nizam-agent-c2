@@ -4,11 +4,17 @@ start.py  —  NIZAM all-in-one launcher
 Starts:
   1) COP server  (FastAPI + WebSocket)  on --cop_port  (default 8100)
   2) Agent pipeline  (world -> radar -> rf -> fuser -> cop_publisher)
+  3) MQTT adapter  (optional, when --mqtt_broker is supplied)
 
 Usage:
   python start.py
   python start.py --cop_port 8100 --duration_s 600 --rate_hz 2
   python start.py --open_browser
+
+  # With external MQTT sensor feed:
+  python start.py --mqtt_broker 192.168.1.10 --mqtt_topic sensors/tracks
+  python start.py --mqtt_broker mqtt.example.com --mqtt_port 8883 \
+                  --mqtt_topic sensors/# --mqtt_api_key YOUR_KEY
 
 Ctrl+C stops everything cleanly.
 """
@@ -88,6 +94,21 @@ def run_orchestrator(host: str, port: int) -> None:
 # Pipeline subprocess (delegates to run_pipeline.py)
 # ---------------------------------------------------------------------------
 
+def run_mqtt_adapter(args: argparse.Namespace, cop_url: str) -> subprocess.Popen:
+    """Launch adapters/mqtt_adapter.py — posts directly to COP via HTTP."""
+    cmd = [
+        sys.executable, str(ROOT / "adapters" / "mqtt_adapter.py"),
+        "--broker", args.mqtt_broker,
+        "--port",   str(args.mqtt_port),
+        "--cop_url", cop_url,
+    ]
+    for topic in (args.mqtt_topic or ["nizam/tracks"]):
+        cmd += ["--topic", topic]
+    if args.mqtt_api_key:
+        cmd += ["--api_key", args.mqtt_api_key]
+    return subprocess.Popen(cmd, stderr=sys.stderr)
+
+
 def run_pipeline(args: argparse.Namespace) -> subprocess.Popen:
     cmd = [
         sys.executable, str(ROOT / "run_pipeline.py"),
@@ -124,6 +145,15 @@ def main() -> None:
     ap.add_argument("--log_out",     default=None, help="Save events to JSONL for replay (e.g. logs/run.jsonl)")
     ap.add_argument("--open_browser", action="store_true", help="Open COP UI in default browser")
     ap.add_argument("--verbose",     action="store_true")
+    # MQTT adapter (optional external sensor feed)
+    ap.add_argument("--mqtt_broker",  default=None,
+                    help="MQTT broker hostname — enables MQTT adapter (e.g. 192.168.1.10)")
+    ap.add_argument("--mqtt_port",    type=int, default=1883,
+                    help="MQTT broker port (default 1883; use 8883 for TLS)")
+    ap.add_argument("--mqtt_topic",   action="append", default=None,
+                    help="MQTT topic to subscribe (repeatable; default: nizam/tracks)")
+    ap.add_argument("--mqtt_api_key", default="",
+                    help="X-API-Key value for COP /api/ingest (when AUTH is enabled)")
     args = ap.parse_args()
 
     ui_url   = f"http://127.0.0.1:{args.cop_port}"
@@ -170,16 +200,33 @@ def main() -> None:
     print("[start] Starting agent pipeline...", file=sys.stderr)
     pipeline = run_pipeline(args)
 
-    # -- 4) Wait / handle Ctrl+C --------------------------------------------
+    # -- 4) MQTT adapter (optional) -----------------------------------------
+    mqtt_proc = None
+    if args.mqtt_broker:
+        topics = args.mqtt_topic or ["nizam/tracks"]
+        print(
+            f"[start] Starting MQTT adapter → {args.mqtt_broker}:{args.mqtt_port}"
+            f"  topics={topics}",
+            file=sys.stderr,
+        )
+        mqtt_proc = run_mqtt_adapter(args, ui_url)
+
+    # -- 5) Wait / handle Ctrl+C --------------------------------------------
     try:
         pipeline.wait()
     except KeyboardInterrupt:
-        print("\n[start] Interrupted — shutting down pipeline...", file=sys.stderr)
+        print("\n[start] Interrupted — shutting down...", file=sys.stderr)
         pipeline.terminate()
         try:
             pipeline.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pipeline.kill()
+    finally:
+        if mqtt_proc is not None:
+            try:
+                mqtt_proc.terminate()
+            except Exception:
+                pass
 
     print("[start] Done.", file=sys.stderr)
 
