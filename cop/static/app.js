@@ -621,6 +621,57 @@ function upsertThreat(threat) {
   updateThreatIntelCard();
 }
 
+/* ── Collapsible panel wrapper ───────────────────────────── */
+/**
+ * Wrap bodyEl in a collapsible section with a thin header.
+ * State is persisted in localStorage under key "nz.col.<key>".
+ * Returns the outer wrapper element to append into a container.
+ */
+function _makeCollapsible(label, bodyEl, key) {
+  const lsKey  = `nz.col.${key}`;
+  const isOpen = localStorage.getItem(lsKey) !== "0";
+
+  const wrap = el("div", { style: { width: "100%", marginBottom: "2px" } });
+  const hdr  = el("div", {
+    style: {
+      display: "flex", alignItems: "center", gap: "5px",
+      padding: "4px 8px", cursor: "pointer", userSelect: "none",
+      background: "rgba(255,255,255,0.05)", color: "var(--text-3)",
+      borderRadius: isOpen ? "4px 4px 0 0" : "4px",
+      borderLeft: "2px solid rgba(255,255,255,0.12)",
+      fontSize: "9px", fontWeight: "700", letterSpacing: "0.8px",
+      textTransform: "uppercase",
+    },
+  });
+  const arrow = el("span", {
+    style: {
+      fontSize: "8px", display: "inline-block",
+      transition: "transform 0.15s",
+      transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)",
+    },
+  }, ["\u25BC"]);
+  hdr.appendChild(arrow);
+  hdr.appendChild(el("span", {}, [label]));
+
+  // Seamless join: remove top border-radius of body so header and body merge
+  bodyEl.style.borderTopLeftRadius  = "0";
+  bodyEl.style.borderTopRightRadius = "0";
+  bodyEl.style.marginTop = "0";
+  if (!isOpen) bodyEl.style.display = "none";
+
+  hdr.addEventListener("click", () => {
+    const nowOpen = bodyEl.style.display === "none";
+    bodyEl.style.display = nowOpen ? "" : "none";
+    arrow.style.transform = nowOpen ? "rotate(0deg)" : "rotate(-90deg)";
+    hdr.style.borderRadius = nowOpen ? "4px 4px 0 0" : "4px";
+    localStorage.setItem(lsKey, nowOpen ? "1" : "0");
+  });
+
+  wrap.appendChild(hdr);
+  wrap.appendChild(bodyEl);
+  return wrap;
+}
+
 /* ── Threat list panel (1.3) ─────────────────────────────── */
 /* ── 2.4 Threat Intelligence Card ───────────────────────── */
 let intelCardEl = null;
@@ -1732,9 +1783,8 @@ function mountBreachPanel() {
   breachPanelEl = el("div", { id:"breach-panel", class:"nz-card", style:{
     padding:"8px 10px", maxHeight:"180px", overflowY:"auto",
   }});
-  breachPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">PREDICTIVE BREACH</div>
-    <span style="color:var(--text-3);font-size:10px">Ihlal tahmini yok</span>`;
-  RIGHT_TABS.threats.appendChild(breachPanelEl);
+  breachPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Ihlal tahmini yok</span>`;
+  RIGHT_TABS.threats.appendChild(_makeCollapsible("\u26A0 Predictive Breach", breachPanelEl, "breach"));
 }
 
 function renderBreachPanel(breaches) {
@@ -1758,9 +1808,8 @@ function mountMLPanel() {
   mlPanelEl = el("div", { id:"ml-panel", class:"nz-card", style:{
     padding:"8px 10px", maxHeight:"220px", overflowY:"auto",
   }});
-  mlPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">ML THREAT MODEL</div>
-    <span style="color:var(--text-3);font-size:10px">Bekleniyor...</span>`;
-  RIGHT_TABS.threats.appendChild(mlPanelEl);
+  mlPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Bekleniyor...</span>`;
+  RIGHT_TABS.threats.appendChild(_makeCollapsible("\u2699 ML Threat", mlPanelEl, "ml"));
 }
 
 function renderMLPanel(preds) {
@@ -1777,9 +1826,8 @@ function mountROEPanel() {
   roePanelEl = el("div", { id:"roe-panel", class:"nz-card", style:{
     padding:"8px 10px", maxHeight:"200px", overflowY:"auto",
   }});
-  roePanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">ROE ADVISORY</div>
-    <span style="color:var(--text-3);font-size:10px">Angajman yok</span>`;
-  RIGHT_TABS.threats.appendChild(roePanelEl);
+  roePanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Angajman yok</span>`;
+  RIGHT_TABS.threats.appendChild(_makeCollapsible("\u2694 ROE Advisory", roePanelEl, "roe"));
 }
 
 function renderROEPanel(advisories) {
@@ -1801,9 +1849,8 @@ function mountConfidencePanel() {
   confPanelEl = el("div", { id:"conf-panel", class:"nz-card", style:{
     padding:"8px 10px", maxHeight:"200px", overflowY:"auto",
   }});
-  confPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">GUVEN SKORU</div>
-    <span style="color:var(--text-3);font-size:10px">Bekleniyor...</span>`;
-  RIGHT_TABS.threats.appendChild(confPanelEl);
+  confPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Bekleniyor...</span>`;
+  RIGHT_TABS.threats.appendChild(_makeCollapsible("\u{1F4CA} G\u00fcven Skoru", confPanelEl, "conf"));
 }
 
 function renderConfidencePanel(scores) {
@@ -1822,9 +1869,8 @@ function mountCoordPanel() {
     padding:"8px 10px", maxHeight:"180px", overflowY:"auto",
     borderLeft:"3px solid rgba(255,0,80,0.4)",
   }});
-  coordPanelEl.innerHTML = `<div class="nz-section" style="margin:0 0 4px 0">KOORDINELI SALDIRI</div>
-    <span style="color:var(--text-3);font-size:10px">Koordineli tehdit yok</span>`;
-  RIGHT_TABS.threats.appendChild(coordPanelEl);
+  coordPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Koordineli tehdit yok</span>`;
+  RIGHT_TABS.threats.appendChild(_makeCollapsible("\u2694 Koordineli Sald\u0131r\u0131", coordPanelEl, "coord"));
 }
 
 function renderCoordPanel(attacks) {
@@ -1924,7 +1970,9 @@ const MAX_ANOMALY_LOG = 30;
 /* ANOMALY_COLORS → modules/constants.js */
 
 function mountAnomalyPanel() {
-  const wrap = el("div", { style: { width:"100%" } });
+  const body = el("div", { class:"nz-card", style:{
+    padding:"8px 10px", width:"100%",
+  }});
 
   // Stats header
   const statsRow = el("div", { id:"anomaly-stats", style:{
@@ -1935,12 +1983,13 @@ function mountAnomalyPanel() {
   // Event list
   anomalyPanelEl = el("div", { id:"anomaly-panel", style:{
     width:"100%", display:"flex", flexDirection:"column", gap:"3px",
+    maxHeight:"200px", overflowY:"auto",
   }});
   anomalyPanelEl.innerHTML = `<span style="color:var(--text-3);font-size:10px">Anomali yok</span>`;
 
-  wrap.appendChild(statsRow);
-  wrap.appendChild(anomalyPanelEl);
-  RIGHT_TABS.threats.appendChild(wrap);
+  body.appendChild(statsRow);
+  body.appendChild(anomalyPanelEl);
+  RIGHT_TABS.threats.appendChild(_makeCollapsible("\u{1F6A8} Anomaliler", body, "anomaly"));
 }
 
 function renderAnomalyPanel() {
