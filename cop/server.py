@@ -20,10 +20,8 @@ ENV:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import urllib.request
 
 # Load .env early so LLM_PROVIDER / OLLAMA_URL are available before ai modules import
 try:
@@ -213,6 +211,12 @@ from cop.routers.waypoints import router as waypoints_router
 from cop.routers.analytics import router as analytics_router
 from cop.routers.fusion import router as fusion_router
 from cop.routers.ai_reads import router as ai_reads_router
+from cop.routers.reads import router as reads_router
+from cop.routers.operators import router as operators_router
+from cop.routers.sync import router as sync_router
+from cop.routers.root import router as root_router
+from cop.routers.metrics import router as metrics_router
+from cop.routers.effectors import router as effectors_router
 app.include_router(weather_router)
 app.include_router(bda_router)
 app.include_router(scenarios_router)
@@ -225,6 +229,12 @@ app.include_router(waypoints_router)
 app.include_router(analytics_router)
 app.include_router(fusion_router)
 app.include_router(ai_reads_router)
+app.include_router(reads_router)
+app.include_router(operators_router)
+app.include_router(sync_router)
+app.include_router(root_router)
+app.include_router(metrics_router)
+app.include_router(effectors_router)
 
 # Rate limiting middleware (write endpoints only)
 app.add_middleware(RateLimitMiddleware)
@@ -611,57 +621,14 @@ def _make_snapshot_payload() -> Dict[str, Any]:
 # Routes
 # =============================================================================
 
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
+# Root pages ("/" and "/login") → cop/routers/root.py
 
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    return templates.TemplateResponse(request=request, name="login.html")
+# Simple read endpoints (agents, orchestrator health, tracks, threats,
+# events_tail, tasks, effector telemetry) → cop/routers/reads.py
 
 
-@app.get("/api/agents")
-async def api_agents():
-    return JSONResponse({"agents": STATE["agents"], "server_time": _utc_now_iso()})
-
-
-@app.get("/api/orchestrator/health")
-async def api_orchestrator_health():
-    try:
-        with urllib.request.urlopen(ORCHESTRATOR_URL + "/agents/health", timeout=2) as r:
-            import json
-            return JSONResponse(json.loads(r.read()))
-    except Exception:
-        return JSONResponse({"ok": False, "agents": [], "total": 0, "alive": 0, "dead": 0}, status_code=503)
-
-
-@app.get("/api/tracks")
-async def api_tracks():
-    return JSONResponse({"tracks": list(STATE["tracks"].values()), "server_time": _utc_now_iso()})
-
-
-@app.get("/api/threats")
-async def api_threats():
-    return JSONResponse({"threats": list(STATE["threats"].values()), "server_time": _utc_now_iso()})
-
-
-@app.get("/api/events_tail")
-async def api_events_tail():
-    return JSONResponse({"events_tail": STATE["events_tail"], "server_time": _utc_now_iso()})
-
-
-# ── Zones ────────────────────────────────────────────────────
-
-# Zone + Asset endpoints → cop/routers/zones.py and cop/routers/assets.py
-
-
-# ── Tasks ────────────────────────────────────────────────────
-
-@app.get("/api/tasks")
-async def api_tasks():
-    return JSONResponse({"tasks": list(STATE["tasks"].values()), "server_time": _utc_now_iso()})
-
+# ── Tasks (mutating) ──────────────────────────────────────────────────────
 
 @app.post("/api/tasks/{task_id}/approve")
 async def api_task_approve(task_id: str, req: Request, current_user=Depends(require_operator())):
@@ -1066,154 +1033,7 @@ async def api_task_reject(task_id: str, req: Request, current_user=Depends(requi
     return JSONResponse({"ok": True, "task": task})
 
 
-# ── Multi-operator: track claims ─────────────────────────────
-
-
-@app.get("/api/operators")
-async def api_operators():
-    """List active operator sessions and their claimed tracks."""
-    async with CLIENTS_LOCK:
-        active = {
-            op_id: {
-                "operator_id": op_id,
-                "joined_at":   info["joined_at"],
-                "claimed_tracks": [tid for tid, oid in TRACK_CLAIMS.items() if oid == op_id],
-            }
-            for op_id, info in OPERATORS.items()
-        }
-    return JSONResponse({"operators": list(active.values()), "claims": dict(TRACK_CLAIMS)})
-
-
-@app.post("/api/tracks/{track_id}/claim")
-async def api_track_claim(track_id: str, req: Request, _=Depends(require_operator())):
-    """Claim a track for exclusive task handling. Returns 409 if already claimed."""
-    body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
-    operator_id = body.get("operator_id", "operator")
-
-    async with CLIENTS_LOCK:
-        existing = TRACK_CLAIMS.get(track_id)
-        if existing and existing != operator_id:
-            return JSONResponse(
-                {"ok": False, "error": f"Track already claimed by {existing}"},
-                status_code=409,
-            )
-        TRACK_CLAIMS[track_id] = operator_id
-
-    ev = {
-        "event_type": "cop.track_claimed",
-        "payload": {
-            "track_id":    track_id,
-            "operator_id": operator_id,
-            "server_time": _utc_now_iso(),
-        },
-    }
-    await broadcast(ev)
-    try:
-        ai_lineage.record(
-            track_id=track_id,
-            stage="operator",
-            summary=f"Track claimed by {operator_id}",
-            outputs={"operator_id": operator_id},
-            rule="multi_operator.claim",
-        )
-    except Exception:
-        pass
-    return JSONResponse({"ok": True, "track_id": track_id, "operator_id": operator_id})
-
-
-@app.delete("/api/tracks/{track_id}/claim")
-async def api_track_release(track_id: str, req: Request, _=Depends(require_operator())):
-    """Release a track claim. Only the owning operator can release."""
-    body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
-    operator_id = body.get("operator_id", "operator")
-
-    async with CLIENTS_LOCK:
-        existing = TRACK_CLAIMS.get(track_id)
-        if not existing:
-            return JSONResponse({"ok": False, "error": "not claimed"}, status_code=404)
-        if existing != operator_id:
-            return JSONResponse(
-                {"ok": False, "error": f"Claim owned by {existing}, not {operator_id}"},
-                status_code=403,
-            )
-        del TRACK_CLAIMS[track_id]
-
-    ev = {
-        "event_type": "cop.track_released",
-        "payload": {
-            "track_id":    track_id,
-            "operator_id": operator_id,
-            "server_time": _utc_now_iso(),
-        },
-    }
-    await broadcast(ev)
-    return JSONResponse({"ok": True, "track_id": track_id})
-
-
-# ── Track annotations ────────────────────────────────────────
-
-@app.get("/api/tracks/{track_id}/annotations")
-async def api_annotations_get(track_id: str):
-    """Return all annotations for a track."""
-    return JSONResponse({"annotations": STATE["annotations"].get(track_id, [])})
-
-
-@app.post("/api/tracks/{track_id}/annotations")
-async def api_annotations_create(
-    track_id: str, req: Request, current_user=Depends(require_operator()),
-):
-    """Add an operator annotation to a track."""
-    body = await req.json()
-    text = (body.get("text") or "").strip()
-    if not text:
-        return JSONResponse({"ok": False, "error": "text required"}, status_code=400)
-
-    annotation = {
-        "id":         _new_id("ann-"),
-        "track_id":   track_id,
-        "text":       text[:500],
-        "author":     getattr(current_user, "username", "anonymous"),
-        "created_at": _utc_now_iso(),
-    }
-    async with STATE_LOCK:
-        STATE["annotations"].setdefault(track_id, []).append(annotation)
-
-    ev = {"event_type": "cop.annotation", "payload": annotation}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(cop_audit.log_action(
-        username=annotation["author"],
-        role=getattr(current_user, "role", ""),
-        action="CREATE_ANNOTATION", resource_type="track", resource_id=track_id,
-        detail={"text": text[:80]},
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "annotation": annotation})
-
-
-@app.delete("/api/tracks/{track_id}/annotations/{ann_id}")
-async def api_annotations_delete(
-    track_id: str, ann_id: str, current_user=Depends(require_operator()),
-):
-    """Delete an annotation (author or admin only)."""
-    uname = getattr(current_user, "username", "anonymous")
-    role  = getattr(current_user, "role", "")
-    async with STATE_LOCK:
-        anns = STATE["annotations"].get(track_id, [])
-        target = next((a for a in anns if a["id"] == ann_id), None)
-        if not target:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        # Only author or admin can delete
-        is_admin = str(role).upper() == "ADMIN"
-        if not is_admin and target["author"] != uname:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        STATE["annotations"][track_id] = [a for a in anns if a["id"] != ann_id]
-
-    ev = {"event_type": "cop.annotation_removed",
-          "payload": {"track_id": track_id, "id": ann_id}}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    return JSONResponse({"ok": True})
+# Multi-operator listing + track claim + annotations → cop/routers/operators.py
 
 
 # ── Waypoints ────────────────────────────────────────────────
@@ -2044,208 +1864,12 @@ async def api_handover(current_user=Depends(require_viewer())):
     })
 
 
-@app.get("/api/metrics")
-async def api_metrics():
-    """
-    Runtime performance metrics.
-
-    Exposes ingest counters, tactical engine timings (p50/p95/max),
-    WebSocket fan-out stats. Intended for diagnosing performance
-    regressions and for the CI smoke test to assert sane numbers.
-
-    Not Prometheus format — just JSON. Single-server system, lightweight.
-    """
-    recent: List[float] = list(METRICS["tactical_recent_ms"])
-    uptime_s = _time_mod.time() - _METRICS_START_TS
-    ingest_total = METRICS["ingest_total"]
-    return JSONResponse({
-        "uptime_s": round(uptime_s, 1),
-        "ingest": {
-            "total":        ingest_total,
-            "per_sec":      round(ingest_total / uptime_s, 2) if uptime_s > 0 else 0.0,
-            "by_type":      dict(METRICS["ingest_by_type"]),
-            "bad_request":  METRICS["ingest_bad_request"],
-        },
-        "tactical": {
-            "scheduled":        METRICS["tactical_scheduled"],
-            "ran":              METRICS["tactical_ran"],
-            "rate_skipped":     METRICS["tactical_rate_skipped"],
-            "overlap_skipped":  METRICS["tactical_overlap_skipped"],
-            "failed":           METRICS["tactical_failed"],
-            "last_ms":          METRICS["tactical_last_ms"],
-            "max_ms":           METRICS["tactical_max_ms"],
-            "p50_ms":           round(_metrics_percentile(recent, 50), 2),
-            "p95_ms":           round(_metrics_percentile(recent, 95), 2),
-            "p99_ms":           round(_metrics_percentile(recent, 99), 2),
-            "sample_count":     len(recent),
-            "module_ms":        dict(METRICS.get("tactical_module_ms", {})),
-        },
-        "websocket": {
-            "clients":         len(CLIENTS),
-            "broadcasts":      METRICS["ws_broadcasts"],
-            "messages_sent":   METRICS["ws_messages_sent"],
-            "send_failures":   METRICS["ws_send_failures"],
-        },
-        "state": {
-            "tracks":  len(STATE["tracks"]),
-            "threats": len(STATE["threats"]),
-            "assets":  len(STATE["assets"]),
-            "zones":   len(STATE["zones"]),
-            "tasks":   len(STATE["tasks"]),
-        },
-        "deconfliction":    ai_deconfliction.stats(),
-        "ew":               ai_ew.stats(),
-        "ew_ml":            ai_ew_ml.stats(),
-        "sync":             cop_sync.stats(),
-        "circuit_breaker":  cop_cb.stats(),
-    })
-
-
-# ── Prometheus text format metrics ────────────────────────────────────────────
-
-@app.get("/metrics", tags=["system"])
-async def prometheus_metrics():
-    """Prometheus-compatible text metrics (scrape endpoint for Prometheus/Grafana)."""
-    from fastapi.responses import PlainTextResponse
-    recent: List[float] = list(METRICS["tactical_recent_ms"])
-    uptime_s = _time_mod.time() - _METRICS_START_TS
-    ingest_total = METRICS["ingest_total"]
-    p50  = _metrics_percentile(recent, 50)
-    p95  = _metrics_percentile(recent, 95)
-    p99  = _metrics_percentile(recent, 99)
-    roe_weapons_free   = sum(1 for a in AI_ROE_ADVISORIES if a.get("engagement") == "WEAPONS_FREE")
-    roe_weapons_tight  = sum(1 for a in AI_ROE_ADVISORIES if a.get("engagement") == "WEAPONS_TIGHT")
-    escalation_pending = len(ai_escalation.get_pending())
-    module_ms: Dict[str, float] = METRICS.get("tactical_module_ms", {})
-
-    def g(name: str, help_text: str, value, typ: str = "gauge") -> List[str]:
-        return [f"# HELP {name} {help_text}", f"# TYPE {name} {typ}", f"{name} {value}", ""]
-
-    def labeled(name: str, help_text: str, items: Dict[str, float], typ: str = "gauge") -> List[str]:
-        out = [f"# HELP {name} {help_text}", f"# TYPE {name} {typ}"]
-        for label, val in items.items():
-            out.append(f'{name}{{module="{label}"}} {val:.2f}')
-        out.append("")
-        return out
-
-    lines: List[str] = []
-    lines += g("nizam_uptime_seconds",           "Server uptime in seconds",             f"{uptime_s:.1f}")
-    lines += g("nizam_ingest_total",              "Total ingested events",                ingest_total, "counter")
-    lines += g("nizam_ingest_per_second",         "Current ingest rate events/s",
-               f"{ingest_total/uptime_s:.2f}" if uptime_s > 0 else "0")
-    lines += g("nizam_ingest_bad_request_total",  "Bad ingest requests",                  METRICS["ingest_bad_request"], "counter")
-    lines += g("nizam_tactical_runs_total",       "Total tactical engine runs",           METRICS["tactical_ran"], "counter")
-    lines += g("nizam_tactical_failed_total",     "Total tactical engine failures",       METRICS["tactical_failed"], "counter")
-    lines += g("nizam_tactical_skipped_total",    "Tactical runs skipped (rate limiter)", METRICS["tactical_rate_skipped"], "counter")
-    lines += g("nizam_tactical_p50_ms",           "Tactical engine p50 latency ms",       f"{p50:.2f}")
-    lines += g("nizam_tactical_p95_ms",           "Tactical engine p95 latency ms",       f"{p95:.2f}")
-    lines += g("nizam_tactical_p99_ms",           "Tactical engine p99 latency ms",       f"{p99:.2f}")
-    lines += g("nizam_tactical_max_ms",           "Tactical engine worst-case latency ms",f"{METRICS['tactical_max_ms']:.2f}")
-    if module_ms:
-        lines += labeled("nizam_tactical_module_ms", "Per-module tactical latency ms (last run)", module_ms)
-    lines += g("nizam_ws_clients",               "Connected WebSocket clients",          len(CLIENTS))
-    lines += g("nizam_ws_broadcasts_total",       "Total WS broadcasts sent",             METRICS["ws_broadcasts"], "counter")
-    lines += g("nizam_ws_messages_total",         "Total WS messages sent",               METRICS["ws_messages_sent"], "counter")
-    lines += g("nizam_ws_send_failures_total",    "WS send failures",                     METRICS["ws_send_failures"], "counter")
-    lines += g("nizam_tracks",                    "Active track count",                   len(STATE["tracks"]))
-    lines += g("nizam_threats",                   "Active threat count",                  len(STATE["threats"]))
-    lines += g("nizam_assets",                    "Registered asset count",               len(STATE["assets"]))
-    lines += g("nizam_zones",                     "Defined zone count",                   len(STATE["zones"]))
-    lines += g("nizam_tasks",                     "Total task count",                     len(STATE["tasks"]))
-    lines += g("nizam_roe_advisories",            "Active ROE advisories",                len(AI_ROE_ADVISORIES))
-    lines += g("nizam_roe_weapons_free",          "WEAPONS_FREE advisories",              roe_weapons_free)
-    lines += g("nizam_roe_weapons_tight",         "WEAPONS_TIGHT advisories",             roe_weapons_tight)
-    lines += g("nizam_escalation_pending",        "Unanswered escalation advisories",     escalation_pending)
-    lines += g("nizam_ew_alerts_total",           "Total EW alerts detected",             ai_ew.stats().get("total_alerts", 0), "counter")
-    lines += g("nizam_deconfliction_merges_total","Total track deconfliction merges",      ai_deconfliction.stats().get("total_aliases", 0), "counter")
-    # Model drift metrics
-    drift_psi         = AI_DRIFT_STATUS.get("psi", 0.0)
-    drift_obs         = AI_DRIFT_STATUS.get("observations", 0)
-    drift_fp_rate     = AI_DRIFT_STATUS.get("fp_rate") or 0.0
-    drift_alert       = 1 if AI_DRIFT_STATUS.get("alert") else 0
-    lines += g("nizam_model_drift_psi",           "Model drift PSI vs baseline",          f"{drift_psi:.4f}")
-    lines += g("nizam_model_drift_observations",  "Confidence observations in window",    drift_obs, "counter")
-    lines += g("nizam_model_drift_fp_rate",       "Approximate false-positive rate",      f"{drift_fp_rate:.3f}")
-    lines += g("nizam_model_drift_alert",         "1 if drift alert is active",           drift_alert)
-    return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
+# Metrics endpoints (/api/metrics, /metrics) → cop/routers/metrics.py
 
 
 # ── Distributed sync endpoints ────────────────────────────────────────────────
 
-@app.post("/api/sync/peers")
-async def api_sync_add_peer(req: Request, _=Depends(require_operator())):
-    """Register a peer COP node URL for state synchronisation."""
-    body = await req.json()
-    url = body.get("url", "").strip()
-    if not url:
-        return JSONResponse({"ok": False, "error": "url required"}, status_code=400)
-    action = body.get("action", "add")
-    if action == "remove":
-        removed = cop_sync.remove_peer(url)
-        return JSONResponse({"ok": True, "removed": removed})
-    cop_sync.add_peer(url)
-    return JSONResponse({"ok": True, "peers": cop_sync.list_peers()})
-
-
-@app.get("/api/sync/status")
-async def api_sync_status():
-    """Return current peer sync status."""
-    return JSONResponse(cop_sync.stats())
-
-
-@app.post("/api/sync/receive")
-async def api_sync_receive(req: Request):
-    """
-    Receive a delta snapshot from a peer COP node.
-    Applies last-write-wins merge into local STATE.
-    """
-    try:
-        body = await req.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
-
-    delta = body.get("delta")
-    if not isinstance(delta, dict):
-        return JSONResponse({"ok": False, "error": "missing delta"}, status_code=400)
-
-    node_id   = body.get("node_id", "unknown")
-    pushed_at = body.get("pushed_at", "")
-
-    async with STATE_LOCK:
-        applied = cop_sync.apply_delta(delta, STATE, source_node=node_id)
-
-    # Broadcast updated state to connected clients if anything changed
-    total_applied = sum(applied.values())
-    if total_applied > 0:
-        await broadcast({
-            "event_type": "cop.sync_applied",
-            "payload": {
-                "from_node":    node_id,
-                "pushed_at":    pushed_at,
-                "applied":      applied,
-                "server_time":  _utc_now_iso(),
-            },
-        })
-        log.info("[sync] applied %d records from %s", total_applied, node_id)
-
-    return JSONResponse({"ok": True, "applied": applied})
-
-
-@app.get("/api/sync/conflicts")
-async def api_sync_conflicts():
-    """Return the vector clock conflict log for operator review."""
-    return JSONResponse({
-        "node_id":    cop_sync.NODE_ID,
-        "conflicts":  cop_sync.get_conflicts(),
-        "count":      len(cop_sync.get_conflicts()),
-    })
-
-
-@app.delete("/api/sync/conflicts")
-async def api_sync_clear_conflicts(_=Depends(require_operator())):
-    """Clear the conflict log."""
-    n = cop_sync.clear_conflicts()
-    return JSONResponse({"ok": True, "cleared": n})
+# Sync endpoints → cop/routers/sync.py
 
 
 @app.get("/api/ai/status")
@@ -2368,84 +1992,13 @@ async def api_retrain_status():
     return JSONResponse({**ai_retrainer.status(), "server_time": _utc_now_iso()})
 
 
-# ── Effector Telemetry ─────────────────────────────────────────────────────────
-
-@app.post("/api/effectors/{effector_id}/telemetry", tags=["effectors"])
-async def api_effector_telemetry(
-    effector_id: str, req: Request,
-    _=Depends(require_operator()),
-):
-    """
-    Report effector operational status and/or post-engagement outcome.
-
-    Body fields:
-      status   : "READY" | "ENGAGED" | "COOLDOWN" | "OFFLINE"  (required)
-      outcome  : "hit" | "miss" | "partial"                     (optional)
-      track_id : associated track                               (optional)
-      action   : "ENGAGE" | "JAM" | "SPOOF" | "EW_SUPPRESS"    (optional)
-      lat, lon : current effector position                      (optional)
-    """
-    body = await req.json()
-    status = body.get("status", "READY")
-    valid_statuses = {"READY", "ENGAGED", "COOLDOWN", "OFFLINE"}
-    if status not in valid_statuses:
-        return JSONResponse(
-            {"ok": False, "error": f"status must be one of {sorted(valid_statuses)}"},
-            status_code=400,
-        )
-    outcome  = body.get("outcome")
-    track_id = body.get("track_id")
-
-    async with STATE_LOCK:
-        STATE["effector_status"][effector_id] = {
-            "status":     status,
-            "updated_at": _utc_now_iso(),
-            "task_id":    body.get("task_id"),
-            "lat":        body.get("lat"),
-            "lon":        body.get("lon"),
-        }
-        if outcome:
-            valid_outcomes = {"hit", "miss", "partial"}
-            if outcome not in valid_outcomes:
-                return JSONResponse(
-                    {"ok": False, "error": f"outcome must be one of {sorted(valid_outcomes)}"},
-                    status_code=400,
-                )
-            _record_outcome(body.get("task_id") or "", track_id or "", body.get("action") or "", outcome)
-
-    await broadcast({
-        "event_type": "cop.effector_status",
-        "payload": {
-            "effector_id": effector_id,
-            "status":      status,
-            "server_time": _utc_now_iso(),
-        },
-    })
-    if outcome:
-        await broadcast({
-            "event_type": "cop.effector_outcome",
-            "payload": {
-                "effector_id": effector_id,
-                "track_id":    track_id,
-                "outcome":     outcome,
-                "action":      body.get("action"),
-                "server_time": _utc_now_iso(),
-            },
-        })
-    return JSONResponse({"ok": True, "effector_id": effector_id, "status": status})
+# Effector telemetry POST → cop/routers/effectors.py
 
 
 # BDA endpoint → cop/routers/bda.py
 
 
-@app.get("/api/effectors/telemetry", tags=["effectors"])
-async def api_effectors_telemetry():
-    """Current effector operational status and recent engagement outcomes."""
-    return JSONResponse({
-        "effector_status":  dict(STATE["effector_status"]),
-        "recent_outcomes":  list(EFFECTOR_OUTCOMES[-20:]),
-        "server_time":      _utc_now_iso(),
-    })
+# Effector telemetry GET → cop/routers/reads.py
 
 
 # Asset PATCH → cop/routers/assets.py
