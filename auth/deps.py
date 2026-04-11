@@ -20,10 +20,22 @@ from db.models import User, UserRole
 from db.session import get_db
 
 # ── Config ──────────────────────────────────────────────────
-SECRET_KEY    = os.environ.get("JWT_SECRET", "nizam-dev-secret-CHANGE-in-production")
-ALGORITHM     = "HS256"
-EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "480"))  # 8 hours
-AUTH_ENABLED  = os.environ.get("AUTH_ENABLED", "false").lower() == "true"
+_DEFAULT_SECRET = "nizam-dev-secret-CHANGE-in-production"
+SECRET_KEY      = os.environ.get("JWT_SECRET", _DEFAULT_SECRET)
+ALGORITHM       = "HS256"
+EXPIRE_MINUTES  = int(os.environ.get("JWT_EXPIRE_MINUTES", "480"))  # 8 hours
+AUTH_ENABLED    = os.environ.get("AUTH_ENABLED", "false").lower() == "true"
+
+# Boot-time guard: refuse to start in production with an unset/default secret.
+# Without this, an operator who flips AUTH_ENABLED=true but forgets to set
+# JWT_SECRET would silently sign tokens with the public default — every
+# attacker who reads the source could mint valid tokens. Fail-closed.
+if AUTH_ENABLED and (not SECRET_KEY or SECRET_KEY == _DEFAULT_SECRET):
+    raise RuntimeError(
+        "AUTH_ENABLED=true but JWT_SECRET is unset or still the default value. "
+        "Refusing to boot to prevent an insecure deployment. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
 
 security = HTTPBearer(auto_error=False)
 
