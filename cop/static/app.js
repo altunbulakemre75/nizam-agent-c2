@@ -2981,15 +2981,31 @@ function drawTimelineChart(data, trackId) {
 let aarModalEl = null;
 
 function mountAARButton() {
-  const btn = el("div", {style:{
-    position:"fixed", top:"12px", right:"320px", zIndex:"10002",
-    background:"#c0392b", color:"#fff",
-    padding:"6px 14px", borderRadius:"20px", cursor:"pointer",
-    fontFamily:"ui-sans-serif,system-ui,Arial", fontSize:"12px",
-    fontWeight:"bold", boxShadow:"0 2px 8px rgba(0,0,0,0.4)",
-    border:"1px solid rgba(255,255,255,0.2)",
-  }, onclick:()=>openAAR()}, ["AAR Raporu"]);
-  document.body.appendChild(btn);
+  // Live inside the topbar's right-side button cluster so it follows the
+  // same layout as HANDOVER/AUDIT/WX/ADMIN. Previously it was a floating
+  // fixed-position div that overlapped those buttons at certain widths.
+  const host = document.querySelector(".nz-topbar-right");
+  const btn = el("button", {
+    id: "aar-btn",
+    title: "After-Action Report",
+    onclick: () => openAAR(),
+    style: {
+      padding: "2px 8px", fontSize: "10px",
+      background: "rgba(192,57,43,0.22)",
+      border: "1px solid rgba(192,57,43,0.5)",
+      borderRadius: "6px", color: "#e74c3c",
+      cursor: "pointer", fontWeight: "600",
+    },
+  }, ["AAR"]);
+  if (host) {
+    // Insert before the mode badge so the button cluster stays grouped.
+    const modeBadge = host.querySelector("#tb-mode");
+    host.insertBefore(btn, modeBadge || null);
+  } else {
+    // Fallback if topbar not mounted yet (shouldn't happen — init order
+    // mounts the topbar first).
+    document.body.appendChild(btn);
+  }
 }
 
 function mountAARModal() {

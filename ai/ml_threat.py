@@ -516,6 +516,44 @@ def get_model_info() -> Dict[str, Any]:
     }
 
 
+def status() -> Dict[str, Any]:
+    """Full status report for the ML threat classifier.
+
+    Mirrors the shape of ai.retrainer.status() and ai.drift.status() so
+    /api/ai/ml/status endpoints and dashboards can treat all three AI
+    subsystems uniformly.
+    """
+    model_present_on_disk = MODEL_PATH.exists()
+    model_in_memory = _model is not None
+    meta = _model_meta or {}
+
+    file_size: Optional[int] = None
+    file_mtime: Optional[float] = None
+    if model_present_on_disk:
+        try:
+            st = MODEL_PATH.stat()
+            file_size = st.st_size
+            file_mtime = st.st_mtime
+        except OSError:
+            pass
+
+    return {
+        "model_path":             str(MODEL_PATH),
+        "model_exists":           model_present_on_disk,
+        "model_loaded":           model_in_memory,
+        "file_size_bytes":        file_size,
+        "file_mtime":             file_mtime,
+        "samples":                meta.get("samples"),
+        "cv_accuracy":            meta.get("cv_accuracy"),
+        "trained_at":             meta.get("trained_at"),
+        "feedback_used":          meta.get("feedback_used"),
+        "feature_cache_size":     len(_feature_cache),
+        "feature_cache_capacity": _FEATURE_CACHE_MAX,
+        "feature_names":          FEATURE_NAMES,
+        "label_names":            LABEL_NAMES,
+    }
+
+
 def hot_swap(model, meta: dict) -> None:
     """Atomically replace the in-memory model from a background thread.
 

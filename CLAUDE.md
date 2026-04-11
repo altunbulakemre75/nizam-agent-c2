@@ -127,11 +127,10 @@ of each tick.
 ## Known issues
 
 - AAR button overlap in top-right header (CSS z-index).
-- Tactical pipeline p95 latency under stress — profile first, fix after.
 - `ai/retrainer.py` online retraining: works, but only 3 real feedback
   records exist; auto-threshold is 50. Drift baseline not yet locked.
-- `ai/ml_threat.py` lacks a `status()` function (API endpoint exists but
-  proxies directly through the module).
+  Both are operational-data issues, not code issues — they resolve when
+  the system sees real traffic.
 
 ## Don't do
 
