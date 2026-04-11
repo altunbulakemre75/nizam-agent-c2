@@ -250,14 +250,11 @@ def parse_opensky_state(state: list) -> Optional[Dict[str, Any]]:
 
 def fetch_adsbfi(lat: float, lon: float, radius_km: float) -> List[Dict[str, Any]]:
     """
-    Query api.adsb.fi/v1/aircraft with a lat/lon/radius bounding query.
-    Returns dump1090-compatible aircraft dicts.
+    Query opendata.adsb.fi/api/v2 with lat/lon/dist (nm) path params.
+    Returns dump1090-compatible aircraft dicts (root key: "aircraft").
     """
-    radius_nm = radius_km / 1.852
-    url = (
-        f"https://api.adsb.fi/v1/aircraft"
-        f"?lat={lat:.4f}&lon={lon:.4f}&radius={radius_nm:.1f}"
-    )
+    radius_nm = int(round(radius_km / 1.852))
+    url = f"https://opendata.adsb.fi/api/v2/lat/{lat:.4f}/lon/{lon:.4f}/dist/{radius_nm}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "NIZAM-adapter/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
