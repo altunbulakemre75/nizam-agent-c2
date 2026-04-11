@@ -16,8 +16,9 @@ Recommendation types:
 from __future__ import annotations
 
 import math
-import time
 from typing import Any, Dict, List, Optional, Tuple
+
+from shared.clock import get_clock
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
@@ -92,10 +93,11 @@ _cooldowns: Dict[str, float] = {}
 
 
 def _should_emit(key: str) -> bool:
+    clock = get_clock()
     last = _cooldowns.get(key, 0.0)
-    if time.time() - last < COOLDOWN_S:
+    if clock.now() - last < COOLDOWN_S:
         return False
-    _cooldowns[key] = time.time()
+    _cooldowns[key] = clock.now()
     return True
 
 
@@ -112,7 +114,7 @@ def generate_recommendations(
     Returns a prioritized list (highest priority first).
     """
     recs: List[Dict[str, Any]] = []
-    now = time.time()
+    now = get_clock().now()
 
     # Classify assets
     friendlies = {k: v for k, v in assets.items()

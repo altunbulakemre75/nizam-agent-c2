@@ -19,11 +19,10 @@ Usage (from cop/server.py):
 """
 from __future__ import annotations
 
-import random
-import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Set
+
+from shared.clock import get_clock, get_rng
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -52,7 +51,7 @@ def roll_outcome(
     Registers the result internally and returns True (hit) or False (miss).
     Caller should remove the track from STATE only when this returns True.
     """
-    hit = random.random() < hit_probability
+    hit = get_rng().random() < hit_probability
     rec: Dict[str, Any] = {
         "bda_id":       f"bda-{uuid.uuid4().hex[:8]}",
         "task_id":      task_id,
@@ -69,7 +68,7 @@ def roll_outcome(
         # Store with a monotonic deadline for later liveness check
         _PENDING_MISS[task_id] = {
             **rec,
-            "_check_after": time.monotonic() + BDA_MONITOR_DELAY_S,
+            "_check_after": get_clock().monotonic() + BDA_MONITOR_DELAY_S,
         }
     return hit
 
@@ -83,7 +82,7 @@ def check_pending(alive_track_ids: Set[str]) -> List[Dict[str, Any]]:
 
     Returns list of newly finalized records (to broadcast as cop.bda events).
     """
-    now = time.monotonic()
+    now = get_clock().monotonic()
     finalized: List[Dict[str, Any]] = []
     for task_id in list(_PENDING_MISS):
         rec = _PENDING_MISS[task_id]
@@ -92,7 +91,7 @@ def check_pending(alive_track_ids: Set[str]) -> List[Dict[str, Any]]:
         outcome = "EVADED" if rec["track_id"] in alive_track_ids else "DESTROYED_LATE"
         final_rec = {k: v for k, v in rec.items() if not k.startswith("_")}
         final_rec["outcome"]      = outcome
-        final_rec["confirmed_at"] = datetime.now(timezone.utc).isoformat()
+        final_rec["confirmed_at"] = get_clock().utcnow_iso()
         _BDA_RECORDS.append(final_rec)
         finalized.append(final_rec)
         del _PENDING_MISS[task_id]
