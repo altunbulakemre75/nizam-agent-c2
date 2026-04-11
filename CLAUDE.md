@@ -8,7 +8,7 @@ persistence. Single-binary dev run, Docker/K8s production.
 
 ```bash
 python -m uvicorn cop.server:app --reload --port 8100     # dev
-python -m pytest tests/ -q                                 # 604 tests
+python -m pytest tests/ -q                                 # 623 tests
 docker compose up                                          # full stack
 ```
 
@@ -41,26 +41,22 @@ ai/
   retrainer.py            Online retraining (operator feedback -> model)
   drift.py                PSI drift monitor
   ...                     20+ other analyzer modules
-tests/                    604 tests, pytest
+tests/                    623 tests, pytest
 cop/static/               Vanilla JS frontend (app.js, ws-client.js, panels.js)
 replay/                   JSONL scenario record/playback
 ```
 
-## Two `tactical` modules — read this before touching either
+## `ai/tactical.py` vs `cop/engine/ai_pipeline.py`
 
-There are two things with "tactical" in the name. They are **not** the same:
+Two different things:
 
-- **`ai/tactical.py`** — a single analyzer. Generates recommendations
-  (intercept, reposition, escalate, withdraw, monitor, zone_warning).
-  Stateless, returns a list of `TacticalRecommendation` dicts.
-
+- **`ai/tactical.py`** — a single stateless analyzer that returns
+  `TacticalRecommendation` dicts (intercept / reposition / escalate /
+  withdraw / monitor / zone_warning).
 - **`cop/engine/ai_pipeline.py`** — the per-tick orchestrator that runs
   `ai/tactical.py` **and** every other analyzer (anomaly, coord_attack,
   ML threat, ROE, confidence, ...). Owns the thread-pool executor, rate
   limit, snapshot capture, and results broadcast.
-
-The old name `cop/engine/tactical.py` was renamed to `ai_pipeline.py`
-specifically to end the "which `tactical` am I importing?" confusion.
 
 ## Hot path (what happens on every sensor event)
 
@@ -114,7 +110,7 @@ of each tick.
 
 ## Testing
 
-- `pytest tests/ -q` — 604 tests, under 15 s on a laptop.
+- `pytest tests/ -q` — 623 tests, under 20 s on a laptop.
 - `tests/test_server_tactical.py` exercises the pipeline orchestrator.
 - `tests/test_ingest.py` hits the ingest router directly (no TestClient).
 - `tests/test_stress.py` (`@pytest.mark.slow`) — parallel ingest + p95.
@@ -126,11 +122,9 @@ of each tick.
 
 ## Known issues
 
-- AAR button overlap in top-right header (CSS z-index).
 - `ai/retrainer.py` online retraining: works, but only 3 real feedback
-  records exist; auto-threshold is 50. Drift baseline not yet locked.
-  Both are operational-data issues, not code issues — they resolve when
-  the system sees real traffic.
+  records exist; auto-threshold is 50. Resolves once the system sees
+  real operator traffic.
 
 ## Don't do
 
@@ -140,4 +134,4 @@ of each tick.
   `asyncio.create_task(db_write(...))`.
 - Don't import `cop.server` from routers — routers import from `cop.state`,
   `cop.db_writes`, `cop.ws_broadcast`. server.py is the top of the graph.
-- Don't add another `tactical.py`. You've been warned.
+- Don't add another `tactical.py`.

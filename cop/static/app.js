@@ -418,37 +418,41 @@ function makeThreatIcon(level, intent, overrideColor) {
 let mlPredictions = {}; // {track_id: {ml_level, ml_probability, ml_probabilities}}
 
 function buildTooltip(track, threat) {
-  const id    = track.id ?? track.global_track_id ?? "?";
+  // All attacker-controllable fields (id, classification.label, sensors,
+  // recommended_action, raw level/score strings) MUST be escaped — this HTML
+  // is handed to Leaflet's bindTooltip which renders it via innerHTML.
+  const id    = escHtml(track.id ?? track.global_track_id ?? "?");
   const kin   = track.kinematics ?? {};
   const cls   = track.classification ?? {};
-  const sens  = (track.supporting_sensors ?? []).join(", ") || "-";
-  const level = threat?.threat_level ?? track.threat_level ?? "-";
-  const score = threat?.score        ?? track.threat_score ?? "-";
+  const sens  = escHtml((track.supporting_sensors ?? []).join(", ") || "-");
+  const level = escHtml(threat?.threat_level ?? track.threat_level ?? "-");
+  const score = escHtml(String(threat?.score ?? track.threat_score ?? "-"));
   const tti   = threat?.tti_s != null ? `${threat.tti_s}s` : "-";
   const vr    = kin.radial_velocity_mps != null ? `${kin.radial_velocity_mps.toFixed(1)} m/s` : "-";
   const range = kin.range_m != null ? `${Math.round(kin.range_m)} m` : "-";
-  const action= threat?.recommended_action ?? "-";
+  const action= escHtml(threat?.recommended_action ?? "-");
   const intent= track.intent ?? threat?.intent ?? "unknown";
   const iconf = track.intent_conf ?? 0;
   const im    = INTENT_META[intent] ?? INTENT_META.unknown;
   // ML prediction
-  const ml = mlPredictions[id];
-  const mlLevel = ml?.ml_level ?? "-";
+  const ml = mlPredictions[track.id ?? track.global_track_id];
+  const mlLevel = escHtml(ml?.ml_level ?? "-");
   const mlProb  = ml?.ml_probability != null ? `${(ml.ml_probability*100).toFixed(0)}%` : "-";
-  const mlColor = THREAT_COLORS[mlLevel] ?? "#6366f1";
-  const annCount = (_ANNOTATIONS.get(id) ?? []).length;
+  const mlColor = THREAT_COLORS[ml?.ml_level] ?? "#6366f1";
+  const annCount = (_ANNOTATIONS.get(track.id ?? track.global_track_id) ?? []).length;
   const annBadge = annCount > 0 ? ` <span style="color:#90caf9">\u{1F4AC}${annCount}</span>` : "";
   const alt_m = kin.altitude_m != null ? `${Math.round(kin.altitude_m)} m` : "-";
   const altStyle = _ALT_MODE ? `color:${_altColor(kin.altitude_m ?? 0)};font-weight:bold` : "";
+  const clsLabel = escHtml(cls.label ?? "?");
   return `<div style="font:12px/1.5 monospace;min-width:175px">
     <b style="font-size:13px">${id}</b>${annBadge}<br>
-    <span style="color:${THREAT_COLORS[level]??'#aaa'}"> ${level}</span>
+    <span style="color:${THREAT_COLORS[threat?.threat_level ?? track.threat_level]??'#aaa'}"> ${level}</span>
     \u00a0score:<b>${score}</b>
     \u00a0<span style="color:${mlColor}">ML:${mlLevel}(${mlProb})</span><br>
     TTI:<b>${tti}</b> Vr:<b>${vr}</b> Range:<b>${range}</b><br>
     Alt:<span style="${altStyle}">${alt_m}</span>
     \u00a0Intent:<span style="color:${im.color}">${im.icon} ${im.label}</span>(${(iconf*100).toFixed(0)}%)<br>
-    Label:${cls.label??"?"}(${cls.conf!=null?(cls.conf*100).toFixed(0)+"%":"?"}) Sensors:${sens}<br>
+    Label:${clsLabel}(${cls.conf!=null?(cls.conf*100).toFixed(0)+"%":"?"}) Sensors:${sens}<br>
     Trail:${(track.history??[]).length}pts Action:<b>${action}</b>
   </div>`;
 }
@@ -766,15 +770,20 @@ function renderThreatList() {
   let html = `<div class="nz-section">Live Threats (${threats.length})</div>`;
   threats.forEach(t => {
     const level = t.threat_level ?? "LOW";
+    const safeLevel = escHtml(level);
     const lc    = { HIGH:"var(--danger)", MEDIUM:"var(--warn)", LOW:"var(--ok)" }[level] ?? "var(--text-3)";
     const im    = IM[t.intent ?? "unknown"] ?? IM.unknown;
-    const tti   = t.tti_s != null ? `${t.tti_s}s` : "–";
+    const tti   = t.tti_s != null ? `${(+t.tti_s).toFixed(0)}s` : "–";
     const score = t.score != null ? (+t.score).toFixed(2) : "–";
-    const act   = t.recommended_action ?? "–";
-    html += `<div class="nz-threat-card ${level}" onclick="UI.map&&UI.trackMarkers.get('${t.id}')&&UI.map.panTo(UI.trackMarkers.get('${t.id}').getLatLng())">
+    const act   = escHtml(t.recommended_action ?? "–");
+    // Escape id both for HTML and for the onclick attribute. The pan-to
+    // logic reads it back via a data-attribute so we don't splice raw
+    // strings into a JS context.
+    const safeId = escHtml(String(t.id ?? ""));
+    html += `<div class="nz-threat-card ${safeLevel}" data-track-id="${safeId}" onclick="_panToThreat(this)">
       <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">
-        <span style="font-weight:600;font-family:var(--mono);font-size:11px">${t.id}</span>
-        <span class="nz-level ${level}">${level}</span>
+        <span style="font-weight:600;font-family:var(--mono);font-size:11px">${safeId}</span>
+        <span class="nz-level ${safeLevel}">${safeLevel}</span>
         <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:${lc}">${score}</span>
       </div>
       <div style="color:var(--text-2);font-size:10px;display:flex;gap:8px">
@@ -786,6 +795,14 @@ function renderThreatList() {
   });
   threatListEl.innerHTML = html;
 }
+
+function _panToThreat(el) {
+  const id = el && el.getAttribute("data-track-id");
+  if (!id || !UI.map) return;
+  const m = UI.trackMarkers.get(id);
+  if (m) UI.map.panTo(m.getLatLng());
+}
+window._panToThreat = _panToThreat;
 
 /* ── Zones ────────────────────────────────────────────────── */
 const ZONE_COLORS = {
@@ -902,11 +919,19 @@ function applySnapshot(payload) {
   const tracksArr = normTracks(payload?.tracks ?? payload);
 
   UI.tracks.clear();
-  for(const[,m] of UI.trackMarkers){try{m.remove();}catch{}} UI.trackMarkers.clear();
+  UI.threats.clear();
+  for(const[,m] of UI.trackMarkers){try{m.unbindTooltip();m.remove();}catch{}} UI.trackMarkers.clear();
   for(const[id] of UI.trackPolylines) removeTrail(id);
   for(const[id] of UI.zonePolygons)   removeZone(id);
   // Keep assets / waypoints across snapshot (they are operator-placed)
 
+  // Apply threats first so the first upsertTrack() call picks up the correct
+  // marker color (without this the snapshot reconnect path would show every
+  // track as LOW/green until the next live cop.threat event).
+  (payload?.threats ?? []).forEach(thr => {
+    const id = String(thr.id ?? thr.track_id ?? "");
+    if (id) UI.threats.set(id, thr);
+  });
   tracksArr.forEach(t => {
     const id=String(t.id??t.track_id??t.uid??""); if(!id) return;
     UI.tracks.set(id,t); upsertTrack(t);

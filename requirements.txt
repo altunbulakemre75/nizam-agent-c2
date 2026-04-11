@@ -12,7 +12,8 @@ alembic==1.13.3
 
 # Auth (JWT + password hashing)
 # PyJWT (maintained, timezone-aware) replaced python-jose which used utcnow()
-PyJWT>=2.9.0
+# Upper bound pinned so a PyJWT 3.x breaking change can't silently land at install time.
+PyJWT>=2.9.0,<3.0.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.12
 
@@ -35,9 +36,11 @@ torch>=2.0.0        # LSTM trajectory predictor (CPU-only fine)
 paho-mqtt>=2.0.0
 
 # OpenTelemetry (optional — gracefully disabled if not installed)
-opentelemetry-sdk>=1.25.0
-opentelemetry-exporter-otlp-proto-grpc>=1.25.0
-opentelemetry-instrumentation-fastapi>=0.46b0
+# Upper bounds keep the three OTEL packages on the same 1.x minor release;
+# skew across them causes subtle ABI breaks.
+opentelemetry-sdk>=1.25.0,<2.0.0
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0,<2.0.0
+opentelemetry-instrumentation-fastapi>=0.46b0,<1.0.0
 
 # Testing
 pytest>=7.4.0

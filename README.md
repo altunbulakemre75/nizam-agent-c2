@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml/badge.svg)](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-348%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
+[![Tests](https://img.shields.io/badge/tests-623%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Real-Time Command & Control (C2) / Common Operational Picture (COP) System**
@@ -101,7 +101,7 @@ Each record contains:
 - JWT authentication with ADMIN / OPERATOR / VIEWER roles (enabled via `AUTH_ENABLED=true`)
 - Docker + Docker Compose (one command: `docker compose up --build`)
 - Production setup script (`scripts/prod_setup.sh`): TLS cert generation, secret rotation, Docker boot
-- GitHub Actions CI: 348 pytest tests + end-to-end smoke test
+- GitHub Actions CI: 623 pytest tests + end-to-end smoke test
 - Runtime metrics endpoint (`/api/metrics`): ingest rate, tactical p50/p95, WS fan-out
 - Tactical engine benchmark (`scripts/bench_tactical.py`): automated p50/p95/p99 measurement with per-module breakdown
 
@@ -242,7 +242,7 @@ scripts/
   load_test.py            1000-track throughput + latency test
   prod_setup.sh           TLS cert + secret generation + Docker boot
   smoke_test.py           end-to-end smoke test
-tests/            348 pytest tests
+tests/            623 pytest tests
 train_trajectory.py  synthetic data generator + LSTM training script
 start.py          one-command boot: orchestrator + COP + pipeline
 ```
@@ -376,7 +376,7 @@ python scripts/bench_tactical.py --tracks 150 --warmup 10 --samples 30
 ## Running Tests
 
 ```bash
-pytest tests/ -v                             # 348 unit tests
+pytest tests/ -v                             # 623 unit tests
 python scripts/smoke_test.py --duration 12   # end-to-end
 python scripts/bench_tactical.py --tracks 150  # tactical engine latency
 ```

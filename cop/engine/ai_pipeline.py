@@ -345,10 +345,16 @@ async def _ai_tactical_background_task() -> None:
             enriched_threats=result.get("enriched_threats", {}),
             ml_predictions=result.get("ml_predictions", {}),
         )
+        _prev_drift = AI_DRIFT_STATUS.get("drift_level")
         AI_DRIFT_STATUS.clear()
         AI_DRIFT_STATUS.update(ai_drift.status())
-        if AI_DRIFT_STATUS.get("drift_level") == "major":
+        _curr_drift = AI_DRIFT_STATUS.get("drift_level")
+        # Only log on level transition — was spamming WARNING every tick while
+        # drift stayed at "major", flooding logs during demo sessions.
+        if _curr_drift == "major" and _prev_drift != "major":
             log.warning("[drift] Major model drift detected — PSI=%.3f", AI_DRIFT_STATUS["psi"])
+        elif _curr_drift != "major" and _prev_drift == "major":
+            log.info("[drift] Model drift recovered — PSI=%.3f", AI_DRIFT_STATUS["psi"])
 
         # ── Blue Force / Fratricide check ─────────────────────────────────
         # Must run against current STATE so it sees live friendly positions.

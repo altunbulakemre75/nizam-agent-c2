@@ -39,6 +39,15 @@ from cop.ws_broadcast import broadcast, append_event_tail
 from cop.engine.ai_pipeline import process_track as _process_track
 from cop.engine.ai_pipeline import schedule_ai_tactical as _schedule_ai_tactical
 
+# Analyzer module-level state must be reset between scenarios — otherwise
+# drift baselines, anomaly histories, and coord-attack cooldowns carry over
+# from scenario N to N+1 and produce false positives / silent suppression.
+from ai import aar as ai_aar
+from ai import drift as ai_drift
+from ai import anomaly as ai_anomaly
+from ai import coordinated_attack as ai_coord
+from ai import roe as ai_roe
+
 SCENARIOS_DIR = Path(__file__).parent.parent.parent / "scenarios"
 
 # Default origin (Istanbul Bosphorus area — matches existing scenario fixtures).
@@ -150,6 +159,18 @@ async def _run(scenario: Dict[str, Any]) -> None:
         "entity_count": len(entities),
     })
 
+    # Reset analyzer module-level state so a previous scenario's baseline,
+    # cooldowns, or anomaly history doesn't bleed into this one.
+    try:
+        ai_drift.reset()
+        ai_anomaly.reset()
+        ai_coord.reset()
+        ai_roe.reset()
+        ai_aar.reset()
+        ai_aar.start_session()
+    except Exception:
+        pass  # analyzer reset is best-effort — don't block the scenario
+
     # Close-in threshold: below this range the entity teleports back to its
     # spawn position and resumes its original heading. This creates a looping
     # "continuous approach" that keeps threat-level and icon color stable for
@@ -223,6 +244,14 @@ async def _run(scenario: Dict[str, Any]) -> None:
                     from cop.routers.ingest import _auto_task
                     await _auto_task(ent["id"], threat_payload)
 
+                # AAR session bookkeeping — populates the end-of-scenario
+                # modal with track count, threat distribution, and peak score.
+                try:
+                    ai_aar.record_track(ent["id"], len(STATE["tracks"]))
+                    ai_aar.record_threat(ent["id"], score, threat_level, intent)
+                except Exception:
+                    pass
+
                 await broadcast({"event_type": "cop.track",  "payload": track_payload})
                 await broadcast({"event_type": "cop.threat", "payload": threat_payload})
 
@@ -236,6 +265,10 @@ async def _run(scenario: Dict[str, Any]) -> None:
 
     finally:
         _state["running"] = False
+        try:
+            ai_aar.end_session()
+        except Exception:
+            pass
 
 
 def start(scenario_name: str) -> Dict[str, Any]:
