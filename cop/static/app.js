@@ -891,7 +891,8 @@ function applyAIUpdate(payload) {
   drawUncertaintyCones(payload.uncertainty_cones || {});
   renderBreachPanel(payload.pred_breaches || []);
   renderCoordPanel(payload.coord_attacks || []);
-  renderROEPanel(payload.roe_advisories || []);
+  _roeAdvisories = payload.roe_advisories || [];
+  renderROEPanel(_roeAdvisories);
   renderConfidencePanel(payload.confidence_scores || {});
   mlPredictions = payload.ml_predictions || {};
   if (typeof payload.ml_available === "boolean") {
@@ -914,10 +915,167 @@ function applyAIUpdate(payload) {
 }
 
 /* ── Zone breach alert panel ─────────────────────────────── */
-/* ── ROE Escalation banner ───────────────────────────────── */
+/* ── ROE Escalation banner + Engagement Approval Modal ────── */
 let _escalationBannerEl = null;
 const _escalationLog = [];
 const MAX_ESCALATIONS = 20;
+let _roeAdvisories = [];   // latest ROE list from applyAIUpdate
+
+/* ── Engagement approval modal state ── */
+const _engModal = {
+  el: null, cardEl: null, timerEl: null,
+  trackId: null, taskId: null,
+  _interval: null, _startTs: null, _durationS: 0,
+};
+
+function _buildEngModalEl() {
+  const overlay = el("div", {
+    id: "eng-modal-overlay",
+    style: {
+      display: "none",
+      position: "fixed", inset: "0", zIndex: "999998",
+      background: "rgba(0,0,0,0.72)",
+      alignItems: "center", justifyContent: "center",
+    },
+  });
+  const card = el("div", {
+    id: "eng-modal-card",
+    style: {
+      background: "#1a1a2e", border: "2px solid #e74c3c",
+      borderRadius: "12px", padding: "20px 24px",
+      minWidth: "380px", maxWidth: "460px",
+      fontFamily: "var(--mono), monospace", color: "#fff",
+      boxShadow: "0 8px 40px rgba(0,0,0,0.8)",
+    },
+  });
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  _engModal.el     = overlay;
+  _engModal.cardEl = card;
+}
+
+function _openEngModal(p) {
+  if (!_engModal.el) _buildEngModalEl();
+  const { el: overlay, cardEl: card } = _engModal;
+
+  const isCrit    = p.level === "CRITICAL";
+  const borderCol = isCrit ? "#e74c3c" : "#e67e22";
+  const bgCol     = isCrit ? "rgba(231,76,60,0.15)" : "rgba(230,126,34,0.12)";
+  _engModal.trackId   = p.track_id;
+  _engModal._startTs  = Date.now();
+  _engModal._durationS = p.duration_s || 0;
+
+  const task = [...pendingTasks.values()]
+    .find(t => t.track_id === p.track_id && t.action === "ENGAGE");
+  _engModal.taskId = task?.id || null;
+
+  const adv = _roeAdvisories.find(a => a.track_id === p.track_id);
+
+  card.style.borderColor = borderCol;
+  card.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;
+                padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.1)">
+      <span style="font-size:22px">${isCrit ? "\u{1F6A8}" : "\u26A0\uFE0F"}</span>
+      <div>
+        <div style="font-size:10px;color:${borderCol};letter-spacing:1.5px;font-weight:700">
+          ${isCrit ? "KR\u0130T\u0130K" : "UYARI"}</div>
+        <div style="font-size:15px;font-weight:700;letter-spacing:.3px">ANGAJMAN ONAYI GEREKL\u0130</div>
+      </div>
+      <div id="eng-timer" style="margin-left:auto;font-size:24px;font-weight:700;
+           color:${borderCol};font-variant-numeric:tabular-nums">--s</div>
+    </div>
+
+    <div style="background:${bgCol};border-radius:8px;padding:12px 14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:10px;color:var(--text-3)">HEDEF</span>
+        <span style="font-size:18px;font-weight:700">${escHtml(p.track_id)}</span>
+        <span style="margin-left:auto;background:${borderCol};padding:2px 8px;
+               border-radius:4px;font-size:10px;font-weight:700">${escHtml(p.engagement)}</span>
+      </div>
+      ${adv ? `
+        <div style="font-size:10px;color:var(--text-2);display:flex;gap:12px;flex-wrap:wrap">
+          <span>Tehdit: <b style="color:${THREAT_COLORS[adv.threat_level]??'#fff'}">${adv.threat_level??"-"}</b></span>
+          <span>Skor: <b>${adv.threat_score??"-"}</b></span>
+          <span>Intent: <b>${adv.intent??"-"}</b></span>
+          ${adv.in_kill_zone   ? '<span style="color:#e74c3c;font-weight:700">\u26A1 KILL ZONE</span>' : ""}
+          ${adv.is_coordinated ? '<span style="color:#ff6600;font-weight:700">\u26A1 KOORD\u0130NELI</span>' : ""}
+        </div>
+        ${adv.reasons?.length
+          ? `<div style="font-size:9px;color:var(--text-3);margin-top:5px">${adv.reasons.join(" \u00b7 ")}</div>`
+          : ""}
+      ` : `<div style="font-size:10px;color:var(--text-3)">${escHtml(p.message)}</div>`}
+    </div>
+
+    ${task ? `
+      <div style="font-size:10px;color:var(--text-3);margin-bottom:12px;padding:6px 10px;
+                  background:rgba(255,255,255,0.04);border-radius:6px">
+        G\u00f6rev: <b style="color:${ACTION_COLORS[task.action]??'#fff'}">${task.action}</b>
+        &nbsp; TTI: <b>${task.tti_s??"-"}s</b>
+      </div>
+    ` : ""}
+
+    <div style="display:flex;gap:10px">
+      <button id="eng-approve" class="nz-btn c-ok"
+        style="flex:1;padding:10px;font-size:13px;font-weight:700;letter-spacing:1px">
+        \u2714 ONAYLA
+      </button>
+      <button id="eng-reject" class="nz-btn c-danger"
+        style="flex:1;padding:10px;font-size:13px;font-weight:700;letter-spacing:1px">
+        \u2718 REDDET
+      </button>
+      <button id="eng-defer" class="nz-btn"
+        style="padding:10px 12px;font-size:11px;color:var(--text-3)">
+        \u23F8 Ertele
+      </button>
+    </div>
+    <div style="margin-top:10px;font-size:9px;color:var(--text-3);text-align:center">
+      Operat\u00f6r: <b>${escHtml(MY_OPERATOR_ID)}</b>
+    </div>
+  `;
+
+  _engModal.timerEl = card.querySelector("#eng-timer");
+  if (_engModal._interval) clearInterval(_engModal._interval);
+  _engModal._interval = setInterval(_tickEngTimer, 1000);
+  _tickEngTimer();
+
+  card.querySelector("#eng-approve").addEventListener("click", () => _engModalAct("approve"));
+  card.querySelector("#eng-reject").addEventListener("click",  () => _engModalAct("reject"));
+  card.querySelector("#eng-defer").addEventListener("click",   () => _closeEngModal());
+
+  overlay.style.display = "flex";
+}
+
+function _tickEngTimer() {
+  if (!_engModal.timerEl) return;
+  const elapsed = Math.floor((Date.now() - _engModal._startTs) / 1000);
+  const total   = _engModal._durationS + elapsed;
+  _engModal.timerEl.textContent = `${total}s`;
+  _engModal.timerEl.style.color = total > 60 ? "#e74c3c" : total > 30 ? "#e67e22" : "#f1c40f";
+}
+
+async function _engModalAct(action) {
+  const { trackId, taskId } = _engModal;
+  try {
+    if (taskId) {
+      await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ operator: MY_OPERATOR_ID, operator_id: MY_OPERATOR_ID }),
+      });
+    } else {
+      await fetch(`/api/roe/${encodeURIComponent(trackId)}/ack`, {
+        method: "POST", headers: authHeaders(),
+      });
+    }
+  } catch (e) { console.warn("[eng-modal]", e); }
+  _closeEngModal();
+  if (_escalationBannerEl) _escalationBannerEl.style.display = "none";
+}
+
+function _closeEngModal() {
+  if (_engModal._interval) { clearInterval(_engModal._interval); _engModal._interval = null; }
+  if (_engModal.el) _engModal.el.style.display = "none";
+}
 
 function mountEscalationBanner() {
   _escalationBannerEl = el("div", {
@@ -926,14 +1084,16 @@ function mountEscalationBanner() {
       display: "none",
       position: "fixed", top: "0", left: "0", right: "0", zIndex: "99999",
       background: "#c0392b", color: "#fff",
-      padding: "8px 16px", fontSize: "13px", fontWeight: "bold",
+      padding: "6px 16px 6px 16px", fontSize: "12px", fontWeight: "bold",
       textAlign: "center", letterSpacing: "0.5px",
-      borderBottom: "2px solid #e74c3c",
-      cursor: "pointer",
+      borderBottom: "2px solid #e74c3c", cursor: "pointer",
     },
   });
-  _escalationBannerEl.title = "Tıkla: onaylandı olarak işaretle";
-  _escalationBannerEl.addEventListener("click", () => _dismissEscalationBanner());
+  _escalationBannerEl.title = "Tıkla: modalı aç";
+  _escalationBannerEl.addEventListener("click", () => {
+    const latest = _escalationLog[0];
+    if (latest) _openEngModal(latest); else _dismissEscalationBanner();
+  });
   document.body.appendChild(_escalationBannerEl);
 }
 
@@ -944,15 +1104,12 @@ function pushEscalation(p) {
   _escalationLog.unshift({ t, ...p });
   if (_escalationLog.length > MAX_ESCALATIONS) _escalationLog.pop();
 
-  // Show / refresh banner
   if (_escalationBannerEl) {
     const icon = p.level === "CRITICAL" ? "\u{1F6A8}" : "\u26A0\uFE0F";
     _escalationBannerEl.textContent =
-      `${icon} ${p.message}  [${t}]  — Tıkla/ack et`;
+      `${icon} ${p.message}  [${t}]  \u2014 Tıkla: onay modalını aç`;
     _escalationBannerEl.style.display = "block";
-    _escalationBannerEl.style.background =
-      p.level === "CRITICAL" ? "#7b241c" : "#c0392b";
-    // Auto-dismiss after 60s if not clicked
+    _escalationBannerEl.style.background = p.level === "CRITICAL" ? "#7b241c" : "#c0392b";
     clearTimeout(_escalationBannerEl._timer);
     _escalationBannerEl._timer = setTimeout(
       () => { if (_escalationBannerEl) _escalationBannerEl.style.display = "none"; },
@@ -960,7 +1117,9 @@ function pushEscalation(p) {
     );
   }
 
-  // Play alarm audio (reuse EW alarm if available)
+  // Open approval modal immediately (opens on top of banner)
+  _openEngModal(p);
+
   if (typeof playAlarm === "function") {
     playAlarm(p.level === "CRITICAL" ? "critical" : "warning");
   }
@@ -970,8 +1129,7 @@ function _dismissEscalationBanner() {
   const latest = _escalationLog[0];
   if (latest?.track_id) {
     fetch(`/api/roe/${encodeURIComponent(latest.track_id)}/ack`, {
-      method: "POST",
-      headers: _authHeaders(),
+      method: "POST", headers: authHeaders(),
     }).catch(() => {});
   }
   if (_escalationBannerEl) _escalationBannerEl.style.display = "none";
@@ -1170,8 +1328,13 @@ function pushTask(task) {
 
 function updateTask(task) {
   if(!task?.id) return;
-  if(task.status!=="PENDING") pendingTasks.delete(task.id);
-  else pendingTasks.set(task.id, task);
+  if(task.status!=="PENDING") {
+    pendingTasks.delete(task.id);
+    // Auto-close approval modal if it was showing this task
+    if (_engModal.taskId === task.id) _closeEngModal();
+  } else {
+    pendingTasks.set(task.id, task);
+  }
   _renderTaskPanel();
 
   // Flash task panel briefly
@@ -3397,7 +3560,7 @@ async function _auditLoad() {
   const tbody = document.getElementById("audit-tbody");
   if (statusEl) statusEl.textContent = "Yukleniyor...";
   try {
-    const resp = await fetch(url, {headers: _authHeaders()});
+    const resp = await fetch(url, {headers: authHeaders()});
     if (resp.status === 403) {
       if (statusEl) statusEl.textContent = "Erisim reddedildi — admin yetkisi gerekli";
       if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="padding:16px;opacity:.5;text-align:center">Bu panel sadece admin kullanicilara aciktir.</td></tr>`;
@@ -4714,7 +4877,7 @@ async function refreshKillChain() {
   const listEl   = document.getElementById("kc-track-list");
   if (!funnelEl) return;
   try {
-    const data = await fetch("/api/ai/kill_chain", {headers:_authHeaders()}).then(r=>r.json());
+    const data = await fetch("/api/ai/kill_chain", {headers:authHeaders()}).then(r=>r.json());
     const counts = data.stage_counts || {};
     const total  = data.total || 0;
     const pipeline = data.pipeline || [];
