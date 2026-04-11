@@ -245,9 +245,16 @@ class TestIngestConcurrency:
 
             return Request(scope, receive)
 
+        # Per-request latency samples (in ms). We measure the actual
+        # ingest() call, *not* the semaphore wait time — we want pipeline
+        # latency, not queue delay.
+        latencies_ms: List[float] = []
+
         async def _one(i: int) -> int:
             req = await _fake_request(i)
+            t_start = time.perf_counter()
             resp = await _ingest_mod.ingest(req)
+            latencies_ms.append((time.perf_counter() - t_start) * 1000.0)
             return resp.status_code
 
         async def _run():
@@ -270,12 +277,28 @@ class TestIngestConcurrency:
         err = n_events - ok
         throughput = n_events / elapsed if elapsed > 0 else 0.0
 
+        p50 = _percentile(latencies_ms, 50)
+        p95 = _percentile(latencies_ms, 95)
+        p99 = _percentile(latencies_ms, 99)
+
         print(
             f"\n  ingest[{n_events}x{parallelism}] ok={ok} err={err} "
-            f"elapsed={elapsed*1000:.0f}ms throughput={throughput:.0f}/s"
+            f"elapsed={elapsed*1000:.0f}ms throughput={throughput:.0f}/s "
+            f"p50={p50:.1f}ms p95={p95:.1f}ms p99={p99:.1f}ms"
         )
 
         assert ok >= int(n_events * 0.98), f"Too many ingest errors: {err}/{n_events}"
         assert len(srv.STATE["tracks"]) >= int(n_events * 0.98), (
             f"Not enough tracks persisted: {len(srv.STATE['tracks'])}/{n_events}"
+        )
+        # Regression guard: the ingest handler itself must yield fast.
+        # Design invariant: heavy work (tactical, DB, webhooks) is scheduled
+        # via asyncio.create_task, so the handler returns in sub-ms. Baseline
+        # on a laptop is p95 ~0.5-1 ms. 50 ms gives 50-100x headroom for
+        # slower CI runners but still catches "someone added blocking work
+        # to /ingest" regressions.
+        assert p95 < 50.0, (
+            f"Ingest p95 regression: {p95:.1f}ms > 50ms "
+            f"(p50={p50:.1f} p99={p99:.1f}) — /ingest is blocking the event loop. "
+            f"Did someone add sync DB/HTTP/CPU work without asyncio.create_task?"
         )
