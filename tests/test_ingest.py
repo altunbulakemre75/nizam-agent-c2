@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cop import server as srv
+import cop.routers.ingest as _ingest_mod
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +31,7 @@ def _reset_state():
     srv.METRICS["ingest_total"] = 0
     srv.METRICS["ingest_bad_request"] = 0
     srv.METRICS["ingest_by_type"] = {}
-    srv._rate_buckets.clear()
+    _ingest_mod._rate_buckets.clear()
     yield
 
 
@@ -156,15 +157,15 @@ class TestIngestValidation:
 
 class TestRateLimit:
     def test_rate_limit_allows_normal_traffic(self):
-        assert srv._rate_limit_check("10.0.0.1") is True
+        assert _ingest_mod._rate_limit_check("10.0.0.1") is True
 
     def test_rate_limit_blocks_after_burst(self):
         ip = "10.0.0.99"
         # Exhaust burst capacity
-        for _ in range(srv._RATE_LIMIT_BURST + 50):
-            srv._rate_limit_check(ip)
+        for _ in range(_ingest_mod._RATE_LIMIT_BURST + 50):
+            _ingest_mod._rate_limit_check(ip)
         # Should be blocked now
-        assert srv._rate_limit_check(ip) is False
+        assert _ingest_mod._rate_limit_check(ip) is False
 
 
 # ── Event tail ────────────────────────────────────────────────────────────
@@ -173,7 +174,7 @@ class TestRateLimit:
 
 class TestIngestApiKeyAuth:
     def test_no_key_required_when_auth_disabled(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", False)
+        monkeypatch.setattr(_ingest_mod, "AUTH_ENABLED", False)
         resp = client.post("/ingest", json={
             "event_type": "cop.track",
             "payload": {"id": "T-AK1", "lat": 41.0, "lon": 29.0},
@@ -181,8 +182,8 @@ class TestIngestApiKeyAuth:
         assert resp.status_code == 200
 
     def test_rejected_without_key_when_auth_enabled(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
-        monkeypatch.setattr(srv, "INGEST_API_KEY", "secret-key-123")
+        monkeypatch.setattr(_ingest_mod, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ingest_mod, "INGEST_API_KEY", "secret-key-123")
         resp = client.post("/ingest", json={
             "event_type": "cop.track",
             "payload": {"id": "T-AK2", "lat": 41.0, "lon": 29.0},
@@ -190,16 +191,16 @@ class TestIngestApiKeyAuth:
         assert resp.status_code == 401
 
     def test_rejected_with_wrong_key(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
-        monkeypatch.setattr(srv, "INGEST_API_KEY", "secret-key-123")
+        monkeypatch.setattr(_ingest_mod, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ingest_mod, "INGEST_API_KEY", "secret-key-123")
         resp = client.post("/ingest",
                            json={"event_type": "cop.track", "payload": {"id": "T-AK3"}},
                            headers={"x-api-key": "wrong-key"})
         assert resp.status_code == 401
 
     def test_accepted_with_correct_key(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
-        monkeypatch.setattr(srv, "INGEST_API_KEY", "secret-key-123")
+        monkeypatch.setattr(_ingest_mod, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ingest_mod, "INGEST_API_KEY", "secret-key-123")
         resp = client.post("/ingest",
                            json={"event_type": "cop.track",
                                  "payload": {"id": "T-AK4", "lat": 41.0, "lon": 29.0}},
@@ -208,8 +209,8 @@ class TestIngestApiKeyAuth:
 
     def test_no_key_env_means_no_guard(self, client, monkeypatch):
         """AUTH_ENABLED=true but INGEST_API_KEY not set → no key check."""
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
-        monkeypatch.setattr(srv, "INGEST_API_KEY", "")
+        monkeypatch.setattr(_ingest_mod, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ingest_mod, "INGEST_API_KEY", "")
         resp = client.post("/ingest", json={
             "event_type": "cop.track",
             "payload": {"id": "T-AK5", "lat": 41.0, "lon": 29.0},

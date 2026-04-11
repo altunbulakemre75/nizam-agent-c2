@@ -26,6 +26,7 @@ import pytest
 
 from ai import assignment as ai_assignment
 from cop import server as srv
+import cop.routers.ingest as _ingest_mod
 
 
 pytestmark = pytest.mark.slow
@@ -246,7 +247,7 @@ class TestIngestConcurrency:
 
         async def _one(i: int) -> int:
             req = await _fake_request(i)
-            resp = await srv.ingest(req)
+            resp = await _ingest_mod.ingest(req)
             return resp.status_code
 
         async def _run():

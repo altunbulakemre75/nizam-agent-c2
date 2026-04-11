@@ -108,6 +108,29 @@ METRICS: Dict[str, Any] = {
 _TACTICAL_RECENT_MAX = 32
 
 
+def make_snapshot_payload() -> Dict[str, Any]:
+    """Full state snapshot sent to new WebSocket clients and captured for replay."""
+    from cop.helpers import utc_now_iso
+    return {
+        "tracks":    list(STATE["tracks"].values()),
+        "threats":   list(STATE["threats"].values()),
+        "zones":     list(STATE["zones"].values()),
+        "assets":    list(STATE["assets"].values()),
+        "tasks":     [t for t in STATE["tasks"].values() if t["status"] == "PENDING"],
+        "waypoints": list(STATE["waypoints"].values()),
+        "predictions":       AI_PREDICTIONS,
+        "trajectories":      AI_TRAJECTORIES,
+        "anomalies":         AI_ANOMALIES[-20:],
+        "recommendations":   AI_RECOMMENDATIONS,
+        "pred_breaches":     AI_PRED_BREACHES,
+        "uncertainty_cones": AI_UNCERTAINTY_CONES,
+        "coord_attacks":     AI_COORD_ATTACKS,
+        "roe_advisories":    AI_ROE_ADVISORIES,
+        "ml_predictions":    AI_ML_PREDICTIONS,
+        "server_time": utc_now_iso(),
+    }
+
+
 def metrics_record_tactical_duration(ms: float) -> None:
     """Push a tactical run duration into the rolling window and update max."""
     METRICS["tactical_last_ms"] = round(ms, 2)

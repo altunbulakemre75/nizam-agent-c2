@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cop import server as srv
+import cop.routers.ws as _ws_mod
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +39,7 @@ class TestWSNoAuth:
     """When AUTH_ENABLED=false, any WS connection should work."""
 
     def test_connect_without_token(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", False)
+        monkeypatch.setattr(_ws_mod, "AUTH_ENABLED", False)
         with client.websocket_connect("/ws") as ws:
             # First message is operator_joined broadcast, second is snapshot
             join = ws.receive_json()
@@ -47,7 +48,7 @@ class TestWSNoAuth:
             assert snapshot["event_type"] == "cop.snapshot"
 
     def test_connect_with_operator_id(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", False)
+        monkeypatch.setattr(_ws_mod, "AUTH_ENABLED", False)
         with client.websocket_connect("/ws?operator_id=OPS-TEST") as ws:
             join = ws.receive_json()
             assert join["event_type"] == "cop.operator_joined"
@@ -63,20 +64,20 @@ class TestWSWithAuth:
     """When AUTH_ENABLED=true, token validation must be enforced."""
 
     def test_reject_missing_token(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ws_mod, "AUTH_ENABLED", True)
         with pytest.raises(Exception):
             # Should close with code 4001
             with client.websocket_connect("/ws") as ws:
                 ws.receive_json()
 
     def test_reject_invalid_token(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ws_mod, "AUTH_ENABLED", True)
         with pytest.raises(Exception):
             with client.websocket_connect("/ws?token=garbage-token") as ws:
                 ws.receive_json()
 
     def test_accept_valid_token(self, client, monkeypatch):
-        monkeypatch.setattr(srv, "AUTH_ENABLED", True)
+        monkeypatch.setattr(_ws_mod, "AUTH_ENABLED", True)
         # Create a valid JWT
         from auth.deps import create_access_token
         token = create_access_token({"sub": "test-operator"})

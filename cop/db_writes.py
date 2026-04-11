@@ -21,12 +21,13 @@ try:
     from db.session import AsyncSessionLocal
     from db.models import (
         TrackEvent, ThreatEvent, AlertRecord,
-        ZoneRecord, AssetRecord, WaypointRecord,
+        ZoneRecord, AssetRecord, WaypointRecord, TaskRecord,
     )
     DB_ENABLED = True
 except Exception:
     DB_ENABLED = False
     AsyncSessionLocal = None  # type: ignore
+    TaskRecord = None  # type: ignore
 
 
 async def db_write(coro) -> None:
@@ -95,6 +96,45 @@ async def persist_alert(payload: Dict[str, Any]) -> None:
             lon      =payload.get("lon"),
         )
         s.add(row)
+        await s.commit()
+
+
+async def persist_task(task: Dict[str, Any]) -> None:
+    if not DB_ENABLED:
+        return
+    async with AsyncSessionLocal() as s:
+        row = TaskRecord(
+            id          =task["id"],
+            track_id    =task["track_id"],
+            action      =task["action"],
+            threat_level=task.get("threat_level"),
+            intent      =task.get("intent"),
+            score       =task.get("score"),
+            tti_s       =task.get("tti_s"),
+            status      =task.get("status", "PENDING"),
+        )
+        await s.merge(row)
+        await s.commit()
+
+
+async def persist_task_update(task: Dict[str, Any]) -> None:
+    if not DB_ENABLED:
+        return
+    from sqlalchemy import update
+    from datetime import datetime, timezone
+    async with AsyncSessionLocal() as s:
+        resolved_at = task.get("resolved_at")
+        if resolved_at and isinstance(resolved_at, str):
+            resolved_at = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
+        await s.execute(
+            update(TaskRecord)
+            .where(TaskRecord.id == task["id"])
+            .values(
+                status     =task["status"],
+                resolved_at=resolved_at,
+                resolved_by=task.get("resolved_by"),
+            )
+        )
         await s.commit()
 
 
