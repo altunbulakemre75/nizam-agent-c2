@@ -2485,6 +2485,11 @@ async def api_ai_aar():
         tasks=STATE["tasks"],
         timelines=ai_timeline.get_all_timelines(),
     )
+    report["bda"] = {
+        "summary": ai_bda.summary(),
+        "records": ai_bda.get_all()[-20:],
+        "pending": ai_bda.get_pending(),
+    }
     return JSONResponse(report)
 
 

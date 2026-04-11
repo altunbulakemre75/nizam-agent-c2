@@ -2987,6 +2987,10 @@ function renderAAR(r) {
   const tracks = r.track_summaries || [];
   const timeline = r.key_event_timeline || [];
 
+  const bda    = r.bda || {};
+  const bdaSum = bda.summary || {};
+  const bdaRecs = bda.records || [];
+
   const riskColors = {CRITICAL:"#e74c3c",HIGH:"#e67e22",MEDIUM:"#f39c12",LOW:"#27ae60"};
   const riskColor = riskColors[ra.overall_risk] || "#95a5a6";
 
@@ -3013,6 +3017,7 @@ function renderAAR(r) {
       ${_aarStatCard("Bolge Ihlali", ex.total_zone_breaches || 0, "#f39c12")}
       ${_aarStatCard("Gorev", ex.total_tasks || 0, "#2980b9")}
       ${_aarStatCard("Bolge", ex.zones_defined || 0, "#1abc9c")}
+      ${(bdaSum.total_engagements||0) > 0 ? _aarStatCard("BDA İsabet", (bdaSum.hit_rate_pct||0) + "%", "#27ae60") : ""}
     </div>
     ${ex.peak_threat_track ? `<div style="margin-top:6px;opacity:.7;font-size:11px">Zirve tehdit: <b>${escHtml(ex.peak_threat_track)}</b> (skor:${ex.peak_threat_score}, t+${ex.peak_threat_time_elapsed}s)</div>` : ""}
   </div>`;
@@ -3122,6 +3127,37 @@ function renderAAR(r) {
       </div>
       <div style="margin-top:4px;opacity:.7">Bekleyen: ${ts.pending_count||0} | Onaylanan: ${ts.approved_count||0} | Reddedilen: ${ts.rejected_count||0}</div>
     </div>`;
+  }
+
+  // ── BDA ──
+  if ((bdaSum.total_engagements || 0) > 0) {
+    const hitRate  = bdaSum.hit_rate_pct || 0;
+    const hitColor = hitRate >= 70 ? "#27ae60" : hitRate >= 40 ? "#f39c12" : "#e74c3c";
+    html += `<div style="margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#27ae60;font-size:14px">Ates Degerlendirmesi / BDA (${bdaSum.total_engagements})</h3>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px">
+        ${_aarStatCard("Isabet Orani", hitRate + "%", hitColor)}
+        ${_aarStatCard("Imha", bdaSum.destroyed || 0, "#27ae60")}
+        ${_aarStatCard("Kacti", bdaSum.evaded || 0, "#e74c3c")}
+        ${_aarStatCard("Bekleyen", bdaSum.miss_pending || 0, "#f39c12")}
+      </div>`;
+    if (bdaRecs.length > 0) {
+      html += `<table style="width:100%;border-collapse:collapse;font-size:11px">
+        <tr style="opacity:.6;text-align:left">
+          <th style="padding:2px 6px">Hedef</th><th>Sonuc</th><th>Operatör</th><th>Zaman</th>
+        </tr>`;
+      bdaRecs.slice(-10).reverse().forEach(rec => {
+        const c = {DESTROYED:"#27ae60",DESTROYED_LATE:"#2ecc71",EVADED:"#e74c3c",MISS:"#f39c12"}[rec.outcome] || "#aaa";
+        html += `<tr>
+          <td style="padding:2px 6px;font-family:monospace">${escHtml((rec.track_id||"").slice(-12))}</td>
+          <td style="color:${c};font-weight:bold">${escHtml(rec.outcome)}</td>
+          <td style="opacity:.7">${escHtml(rec.operator||"")}</td>
+          <td style="opacity:.5">${escHtml((rec.confirmed_at||rec.engaged_at||"").slice(11,19))}</td>
+        </tr>`;
+      });
+      html += `</table>`;
+    }
+    html += `</div>`;
   }
 
   // ── Track Summaries ──
@@ -3385,6 +3421,7 @@ function mountBDAPanel() {
     <div class="nz-section" style="margin-bottom:4px">
       BDA <span style="opacity:.5;font-weight:400;font-size:9px">Battle Damage Assessment</span>
     </div>
+    <div id="bda-stats" style="display:flex;gap:6px;align-items:center;margin-bottom:6px"></div>
     <div id="bda-body" style="font-size:10px"></div>`;
   const aiTab = RIGHT_TABS["ai"];
   if (aiTab) aiTab.appendChild(_bdaPanelEl);
@@ -3394,9 +3431,41 @@ function renderBDAPanel() {
   if (!_bdaPanelEl) return;
   if (_bdaLog.length === 0) { _bdaPanelEl.style.display = "none"; return; }
   _bdaPanelEl.style.display = "";
+
+  // ── Stats bar ──
+  const total     = _bdaLog.length;
+  const destroyed = _bdaLog.filter(r => r.outcome === "DESTROYED" || r.outcome === "DESTROYED_LATE").length;
+  const evaded    = _bdaLog.filter(r => r.outcome === "EVADED").length;
+  const pending   = _bdaLog.filter(r => r.outcome === "MISS").length;
+  const hitRate   = total > 0 ? Math.round(destroyed / total * 100) : 0;
+  const hitColor  = hitRate >= 70 ? "#27ae60" : hitRate >= 40 ? "#f39c12" : "#e74c3c";
+
+  const statsEl = document.getElementById("bda-stats");
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <div style="background:${hitColor}22;border:1px solid ${hitColor}66;border-radius:6px;
+                  padding:4px 8px;text-align:center;min-width:44px">
+        <div style="font-size:15px;font-weight:bold;color:${hitColor}">${hitRate}%</div>
+        <div style="font-size:8px;opacity:.6">İsabet</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;flex:1">
+        <div style="background:rgba(255,255,255,0.06);padding:2px 7px;border-radius:4px;font-size:9px">
+          Toplam <b>${total}</b>
+        </div>
+        <div style="background:#27ae6020;padding:2px 7px;border-radius:4px;font-size:9px;color:#27ae60">
+          \u2713 İmha <b>${destroyed}</b>
+        </div>
+        <div style="background:#e74c3c20;padding:2px 7px;border-radius:4px;font-size:9px;color:#e74c3c">
+          \u2715 Kaçtı <b>${evaded}</b>
+        </div>
+        ${pending > 0 ? `<div style="background:#f39c1220;padding:2px 7px;border-radius:4px;font-size:9px;color:#f39c12">\u23F3 Bekl. <b>${pending}</b></div>` : ""}
+      </div>`;
+  }
+
+  // ── Log entries ──
   const body = document.getElementById("bda-body");
   if (!body) return;
-  body.innerHTML = _bdaLog.slice(0, 8).map(r => {
+  body.innerHTML = _bdaLog.slice(0, 6).map(r => {
     const col = _BDA_COLORS[r.outcome] || "#aaa";
     const ago = Math.round((Date.now() - r._t) / 1000);
     const icon = r.outcome === "DESTROYED" || r.outcome === "DESTROYED_LATE" ? "\u2713" :
@@ -3414,6 +3483,21 @@ function renderBDAPanel() {
       </div>
     </div>`;
   }).join("");
+}
+
+async function _loadBDAHistory() {
+  try {
+    const data = await fetch("/api/bda").then(r => r.json());
+    const recs = [...(data.records || []), ...(data.pending || [])];
+    recs.sort((a, b) => (a.engaged_at < b.engaged_at ? 1 : -1));
+    for (const r of recs) {
+      if (!_bdaLog.find(x => x.bda_id === r.bda_id)) {
+        _bdaLog.push({...r, _t: Date.now()});
+      }
+    }
+    if (_bdaLog.length > 30) _bdaLog.length = 30;
+    renderBDAPanel();
+  } catch(e) {}
 }
 
 function pushBDAOutcome(payload) {
@@ -5178,6 +5262,7 @@ function boot(){
   mountEffectorStatusPanel();
   mountDriftPanel();
   mountBDAPanel();
+  _loadBDAHistory();
   // Federation nodes panel
   mountNodesPanel();
   _refreshNodesPanel();
