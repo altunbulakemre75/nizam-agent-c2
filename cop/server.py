@@ -213,12 +213,22 @@ from cop.routers.scenarios import router as scenarios_router
 from cop.routers.audit import router as audit_router
 from cop.routers.webhooks import router as webhooks_router
 from cop.routers.replay import router as replay_router
+from cop.routers.zones import router as zones_router
+from cop.routers.assets import router as assets_router
+from cop.routers.waypoints import router as waypoints_router
+from cop.routers.analytics import router as analytics_router
+from cop.routers.fusion import router as fusion_router
 app.include_router(weather_router)
 app.include_router(bda_router)
 app.include_router(scenarios_router)
 app.include_router(audit_router)
 app.include_router(webhooks_router)
 app.include_router(replay_router)
+app.include_router(zones_router)
+app.include_router(assets_router)
+app.include_router(waypoints_router)
+app.include_router(analytics_router)
+app.include_router(fusion_router)
 
 # Rate limiting middleware (write endpoints only)
 app.add_middleware(RateLimitMiddleware)
@@ -328,23 +338,7 @@ def _append_event_tail(ev: Dict[str, Any]) -> None:
         del tail[: len(tail) - EVENT_TAIL_MAX]
 
 
-async def broadcast(ev: Dict[str, Any]) -> None:
-    dead: List[WebSocket] = []
-    sent = 0
-    async with CLIENTS_LOCK:
-        for ws in list(CLIENTS):
-            try:
-                await ws.send_json(ev)
-                sent += 1
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            CLIENTS.discard(ws)
-    METRICS["ws_broadcasts"]    += 1
-    METRICS["ws_messages_sent"] += sent
-    if dead:
-        METRICS["ws_send_failures"] += len(dead)
-    METRICS["ws_clients"] = len(CLIENTS)
+from cop.ws_broadcast import broadcast  # re-export for existing code in this file
 
 
 def _point_in_polygon(lat: float, lon: float, coords: List) -> bool:
@@ -364,119 +358,14 @@ def _point_in_polygon(lat: float, lon: float, coords: List) -> bool:
 
 
 # ── DB persistence (fire-and-forget) ─────────────────────────────────────────
-
-async def _db_write(coro) -> None:
-    """Run a coroutine that writes to DB; log and swallow any error."""
-    if not DB_ENABLED:
-        coro.close()  # prevent 'coroutine never awaited' RuntimeWarning
-        return
-    try:
-        await coro
-    except Exception as exc:
-        log.debug("[db] write error: %s", exc)
-
-
-async def _persist_track(payload: Dict[str, Any]) -> None:
-    if not DB_ENABLED:
-        return
-    async with AsyncSessionLocal() as s:
-        tid = (payload.get("id") or payload.get("track_id")
-               or payload.get("global_track_id") or payload.get("gid"))
-        row = TrackEvent(
-            track_id=str(tid) if tid else "unknown",
-            lat     =payload.get("lat"),
-            lon     =payload.get("lon"),
-            altitude=payload.get("altitude") or payload.get("alt"),
-            speed   =payload.get("speed"),
-            heading =payload.get("heading"),
-            source  =payload.get("source"),
-            raw     =payload,
-        )
-        s.add(row)
-        await s.commit()
-
-
-async def _persist_threat(payload: Dict[str, Any]) -> None:
-    if not DB_ENABLED:
-        return
-    async with AsyncSessionLocal() as s:
-        tid = (payload.get("id") or payload.get("track_id")
-               or payload.get("global_track_id") or payload.get("gid"))
-        row = ThreatEvent(
-            track_id    =str(tid) if tid else "unknown",
-            threat_level=payload.get("threat_level"),
-            intent      =payload.get("intent"),
-            score       =payload.get("score"),
-            tti_s       =payload.get("tti_s"),
-            raw         =payload,
-        )
-        s.add(row)
-        await s.commit()
-
-
-async def _persist_alert(payload: Dict[str, Any]) -> None:
-    if not DB_ENABLED:
-        return
-    async with AsyncSessionLocal() as s:
-        row = AlertRecord(
-            track_id =payload.get("track_id", ""),
-            zone_id  =payload.get("zone_id"),
-            zone_name=payload.get("zone_name"),
-            zone_type=payload.get("zone_type"),
-            lat      =payload.get("lat"),
-            lon      =payload.get("lon"),
-        )
-        s.add(row)
-        await s.commit()
-
-
-async def _persist_zone(zone: Dict[str, Any]) -> None:
-    if not DB_ENABLED:
-        return
-    async with AsyncSessionLocal() as s:
-        row = ZoneRecord(
-            id         =zone["id"],
-            name       =zone["name"],
-            type       =zone.get("type", "restricted"),
-            coordinates=zone["coordinates"],
-            color      =zone.get("color"),
-        )
-        await s.merge(row)
-        await s.commit()
-
-
-async def _delete_zone_db(zone_id: str) -> None:
-    if not DB_ENABLED:
-        return
-    from sqlalchemy import delete
-    async with AsyncSessionLocal() as s:
-        await s.execute(delete(ZoneRecord).where(ZoneRecord.id == zone_id))
-        await s.commit()
-
-
-async def _persist_asset(asset: Dict[str, Any]) -> None:
-    if not DB_ENABLED:
-        return
-    async with AsyncSessionLocal() as s:
-        row = AssetRecord(
-            id    =asset["id"],
-            name  =asset["name"],
-            type  =asset.get("type", "unknown"),
-            lat   =asset["lat"],
-            lon   =asset["lon"],
-            status=asset.get("status", "active"),
-        )
-        await s.merge(row)
-        await s.commit()
-
-
-async def _delete_asset_db(asset_id: str) -> None:
-    if not DB_ENABLED:
-        return
-    from sqlalchemy import delete
-    async with AsyncSessionLocal() as s:
-        await s.execute(delete(AssetRecord).where(AssetRecord.id == asset_id))
-        await s.commit()
+# Extracted to cop/db_writes.py. Only the helpers still needed by server.py
+# (ingest path + the not-yet-extracted task router) are re-imported here.
+from cop.db_writes import (
+    db_write       as _db_write,
+    persist_track  as _persist_track,
+    persist_threat as _persist_threat,
+    persist_alert  as _persist_alert,
+)
 
 
 async def _persist_task(task: Dict[str, Any]) -> None:
@@ -518,38 +407,7 @@ async def _persist_task_update(task: Dict[str, Any]) -> None:
         await s.commit()
 
 
-async def _persist_waypoint(wp: Dict[str, Any]) -> None:
-    if not DB_ENABLED:
-        return
-    async with AsyncSessionLocal() as s:
-        row = WaypointRecord(
-            id        =wp["id"],
-            name      =wp["name"],
-            lat       =wp["lat"],
-            lon       =wp["lon"],
-            order     =wp.get("order", 0),
-            mission_id=wp.get("mission_id", "default"),
-        )
-        await s.merge(row)
-        await s.commit()
-
-
-async def _delete_waypoint_db(wp_id: str) -> None:
-    if not DB_ENABLED:
-        return
-    from sqlalchemy import delete
-    async with AsyncSessionLocal() as s:
-        await s.execute(delete(WaypointRecord).where(WaypointRecord.id == wp_id))
-        await s.commit()
-
-
-async def _clear_waypoints_db() -> None:
-    if not DB_ENABLED:
-        return
-    from sqlalchemy import delete
-    async with AsyncSessionLocal() as s:
-        await s.execute(delete(WaypointRecord))
-        await s.commit()
+# Waypoint DB writes → cop/db_writes.py
 
 
 # ── State restore from DB ─────────────────────────────────────────────────────
@@ -799,115 +657,7 @@ async def api_events_tail():
 
 # ── Zones ────────────────────────────────────────────────────
 
-@app.get("/api/zones")
-async def api_zones():
-    return JSONResponse({"zones": list(STATE["zones"].values()), "server_time": _utc_now_iso()})
-
-
-@app.post("/api/zones")
-async def api_zones_create(req: Request, current_user=Depends(require_operator())):
-    body = await req.json()
-    zone_id = body.get("id")
-    if not zone_id or not body.get("coordinates"):
-        return JSONResponse({"ok": False, "error": "id and coordinates required"}, status_code=400)
-    zone = {
-        "id":          zone_id,
-        "name":        body.get("name", zone_id),
-        "type":        body.get("type", "restricted"),
-        "coordinates": body["coordinates"],
-        "color":       body.get("color"),
-        "created_at":  _utc_now_iso(),
-    }
-    async with STATE_LOCK:
-        STATE["zones"][zone_id] = zone
-    ev = {"event_type": "cop.zone", "payload": zone}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_persist_zone(zone)))
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "anonymous"),
-        role=getattr(current_user, "role", ""),
-        action="CREATE_ZONE", resource_type="zone", resource_id=zone_id,
-        detail={"name": zone.get("name"), "type": zone.get("type")},
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "zone": zone})
-
-
-@app.delete("/api/zones/{zone_id}")
-async def api_zones_delete(zone_id: str, req: Request, current_user=Depends(require_operator())):
-    async with STATE_LOCK:
-        removed = STATE["zones"].pop(zone_id, None)
-    if not removed:
-        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-    ev = {"event_type": "cop.zone_removed", "payload": {"id": zone_id}}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_delete_zone_db(zone_id)))
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "anonymous"),
-        role=getattr(current_user, "role", ""),
-        action="DELETE_ZONE", resource_type="zone", resource_id=zone_id,
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "removed": zone_id})
-
-
-# ── Assets ───────────────────────────────────────────────────
-
-@app.get("/api/assets")
-async def api_assets():
-    return JSONResponse({"assets": list(STATE["assets"].values()), "server_time": _utc_now_iso()})
-
-
-@app.post("/api/assets")
-async def api_assets_create(req: Request, current_user=Depends(require_operator())):
-    body = await req.json()
-    if not body.get("lat") or not body.get("lon") or not body.get("type"):
-        return JSONResponse({"ok": False, "error": "lat, lon, type required"}, status_code=400)
-    asset_id = body.get("id") or _new_id("asset-")
-    asset = {
-        "id":         asset_id,
-        "name":       body.get("name", asset_id),
-        "type":       body.get("type", "unknown"),
-        "lat":        float(body["lat"]),
-        "lon":        float(body["lon"]),
-        "status":     body.get("status", "active"),
-        "created_at": _utc_now_iso(),
-    }
-    async with STATE_LOCK:
-        STATE["assets"][asset_id] = asset
-    ev = {"event_type": "cop.asset", "payload": asset}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_persist_asset(asset)))
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "anonymous"),
-        role=getattr(current_user, "role", ""),
-        action="CREATE_ASSET", resource_type="asset", resource_id=asset_id,
-        detail={"type": asset.get("type"), "name": asset.get("name")},
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "asset": asset})
-
-
-@app.delete("/api/assets/{asset_id}")
-async def api_assets_delete(asset_id: str, req: Request, current_user=Depends(require_operator())):
-    async with STATE_LOCK:
-        removed = STATE["assets"].pop(asset_id, None)
-    if not removed:
-        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-    ev = {"event_type": "cop.asset_removed", "payload": {"id": asset_id}}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_delete_asset_db(asset_id)))
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "anonymous"),
-        role=getattr(current_user, "role", ""),
-        action="DELETE_ASSET", resource_type="asset", resource_id=asset_id,
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "removed": asset_id})
+# Zone + Asset endpoints → cop/routers/zones.py and cop/routers/assets.py
 
 
 # ── Tasks ────────────────────────────────────────────────────
@@ -1472,58 +1222,7 @@ async def api_annotations_delete(
 
 # ── Waypoints ────────────────────────────────────────────────
 
-@app.get("/api/waypoints")
-async def api_waypoints():
-    wps = sorted(STATE["waypoints"].values(), key=lambda w: w.get("order", 0))
-    return JSONResponse({"waypoints": wps, "server_time": _utc_now_iso()})
-
-
-@app.post("/api/waypoints")
-async def api_waypoints_create(req: Request, _=Depends(require_operator())):
-    body = await req.json()
-    if body.get("lat") is None or body.get("lon") is None:
-        return JSONResponse({"ok": False, "error": "lat and lon required"}, status_code=400)
-    wp_id = body.get("id") or _new_id("wp-")
-    wp = {
-        "id":         wp_id,
-        "name":       body.get("name", f"WP-{len(STATE['waypoints']) + 1}"),
-        "lat":        float(body["lat"]),
-        "lon":        float(body["lon"]),
-        "order":      int(body.get("order", len(STATE["waypoints"]))),
-        "mission_id": body.get("mission_id", "default"),
-        "created_at": _utc_now_iso(),
-    }
-    async with STATE_LOCK:
-        STATE["waypoints"][wp_id] = wp
-    ev = {"event_type": "cop.waypoint", "payload": wp}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_persist_waypoint(wp)))
-    return JSONResponse({"ok": True, "waypoint": wp})
-
-
-@app.delete("/api/waypoints/{wp_id}")
-async def api_waypoints_delete(wp_id: str, _=Depends(require_operator())):
-    async with STATE_LOCK:
-        removed = STATE["waypoints"].pop(wp_id, None)
-    if not removed:
-        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-    ev = {"event_type": "cop.waypoint_removed", "payload": {"id": wp_id}}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_delete_waypoint_db(wp_id)))
-    return JSONResponse({"ok": True, "removed": wp_id})
-
-
-@app.delete("/api/waypoints")
-async def api_waypoints_clear(_=Depends(require_operator())):
-    async with STATE_LOCK:
-        STATE["waypoints"].clear()
-    ev = {"event_type": "cop.waypoints_cleared", "payload": {"server_time": _utc_now_iso()}}
-    _append_event_tail(ev)
-    await broadcast(ev)
-    asyncio.create_task(_db_write(_clear_waypoints_db()))
-    return JSONResponse({"ok": True})
+# Waypoint endpoints → cop/routers/waypoints.py
 
 
 # ── Reset ────────────────────────────────────────────────────
@@ -2794,81 +2493,7 @@ async def api_ai_status():
 # Replay endpoints → cop/routers/replay.py
 
 
-# ── Analytics endpoints (Phase 4) ────────────────────────────
-
-@app.get("/api/analytics/tracks")
-async def api_analytics_tracks(
-    track_id: Optional[str] = Query(None),
-    limit:    int           = Query(100, le=5000),
-):
-    """Query track history from DB. Returns [] when DB not configured."""
-    if not DB_ENABLED:
-        return JSONResponse({"ok": False, "error": "database not configured"}, status_code=503)
-    from sqlalchemy import select, desc
-    async with AsyncSessionLocal() as s:
-        q = select(TrackEvent).order_by(desc(TrackEvent.time)).limit(limit)
-        if track_id:
-            q = q.where(TrackEvent.track_id == track_id)
-        rows = (await s.execute(q)).scalars().all()
-    return JSONResponse({
-        "count": len(rows),
-        "tracks": [
-            {
-                "time": r.time.isoformat(), "track_id": r.track_id,
-                "lat": r.lat, "lon": r.lon, "altitude": r.altitude,
-                "speed": r.speed, "heading": r.heading, "source": r.source,
-            }
-            for r in rows
-        ],
-    })
-
-
-@app.get("/api/analytics/threats")
-async def api_analytics_threats(
-    track_id: Optional[str] = Query(None),
-    limit:    int           = Query(100, le=5000),
-):
-    if not DB_ENABLED:
-        return JSONResponse({"ok": False, "error": "database not configured"}, status_code=503)
-    from sqlalchemy import select, desc
-    async with AsyncSessionLocal() as s:
-        q = select(ThreatEvent).order_by(desc(ThreatEvent.time)).limit(limit)
-        if track_id:
-            q = q.where(ThreatEvent.track_id == track_id)
-        rows = (await s.execute(q)).scalars().all()
-    return JSONResponse({
-        "count": len(rows),
-        "threats": [
-            {
-                "time": r.time.isoformat(), "track_id": r.track_id,
-                "threat_level": r.threat_level, "intent": r.intent,
-                "score": r.score, "tti_s": r.tti_s,
-            }
-            for r in rows
-        ],
-    })
-
-
-@app.get("/api/analytics/alerts")
-async def api_analytics_alerts(limit: int = Query(100, le=5000)):
-    if not DB_ENABLED:
-        return JSONResponse({"ok": False, "error": "database not configured"}, status_code=503)
-    from sqlalchemy import select, desc
-    async with AsyncSessionLocal() as s:
-        rows = (await s.execute(
-            select(AlertRecord).order_by(desc(AlertRecord.time)).limit(limit)
-        )).scalars().all()
-    return JSONResponse({
-        "count": len(rows),
-        "alerts": [
-            {
-                "time": r.time.isoformat(), "track_id": r.track_id,
-                "zone_id": r.zone_id, "zone_name": r.zone_name,
-                "zone_type": r.zone_type, "lat": r.lat, "lon": r.lon,
-            }
-            for r in rows
-        ],
-    })
+# Analytics endpoints → cop/routers/analytics.py
 
 
 # Scenario endpoints → cop/routers/scenarios.py
@@ -3089,70 +2714,18 @@ async def api_effectors_telemetry():
     })
 
 
-# ── Asset PATCH ────────────────────────────────────────────────────────────────
-
-@app.patch("/api/assets/{asset_id}", tags=["assets"])
-async def api_asset_patch(
-    asset_id: str, req: Request,
-    current_user=Depends(require_operator()),
-):
-    """Partial update of an asset record (status, lat, lon, name, capability, range_km)."""
-    body = await req.json()
-    allowed = {"status", "lat", "lon", "name", "capability", "range_km"}
-    async with STATE_LOCK:
-        asset = STATE["assets"].get(asset_id)
-        if not asset:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        for k, v in body.items():
-            if k in allowed:
-                asset[k] = v
-    await broadcast({"event_type": "cop.asset", "payload": dict(asset)})
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "operator"),
-        role=getattr(current_user, "role", ""),
-        action="PATCH_ASSET", resource_type="asset", resource_id=asset_id,
-        detail={k: v for k, v in body.items() if k in allowed},
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "asset": asset})
+# Asset PATCH → cop/routers/assets.py
 
 
-# ── Analytics ──────────────────────────────────────────────────────────────────
-
-@app.get("/api/analytics/tracks", tags=["system"])
-async def api_analytics_tracks(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
-    """Track ingest rate per 5-min bucket for the last N hours."""
-    return JSONResponse({"data": await cop_analytics.track_rate(db, hours=hours)})
-
-
-@app.get("/api/analytics/threats", tags=["system"])
-async def api_analytics_threats(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
-    """Threat events per hour per threat_level for the last N hours."""
-    return JSONResponse({"data": await cop_analytics.threat_distribution(db, hours=hours)})
-
-
-@app.get("/api/analytics/alerts", tags=["system"])
-async def api_analytics_alerts(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
-    """Zone breach alert count per hour for the last N hours."""
-    return JSONResponse({"data": await cop_analytics.alert_rate(db, hours=hours)})
-
-
-@app.get("/api/analytics/audit", tags=["system"])
-async def api_analytics_audit(hours: int = Query(24, ge=1, le=168), db=Depends(get_db)):
-    """Audit action count per hour for the last N hours."""
-    return JSONResponse({"data": await cop_analytics.audit_summary(db, hours=hours)})
+# Duplicate analytics set was dead code (shadowed by the live routes already
+# extracted to cop/routers/analytics.py) — removed during the server.py
+# breakup. The cop.analytics helpers remain available if a future rewrite
+# wants to build proper hours-binned summary endpoints.
 
 
 # ── Webhooks ───────────────────────────────────────────────────────────────────
 
-@app.get("/api/fusion/tracks", tags=["system"])
-async def api_fusion_tracks(_=Depends(require_viewer())):
-    """Return all currently active fused tracks from the fusion engine."""
-    return JSONResponse({
-        "fused_tracks": [t.to_dict() for t in ai_fusion.engine.all_tracks()],
-        "stats":        ai_fusion.engine.stats(),
-        "server_time":  _utc_now_iso(),
-    })
+# Fusion endpoint → cop/routers/fusion.py
 
 
 # Webhook endpoints → cop/routers/webhooks.py
