@@ -19,12 +19,13 @@ import time
 import pytest
 
 from cop import server as srv
+import cop.engine.tactical as _tac_engine  # engine-level mutable state
 
 
 @pytest.fixture(autouse=True)
 def _reset_tactical_state():
     """Reset module-level state so tests don't bleed into each other."""
-    srv._ai_tactical_last = 0.0
+    _tac_engine._ai_tactical_last = 0.0
     srv.METRICS["tactical_scheduled"]      = 0
     srv.METRICS["tactical_rate_skipped"]   = 0
     srv.METRICS["tactical_ran"]            = 0
@@ -116,7 +117,7 @@ class TestScheduleTactical:
     def test_first_call_schedules(self):
         async def _body():
             # Start with last=0 so the first call must pass the gate.
-            srv._ai_tactical_last = 0.0
+            _tac_engine._ai_tactical_last = 0.0
             assert srv._schedule_ai_tactical() is True
             assert srv.METRICS["tactical_scheduled"] == 1
             assert srv.METRICS["tactical_rate_skipped"] == 0
@@ -129,7 +130,7 @@ class TestScheduleTactical:
     def test_rate_limit_skips_next_call(self):
         """Back-to-back calls within the interval must be rate-limited."""
         async def _body():
-            srv._ai_tactical_last = time.time()  # just ran
+            _tac_engine._ai_tactical_last = time.time()  # just ran
             assert srv._schedule_ai_tactical() is False
             assert srv.METRICS["tactical_scheduled"] == 1
             assert srv.METRICS["tactical_rate_skipped"] == 1
@@ -143,7 +144,7 @@ class TestScheduleTactical:
         We fake time.time() inside the scheduler to avoid waiting.
         """
         async def _body():
-            srv._ai_tactical_last = 1000.0
+            _tac_engine._ai_tactical_last = 1000.0
 
             # _schedule_ai_tactical imports 'time as _time' locally; patch
             # the time module that function actually sees.

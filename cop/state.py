@@ -108,6 +108,17 @@ METRICS: Dict[str, Any] = {
 _TACTICAL_RECENT_MAX = 32
 
 
+def metrics_record_tactical_duration(ms: float) -> None:
+    """Push a tactical run duration into the rolling window and update max."""
+    METRICS["tactical_last_ms"] = round(ms, 2)
+    if ms > METRICS["tactical_max_ms"]:
+        METRICS["tactical_max_ms"] = round(ms, 2)
+    recent: List[float] = METRICS["tactical_recent_ms"]
+    recent.append(round(ms, 2))
+    if len(recent) > _TACTICAL_RECENT_MAX:
+        del recent[: len(recent) - _TACTICAL_RECENT_MAX]
+
+
 def reset_state() -> None:
     """Wipe in-memory state. Called by /api/reset handler."""
     for key in ("agents", "tracks", "threats", "zones", "assets",
