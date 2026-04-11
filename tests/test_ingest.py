@@ -207,15 +207,23 @@ class TestIngestApiKeyAuth:
                            headers={"x-api-key": "secret-key-123"})
         assert resp.status_code == 200
 
-    def test_no_key_env_means_no_guard(self, client, monkeypatch):
-        """AUTH_ENABLED=true but INGEST_API_KEY not set → no key check."""
+    def test_empty_key_runtime_returns_503(self, client, monkeypatch):
+        """
+        Defensive runtime check: even if INGEST_API_KEY were somehow blanked
+        out at runtime (which the boot guard prevents at startup), every
+        request must be rejected with 503 "not configured". Fail-closed.
+
+        Replaces the old test_no_key_env_means_no_guard which pinned the
+        opposite (and unsafe) behaviour: empty key = no auth check.
+        """
         monkeypatch.setattr(_ingest_mod, "AUTH_ENABLED", True)
         monkeypatch.setattr(_ingest_mod, "INGEST_API_KEY", "")
         resp = client.post("/ingest", json={
             "event_type": "cop.track",
             "payload": {"id": "T-AK5", "lat": 41.0, "lon": 29.0},
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        assert "not configured" in resp.json().get("error", "")
 
 
 # ── Event tail ────────────────────────────────────────────────────────────

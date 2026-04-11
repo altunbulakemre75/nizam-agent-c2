@@ -65,6 +65,19 @@ router = APIRouter()
 
 INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "")
 
+# Boot-time guard: refuse to start if auth is on but the ingest key is unset.
+# Otherwise the line "if AUTH_ENABLED and INGEST_API_KEY" silently fails open
+# when the key is empty — every unauthenticated request is accepted, which is
+# the exact opposite of what an operator who flipped AUTH_ENABLED expects.
+# Same fail-closed pattern as the JWT_SECRET guard in auth/deps.py.
+if AUTH_ENABLED and not INGEST_API_KEY:
+    raise RuntimeError(
+        "AUTH_ENABLED=true but INGEST_API_KEY is not set. /ingest would "
+        "fail-open (accept all requests without authentication). Refusing "
+        "to boot. Set INGEST_API_KEY to a secure value, e.g.: "
+        'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+    )
+
 # ── Rate limiter (token bucket per IP) ───────────────────────────────────────
 _RATE_LIMIT_RPS   = 200   # max requests per second per IP
 _RATE_LIMIT_BURST = 500   # burst capacity
@@ -270,9 +283,19 @@ async def ingest(req: Request):
         return JSONResponse({"ok": False, "error": cb_reason}, status_code=503,
                             headers={"Retry-After": "30"})
 
-    # API key guard: when AUTH_ENABLED and INGEST_API_KEY is set,
-    # require X-API-Key header for /ingest access.
-    if AUTH_ENABLED and INGEST_API_KEY:
+    # API key guard: when AUTH_ENABLED, require X-API-Key header.
+    # Two layers of defence:
+    #   1. Boot guard refuses startup with empty INGEST_API_KEY.
+    #   2. Runtime check below explicitly rejects when the key is empty
+    #      so an empty header against an empty key cannot match (""=="").
+    if AUTH_ENABLED:
+        if not INGEST_API_KEY:
+            METRICS["ingest_bad_request"] += 1
+            cop_cb.record_bad(client_ip)
+            return JSONResponse(
+                {"ok": False, "error": "ingest API key not configured"},
+                status_code=503,
+            )
         provided = req.headers.get("x-api-key", "")
         if provided != INGEST_API_KEY:
             METRICS["ingest_bad_request"] += 1
