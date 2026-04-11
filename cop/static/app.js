@@ -141,6 +141,11 @@ function mountTopBar() {
                border:1px solid rgba(52,152,219,0.4);border-radius:6px;color:#3498db;
                cursor:pointer;font-weight:600"
         onclick="openAuditModal()">AUDIT</button>
+      <button id="demo-btn" title="Demo scenarios"
+        style="padding:2px 8px;font-size:10px;background:rgba(160,96,224,0.18);
+               border:1px solid rgba(160,96,224,0.5);border-radius:6px;color:#a060e0;
+               cursor:pointer;font-weight:600"
+        onclick="toggleDemoMenu()">DEMO ▾</button>
       <button id="weather-btn" title="Weather Overlay"
         style="padding:2px 8px;font-size:10px;background:rgba(100,100,100,0.2);
                border:1px solid rgba(150,150,150,0.4);border-radius:6px;color:#aaa;
@@ -3795,6 +3800,166 @@ function _wxTooltip(obs) {
     <div style="font-size:8px;opacity:.6;margin-top:2px">${escHtml(obs.metar)}</div>
   </div>`;
 }
+
+/* ── Demo scenario menu ─────────────────────────────────────
+   Topbar dropdown that lists scenarios from /api/scenarios and lets
+   the operator (or an investor sitting next to them) one-click run
+   any of them via the in-process scenario_runner. No subprocess, no
+   orchestrator, no agent fleet — just click and go.
+   ──────────────────────────────────────────────────────────── */
+let _demoMenuEl = null;
+let _demoStatusInterval = null;
+
+// Short Turkish blurbs for known scenarios. New scenarios fall back to
+// the description string from the JSON file itself.
+const _DEMO_DESCRIPTIONS = {
+  single_drone:       "Tek hedef — yaklaşan drone, temel ML & threat akışı",
+  swarm_attack:       "Sürü saldırısı — 5 drone aynı anda farklı yönlerden",
+  coordinated_attack: "Koordineli saldırı — eşzamanlı çok eksenli giriş",
+  multi_axis_attack:  "Çok eksenli saldırı — 4 hedef, 2 farklı yön",
+  decoy_attack:       "Yem (decoy) saldırısı — sahte hedef + asıl ekip",
+  missile_attack:     "Füze saldırısı — yüksek hızlı tek hedef",
+};
+
+function toggleDemoMenu() {
+  if (_demoMenuEl && _demoMenuEl.style.display !== "none") {
+    _demoMenuEl.style.display = "none";
+    return;
+  }
+  if (!_demoMenuEl) {
+    _demoMenuEl = el("div", {
+      id: "demo-menu",
+      style: {
+        position: "fixed", top: "44px", right: "200px", zIndex: "10003",
+        minWidth: "320px", maxWidth: "380px",
+        background: "linear-gradient(180deg, var(--bg-2), var(--bg-1))",
+        border: "1px solid var(--border-hi)",
+        borderRadius: "10px",
+        boxShadow: "var(--shadow-lg)",
+        padding: "10px",
+        fontFamily: "var(--font)",
+        color: "var(--text-1)",
+        fontSize: "11px",
+      },
+    }, []);
+    document.body.appendChild(_demoMenuEl);
+  }
+  _demoMenuEl.style.display = "block";
+  _demoMenuEl.innerHTML = `
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-2);margin-bottom:8px">Demo Senaryoları</div>
+    <div id="demo-menu-list" style="display:flex;flex-direction:column;gap:6px">
+      <div style="color:var(--text-3);font-style:italic">Yükleniyor…</div>
+    </div>
+    <div id="demo-menu-status"
+         style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);
+                font-family:var(--mono);font-size:10px;color:var(--text-2)">—</div>
+  `;
+  _loadDemoScenarios();
+  _refreshDemoStatus();
+  if (!_demoStatusInterval) {
+    _demoStatusInterval = setInterval(_refreshDemoStatus, 1500);
+  }
+}
+
+async function _loadDemoScenarios() {
+  const list = document.getElementById("demo-menu-list");
+  if (!list) return;
+  try {
+    const r = await fetch("/api/scenarios");
+    const j = await r.json();
+    const items = (j.scenarios || []);
+    if (items.length === 0) {
+      list.innerHTML = `<div style="color:var(--text-3)">No scenarios on disk.</div>`;
+      return;
+    }
+    list.innerHTML = items.map(function (s) {
+      const tr = _DEMO_DESCRIPTIONS[s.name] || s.description || "—";
+      return `
+        <div style="display:flex;align-items:center;gap:8px;
+                    padding:6px 8px;background:var(--bg-0);
+                    border:1px solid var(--border);border-radius:6px">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;color:var(--text-1)">${_escHtmlLocal(s.name)}</div>
+            <div style="font-size:9px;color:var(--text-2);
+                        white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+                 title="${_escHtmlLocal(tr)}">${_escHtmlLocal(tr)}</div>
+            <div style="font-size:9px;color:var(--text-3);margin-top:2px">
+              ${s.entity_count || 0} hedef · ${s.duration_s || 0}s · ${s.rate_hz || 1}Hz
+            </div>
+          </div>
+          <button onclick="runDemoScenario('${_escHtmlLocal(s.name)}')"
+                  style="padding:4px 10px;font-size:10px;font-weight:600;
+                         background:var(--accent);color:#fff;border:none;
+                         border-radius:4px;cursor:pointer">▶</button>
+        </div>
+      `;
+    }).join("");
+  } catch (e) {
+    list.innerHTML = `<div style="color:var(--danger)">Failed to load scenarios.</div>`;
+  }
+}
+
+async function _refreshDemoStatus() {
+  const el = document.getElementById("demo-menu-status");
+  if (!el) {
+    if (_demoStatusInterval) { clearInterval(_demoStatusInterval); _demoStatusInterval = null; }
+    return;
+  }
+  try {
+    const r = await fetch("/api/scenarios/runner/status");
+    const s = await r.json();
+    if (s.running) {
+      const pct = s.total_ticks ? Math.round((s.current_tick / s.total_ticks) * 100) : 0;
+      el.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="color:var(--ok)">● RUNNING</span>
+          <span style="flex:1">${_escHtmlLocal(s.scenario)} · tick ${s.current_tick}/${s.total_ticks} (${pct}%)</span>
+          <button onclick="stopDemoScenario()"
+                  style="padding:3px 8px;font-size:10px;font-weight:600;
+                         background:var(--danger);color:#fff;border:none;
+                         border-radius:4px;cursor:pointer">STOP</button>
+        </div>
+      `;
+    } else {
+      el.innerHTML = `<span style="color:var(--text-3)">● idle — pick a scenario to start</span>`;
+    }
+  } catch (e) {
+    el.innerHTML = `<span style="color:var(--danger)">status unreachable</span>`;
+  }
+}
+
+async function runDemoScenario(name) {
+  try {
+    const r = await fetch(`/api/scenarios/${encodeURIComponent(name)}/run`, { method: "POST" });
+    const j = await r.json();
+    if (!j.ok) {
+      alert("Scenario start failed: " + (j.error || "unknown"));
+      return;
+    }
+    _refreshDemoStatus();
+  } catch (e) {
+    alert("Scenario start failed: " + e.message);
+  }
+}
+
+async function stopDemoScenario() {
+  try {
+    await fetch("/api/scenarios/stop", { method: "POST" });
+    _refreshDemoStatus();
+  } catch (e) {}
+}
+
+// Local escHtml fallback in case _U.escHtml isn't available yet at this
+// scope. Keeps the demo menu self-contained.
+function _escHtmlLocal(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 
 function toggleWeatherOverlay() {
   _wxEnabled = !_wxEnabled;

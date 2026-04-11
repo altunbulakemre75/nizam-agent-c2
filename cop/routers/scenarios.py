@@ -1,4 +1,4 @@
-"""cop/routers/scenarios.py  —  Scenario file CRUD."""
+"""cop/routers/scenarios.py  —  Scenario file CRUD + in-process runner."""
 from __future__ import annotations
 
 import json
@@ -6,6 +6,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+
+from cop.engine import scenario_runner
 
 try:
     from auth.deps import require_operator
@@ -76,3 +78,30 @@ async def api_scenario_delete(name: str, _=Depends(require_operator())):
         return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
     path.unlink()
     return JSONResponse({"ok": True})
+
+
+# ── In-process scenario runner ──────────────────────────────────────────────
+
+@router.post("/api/scenarios/{name}/run")
+async def api_scenario_run(name: str, _=Depends(require_operator())):
+    """
+    Start playing a scenario inside the COP server process. Generates
+    synthetic cop.track + cop.threat events; the existing AI pipeline
+    runs on top untouched. Use case: investor demo, single-click playback
+    on Railway / single-node deployments where the agent fleet isn't up.
+    """
+    result = scenario_runner.start(_safe_name(name))
+    code = 200 if result.get("ok") else 409
+    return JSONResponse(result, status_code=code)
+
+
+@router.post("/api/scenarios/stop")
+async def api_scenario_stop(_=Depends(require_operator())):
+    """Stop the currently-running scenario after its current tick."""
+    return JSONResponse(scenario_runner.stop())
+
+
+@router.get("/api/scenarios/runner/status")
+async def api_scenario_runner_status():
+    """Current scenario runner state (running, current tick, etc.)."""
+    return JSONResponse(scenario_runner.status())
