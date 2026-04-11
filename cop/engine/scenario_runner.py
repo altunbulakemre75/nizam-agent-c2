@@ -116,15 +116,28 @@ async def _run(scenario: Dict[str, Any]) -> None:
     origin_lon = float(scenario.get("origin_lon", _DEFAULT_ORIGIN_LON))
 
     # Mutable polar state per entity (we update range/az each tick).
+    # init_* fields preserve the spawn position so the entity can loop back
+    # to its starting point instead of bouncing — keeps threat intent stable
+    # throughout the scenario (demo-friendly: no green flicker on outbound leg).
     entities: List[Dict[str, Any]] = []
     for e in scenario.get("entities", []):
+        r0 = float(e["range_m"])
+        a0 = float(e["az_deg"])
+        h0 = float(e.get("heading_deg", 180.0))
         entities.append({
-            "id":          e["entity_id"],
-            "label":       e.get("label", "unknown"),
-            "range_m":     float(e["range_m"]),
-            "az_deg":      float(e["az_deg"]),
-            "speed_mps":   float(e.get("speed_mps", 20.0)),
-            "heading_deg": float(e.get("heading_deg", 180.0)),
+            "id":           e["entity_id"],
+            "label":        e.get("label", "unknown"),
+            "range_m":      r0,
+            "az_deg":       a0,
+            "speed_mps":    float(e.get("speed_mps", 20.0)),
+            "heading_deg":  h0,
+            # Frozen initial pose — used for loop-respawn on close-in.
+            "init_range_m": r0,
+            "init_az_deg":  a0,
+            "init_heading": h0,
+            # Intent is fixed at spawn time so a retreating entity stays
+            # classified correctly rather than flipping to "unknown".
+            "intent":       _intent_for_label(e.get("label", "unknown"), h0),
         })
 
     _state.update({
@@ -137,13 +150,11 @@ async def _run(scenario: Dict[str, Any]) -> None:
         "entity_count": len(entities),
     })
 
-    # Demo-friendly behaviour: when an inbound entity reaches the origin
-    # (range < minimum), flip its heading by 180° so it flies outward
-    # instead of getting pinned at (origin, origin). This keeps the map
-    # visually alive for the full scenario duration — tracks approach,
-    # cross over, and fly out the other side. Same bounce, opposite azimuth.
+    # Close-in threshold: below this range the entity teleports back to its
+    # spawn position and resumes its original heading. This creates a looping
+    # "continuous approach" that keeps threat-level and icon color stable for
+    # the entire scenario duration — no green flicker from the outbound leg.
     _MIN_RANGE_M = 120.0
-    bounced: set[str] = set()
 
     try:
         for tick in range(total_ticks):
@@ -161,19 +172,17 @@ async def _run(scenario: Dict[str, Any]) -> None:
                     omega_deg = math.degrees(v_tan / ent["range_m"]) * dt
                     ent["az_deg"] = ((ent["az_deg"] + omega_deg + 540.0) % 360.0) - 180.0
 
-                # Closed-in check — flip the heading outward once, then
-                # nudge range up so we don't re-trigger next tick.
-                if ent["range_m"] <= _MIN_RANGE_M and ent["id"] not in bounced:
-                    ent["heading_deg"] = (ent["heading_deg"] + 180.0) % 360.0
-                    # Also swing the azimuth to the opposite side so the
-                    # track visibly crosses the origin rather than rewinding.
-                    ent["az_deg"] = ((ent["az_deg"] + 180.0 + 540.0) % 360.0) - 180.0
-                    ent["range_m"] = _MIN_RANGE_M + 10.0
-                    bounced.add(ent["id"])
+                # Loop-respawn: when the entity closes within MIN_RANGE_M,
+                # teleport it back to its initial spawn position and continue
+                # with the original heading. Threat intent never resets.
+                if ent["range_m"] <= _MIN_RANGE_M:
+                    ent["range_m"]     = ent["init_range_m"]
+                    ent["az_deg"]      = ent["init_az_deg"]
+                    ent["heading_deg"] = ent["init_heading"]
 
                 lat, lon = _polar_to_latlon(origin_lat, origin_lon,
                                             ent["range_m"], ent["az_deg"])
-                intent = _intent_for_label(ent["label"], ent["heading_deg"])
+                intent = ent["intent"]  # fixed at spawn, never recalculated
 
                 track_payload = {
                     "id":          ent["id"],

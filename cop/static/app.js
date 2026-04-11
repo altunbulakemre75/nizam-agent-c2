@@ -605,6 +605,7 @@ function playNLEffect(payload, color) {
 
 function upsertThreat(threat) {
   const id=String(threat.id??threat.global_track_id??threat.threat_id??""); if(!id) return;
+  const prev=UI.threats.get(id);  // capture BEFORE overwrite for TTS comparison
   UI.threats.set(id,threat);
   const marker=UI.trackMarkers.get(id), track=UI.tracks.get(id);
   if(marker&&track){
@@ -614,12 +615,9 @@ function upsertThreat(threat) {
     marker.setTooltipContent(buildTooltip(track,threat));
     const pl=UI.trackPolylines.get(id);
     if(pl) pl.setStyle({color:THREAT_COLORS[level]??"#2980b9"});
-    // TTS: announce new HIGH threat
-    if (level === "HIGH") {
-      const prev = UI.threats.get(id);
-      if (!prev || prev.threat_level !== "HIGH") {
-        _TTS.speak(`High threat detected. Track ${id}`, "high", "high_threat");
-      }
+    // TTS: announce escalation to HIGH (only fires on level change, not every tick)
+    if (level === "HIGH" && (!prev || prev.threat_level !== "HIGH")) {
+      _TTS.speak(`High threat detected. Track ${id}`, "high", "high_threat");
     }
   }
   _scheduleRenderThreatList();
