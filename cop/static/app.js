@@ -70,14 +70,8 @@ function initMap() {
   }
   if (typeof window.L === "undefined") throw new Error("Leaflet not loaded");
   UI.map = L.map("map", { zoomControl: true }).setView([41.015, 28.979], 10);
-  // Dark basemap (CartoDB Dark Matter) — tactical/C2 systems read hostile,
-  // friendly, unknown track colours on a dark background. Bright OSM tiles
-  // wash out the threat palette. Falls back to OSM on failure via Leaflet's
-  // usual tile error handling.
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    maxZoom: 19,
-    subdomains: "abcd",
-    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "&copy; OpenStreetMap"
   }).addTo(UI.map);
 }
 
@@ -5490,34 +5484,20 @@ function mountCoordBar() {
     <span id="cb-tile" style="cursor:pointer;color:var(--accent)" title="Toggle tile layer">OSM</span>`;
   document.body.appendChild(bar);
 
-  // Tile layers. Default is DARK (CartoDB Dark Matter) — same rationale
-  // as initMap(). Cycle on click: DARK → OSM → SAT → DARK.
+  // Tile layers
   const TILES = {
-    DARK: L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-                      { maxZoom:19, subdomains:"abcd", attribution:"&copy; CARTO" }),
-    OSM:  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                      { maxZoom:19, attribution:"&copy; OSM" }),
-    SAT:  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                      { maxZoom:19, attribution:"&copy; Esri" }),
+    OSM: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom:19, attribution:"&copy; OSM" }),
+    SAT: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom:19, attribution:"&copy; Esri" }),
   };
-  const TILE_ORDER = ["DARK", "OSM", "SAT"];
-  let currentTile = "DARK";
-  // Note: initMap() already added a Dark layer. Don't double-add — just
-  // point the cycler's reference at the existing one by re-attaching.
-  // (Leaflet is safe against adding the same layer twice.)
-  TILES.DARK.addTo(UI.map);
+  let currentTile = "OSM";
+  TILES.OSM.addTo(UI.map);
 
-  const tileBtn = document.getElementById("cb-tile");
-  if (tileBtn) {
-    tileBtn.textContent = currentTile;
-    tileBtn.addEventListener("click", () => {
-      TILES[currentTile].remove();
-      const idx = TILE_ORDER.indexOf(currentTile);
-      currentTile = TILE_ORDER[(idx + 1) % TILE_ORDER.length];
-      TILES[currentTile].addTo(UI.map);
-      tileBtn.textContent = currentTile;
-    });
-  }
+  document.getElementById("cb-tile").addEventListener("click", () => {
+    TILES[currentTile].remove();
+    currentTile = currentTile === "OSM" ? "SAT" : "OSM";
+    TILES[currentTile].addTo(UI.map);
+    document.getElementById("cb-tile").textContent = currentTile;
+  });
 
   UI.map.on("mousemove", e => {
     const lat = document.getElementById("cb-lat");

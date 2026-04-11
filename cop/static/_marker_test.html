@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>NIZAM marker rendering test</title>
+  <link rel="stylesheet" href="/static/leaflet.css">
+  <link rel="stylesheet" href="/static/nizam.css">
+  <style>
+    body { margin: 0; background: var(--bg-0); color: #fff; font: 12px/1.4 monospace; }
+    #map { height: 500px; }
+    #info {
+      padding: 12px;
+      background: #0b1220;
+      border-top: 1px solid #4f7fff;
+    }
+    h2 { color: #4f7fff; margin: 0 0 8px; }
+    .row { margin: 4px 0; }
+    .tag { display: inline-block; min-width: 40px; padding: 2px 6px; border-radius: 3px;
+           text-align: center; font-weight: bold; margin-right: 6px; }
+    .tag-A { background: #4f7fff; }
+    .tag-B { background: #e74c3c; }
+    .tag-C { background: #27ae60; }
+    .tag-D { background: #f39c12; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="info">
+    <h2>Marker rendering diagnostic</h2>
+    <p>Four marker types are added at slightly different positions near Bosphorus.
+       Check which ones you can see on the map above and report back:</p>
+    <div class="row"><span class="tag tag-A">A</span>Default Leaflet marker (blue pin, built-in icon)</div>
+    <div class="row"><span class="tag tag-B">B</span>L.divIcon with inline SVG (same code as app.js makeThreatIcon)</div>
+    <div class="row"><span class="tag tag-C">C</span>L.divIcon with plain HTML text label</div>
+    <div class="row"><span class="tag tag-D">D</span>L.circleMarker (native SVG circle, no icon at all)</div>
+    <div class="row" style="margin-top:10px;color:#7a98b8">
+      If you see ALL of them → Leaflet works fine, the bug is elsewhere in app.js.<br>
+      If you see A, C, D but NOT B → the SVG divIcon code is broken.<br>
+      If you see NONE → Leaflet itself isn't initializing (CSS/tile/boot issue).
+    </div>
+    <pre id="log" style="margin-top:10px;padding:8px;background:#000;color:#27ae60;max-height:150px;overflow:auto"></pre>
+  </div>
+
+  <script src="/static/leaflet.js"></script>
+  <script>
+    const log = document.getElementById("log");
+    function say(msg) { log.textContent += msg + "\n"; }
+
+    try {
+      say("1. Leaflet loaded: " + (typeof L === "function" || typeof L === "object"));
+      const map = L.map("map").setView([41.015, 28.979], 12);
+      say("2. L.map() created: " + !!map);
+
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+                  { subdomains:"abcd" }).addTo(map);
+      say("3. Dark basemap tile layer added.");
+
+      // A — default marker
+      L.marker([41.020, 28.975]).addTo(map).bindTooltip("A: default marker");
+      say("4. A — default L.marker added at 41.020, 28.975");
+
+      // B — divIcon with SVG (same as makeThreatIcon)
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="42" viewBox="0 0 32 42">
+        <path d="M16 0C7.16 0 0 7.16 0 16C0 28 16 42 16 42S32 28 32 16C32 7.16 24.84 0 16 0Z"
+              fill="#e74c3c" stroke="#fff" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="8" fill="#fff" opacity="0.92"/>
+      </svg>`;
+      const iconB = L.divIcon({ html:svg, className:"", iconSize:[32,42], iconAnchor:[16,42] });
+      L.marker([41.020, 28.983], {icon: iconB}).addTo(map).bindTooltip("B: divIcon SVG (app.js code)");
+      say("5. B — SVG divIcon added at 41.020, 28.983");
+
+      // C — divIcon with plain HTML
+      const iconC = L.divIcon({
+        html:'<div style="background:#27ae60;color:#fff;padding:4px 8px;border-radius:4px;font-weight:bold">C TEXT</div>',
+        className:"", iconSize:[60,24], iconAnchor:[30,12]
+      });
+      L.marker([41.020, 28.991], {icon: iconC}).addTo(map).bindTooltip("C: divIcon HTML");
+      say("6. C — HTML divIcon added at 41.020, 28.991");
+
+      // D — circleMarker (native SVG, no icon)
+      L.circleMarker([41.013, 28.983], {
+        radius: 14,
+        color: "#fff",
+        weight: 3,
+        fillColor: "#f39c12",
+        fillOpacity: 1,
+      }).addTo(map).bindTooltip("D: circleMarker");
+      say("7. D — circleMarker added at 41.013, 28.983");
+
+      say("All 4 markers dispatched to map — check visually above.");
+    } catch (e) {
+      say("EXCEPTION: " + e.message);
+      say(e.stack);
+    }
+  </script>
+</body>
+</html>
