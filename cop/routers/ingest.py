@@ -47,7 +47,7 @@ from ai import ew_ml as ai_ew_ml
 from ai import fusion as ai_fusion
 from ai.fusion import SensorMeasurement as FusionMeasurement
 from ai import nonlethal as ai_nonlethal
-from cop.engine.tactical import (
+from cop.engine.ai_pipeline import (
     process_track as _ai_process_track,
     schedule_ai_tactical as _schedule_ai_tactical,
 )

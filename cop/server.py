@@ -402,17 +402,17 @@ async def _restore_state_from_db() -> None:
 # keeps the two symbols it calls directly: _ai_process_track and
 # _schedule_ai_tactical.
 
-from cop.engine.tactical import process_track as _ai_process_track
-from cop.engine.tactical import schedule_ai_tactical as _schedule_ai_tactical
+from cop.engine.ai_pipeline import process_track as _ai_process_track
+from cop.engine.ai_pipeline import schedule_ai_tactical as _schedule_ai_tactical
 
 # Re-export engine internals so existing tests that do `srv._X` still work.
-from cop.engine.tactical import (
+from cop.engine.ai_pipeline import (
     _ai_run_tactical_compute,
     _ai_tactical_background_task,
     _ai_tactical_bg_lock,
     _AI_TACTICAL_INTERVAL,
 )
-import cop.engine.tactical as _tac_engine  # noqa: E402
+import cop.engine.ai_pipeline as _tac_engine  # noqa: E402
 # Mutable engine-state proxies: tests patch srv._ai_tactical_last directly.
 # Redirect attribute access to the engine module so mutations take effect.
 def __getattr__(name: str):

@@ -1,19 +1,27 @@
 """
-cop/engine/tactical.py  —  Tactical AI engine
+cop/engine/ai_pipeline.py  —  AI analysis pipeline (tick orchestrator)
 
-Extracted from cop/server.py so the hot-path logic is separated from
-the HTTP/WebSocket layer. server.py now imports the two public symbols:
+Runs the per-tick AI pipeline that fans out to every analyzer module:
+  ai.predictor, ai.anomaly, ai.tactical (recommendation engine),
+  ai.coordinated_attack, ai.ml_threat, ai.roe, ai.zone_breach, ...
 
-    from cop.engine.tactical import schedule_ai_tactical, process_track
+NOTE on naming: this module is the *pipeline*, not a single analyzer.
+One of the analyzers it runs is `ai/tactical.py` (the recommendation
+engine). They used to share the name `tactical.py` which was a
+perpetual foot-gun — "which tactical am I importing?". Renamed to
+ai_pipeline to make the distinction obvious:
+    ai.tactical         → one analyzer (recommendations)
+    cop.engine.ai_pipeline → orchestrator that runs all analyzers
 
-Everything else stays internal to this module.
+Public API:
+    from cop.engine.ai_pipeline import schedule_ai_tactical, process_track
 
 Architecture
 ------------
-  process_track()          — per-track Kalman + LSTM + anomaly (called from /ingest)
-  _ai_run_tactical_compute — pure-compute function (runs in thread pool executor)
-  _ai_tactical_background_task — async wrapper: snapshot → executor → apply results
-  schedule_ai_tactical()   — rate-limited scheduler called from /ingest
+  process_track()               — per-track Kalman + LSTM + anomaly (from /ingest)
+  _ai_run_tactical_compute      — pure-compute function (runs in thread pool)
+  _ai_tactical_background_task  — async wrapper: snapshot → executor → apply results
+  schedule_ai_tactical()        — rate-limited scheduler called from /ingest
 """
 from __future__ import annotations
 

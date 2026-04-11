@@ -19,7 +19,7 @@ import time
 import pytest
 
 from cop import server as srv
-import cop.engine.tactical as _tac_engine  # engine-level mutable state
+import cop.engine.ai_pipeline as _tac_engine  # engine-level mutable state
 
 
 @pytest.fixture(autouse=True)
