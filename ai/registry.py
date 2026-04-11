@@ -84,6 +84,22 @@ class Analyzer:
 # ── Registry state ───────────────────────────────────────────────────────────
 
 _registry: List[Analyzer] = []
+_current_context: Optional[TacticalContext] = None
+
+
+def set_context(ctx: TacticalContext) -> None:
+    """Inject the current tactical snapshot so plugin fn closures can read it.
+
+    Called once per tactical cycle by the engine before run_all(). Plugins
+    that need per-cycle track/threat data call get_context() inside their fn.
+    """
+    global _current_context
+    _current_context = ctx
+
+
+def get_context() -> Optional[TacticalContext]:
+    """Return the context injected by the most recent tactical cycle, or None."""
+    return _current_context
 
 
 def register(analyzer: Analyzer) -> Analyzer:
@@ -152,4 +168,5 @@ __all__ = [
     "Analyzer", "TacticalContext",
     "register", "unregister", "list_analyzers", "clear",
     "run_all",
+    "set_context", "get_context",
 ]

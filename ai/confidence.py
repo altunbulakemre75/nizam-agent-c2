@@ -37,8 +37,9 @@ Usage:
 """
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, List, Optional
+
+from shared.clock import get_clock
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -241,8 +242,7 @@ def score_batch(
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def _utc_now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return get_clock().utcnow_iso()
 
 
 def grade_label(confidence: int) -> str:

@@ -18,9 +18,10 @@ or after a scenario.
 """
 from __future__ import annotations
 
-import time
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
+
+from shared.clock import get_clock
 
 
 # ── Session State ──────────────────────────────────────────────────────────
@@ -59,14 +60,14 @@ _MAX_KEY_EVENTS = 100
 def start_session() -> None:
     """Begin a new AAR tracking session."""
     reset()
-    _session["start_time"] = time.time()
+    _session["start_time"] = get_clock().now()
     _session["active"] = True
     _add_key_event("SESSION_START", "Senaryo baslatildi", severity="INFO")
 
 
 def end_session() -> None:
     """End the current AAR session."""
-    _session["end_time"] = time.time()
+    _session["end_time"] = get_clock().now()
     _session["active"] = False
     _add_key_event("SESSION_END", "Senaryo sonlandirildi", severity="INFO")
 
@@ -88,7 +89,7 @@ def record_track(track_id: str, current_track_count: int) -> None:
 def record_threat(track_id: str, score: int, level: str, intent: str) -> None:
     """Record a threat assessment event."""
     global _peak_threat_score, _peak_threat_track, _peak_threat_time
-    now = time.time()
+    now = get_clock().now()
     entry = {
         "track_id": track_id,
         "score": score,
@@ -123,7 +124,7 @@ def record_anomaly(anomaly: Dict[str, Any]) -> None:
         "track_id": anomaly.get("track_id", ""),
         "track_ids": anomaly.get("track_ids", []),
         "detail": anomaly.get("detail", anomaly.get("message", "")),
-        "t": anomaly.get("time", time.time()),
+        "t": anomaly.get("time", get_clock().now()),
     })
     if len(_anomaly_events) > _MAX_EVENTS:
         del _anomaly_events[:len(_anomaly_events) - _MAX_EVENTS]
@@ -149,7 +150,7 @@ def record_coord_attack(attack: Dict[str, Any]) -> None:
         "angular_spread_deg": attack.get("angular_spread_deg", 0),
         "target_name": attack.get("target_name", ""),
         "message": attack.get("message", ""),
-        "t": attack.get("time", time.time()),
+        "t": attack.get("time", get_clock().now()),
     })
     if len(_coord_attack_events) > _MAX_EVENTS:
         del _coord_attack_events[:len(_coord_attack_events) - _MAX_EVENTS]
@@ -168,7 +169,7 @@ def record_zone_breach(breach: Dict[str, Any]) -> None:
         "zone_id": breach.get("zone_id", ""),
         "zone_name": breach.get("zone_name", ""),
         "zone_type": breach.get("zone_type", ""),
-        "t": time.time(),
+        "t": get_clock().now(),
     })
     if len(_zone_breach_events) > _MAX_EVENTS:
         del _zone_breach_events[:len(_zone_breach_events) - _MAX_EVENTS]
@@ -188,7 +189,7 @@ def record_ew_alert(alert: Dict[str, Any]) -> None:
         "severity": alert.get("severity", "HIGH"),
         "track_id": alert.get("track_id", ""),
         "detail":   alert.get("detail", alert.get("message", "")),
-        "t":        alert.get("time", time.time()),
+        "t":        alert.get("time", get_clock().now()),
     })
     if len(_ew_alert_events) > _MAX_EVENTS:
         del _ew_alert_events[:len(_ew_alert_events) - _MAX_EVENTS]
@@ -216,7 +217,7 @@ def record_task(task: Dict[str, Any]) -> None:
         "action": task.get("action", ""),
         "threat_level": task.get("threat_level", ""),
         "status": task.get("status", "PENDING"),
-        "t": time.time(),
+        "t": get_clock().now(),
     })
     if len(_task_events) > _MAX_EVENTS:
         del _task_events[:len(_task_events) - _MAX_EVENTS]
@@ -231,7 +232,7 @@ def record_roe_advisory(advisory: Dict[str, Any]) -> None:
         "urgency":    advisory.get("urgency", ""),
         "confidence": advisory.get("confidence"),
         "reasons":    list(advisory.get("reasons", [])),
-        "t":          time.time(),
+        "t":          get_clock().now(),
     })
     if len(_roe_advisory_events) > _MAX_EVENTS:
         del _roe_advisory_events[:len(_roe_advisory_events) - _MAX_EVENTS]
@@ -265,7 +266,7 @@ def _add_key_event(
 ) -> None:
     """Add a key event to the timeline."""
     # Avoid duplicate messages within 5 seconds
-    now = time.time()
+    now = get_clock().now()
     if _key_events:
         last = _key_events[-1]
         if (last["type"] == event_type and
@@ -295,7 +296,7 @@ def generate_report(
     timelines: Optional[Dict[str, List]] = None,
 ) -> Dict[str, Any]:
     """Generate a complete After-Action Report."""
-    now = time.time()
+    now = get_clock().now()
     start = _session.get("start_time") or now
     end = _session.get("end_time") or now
     duration_s = round(end - start, 1)
@@ -538,8 +539,7 @@ def _format_duration(seconds: float) -> str:
 
 
 def _iso_now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return get_clock().utcnow_iso()
 
 
 def get_status() -> Dict[str, Any]:
@@ -547,7 +547,7 @@ def get_status() -> Dict[str, Any]:
     start = _session.get("start_time") or 0
     return {
         "active": _session["active"],
-        "duration_s": round(time.time() - start, 1) if start else 0,
+        "duration_s": round(get_clock().now() - start, 1) if start else 0,
         "tracks_seen": len(_track_ids_seen),
         "threat_events": len(_threat_events),
         "anomaly_events": len(_anomaly_events),

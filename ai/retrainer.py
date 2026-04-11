@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from shared.clock import get_clock
 
 MODEL_DIR     = Path(__file__).parent / "models"
 FEEDBACK_PATH = MODEL_DIR / "feedback.jsonl"
@@ -84,7 +85,7 @@ def record(
         "true_label":     true_label,
         "predicted_level": (ml_pred or {}).get("ml_level"),
         "predicted_prob":  (ml_pred or {}).get("ml_probability"),
-        "ts":              time.time(),
+        "ts":              get_clock().now(),
     }
 
     # Pull the real feature vector the model saw when this decision was taken.
@@ -194,11 +195,11 @@ def _run_retrain() -> Dict[str, Any]:
     """
     with _retrain_lock:
         _retrain_status["running"] = True
-        t_start = time.time()
+        t_start = get_clock().now()
         try:
             result = _do_retrain()
             _retrain_status["last_result"]       = result
-            _retrain_status["last_run_at"]       = time.time()
+            _retrain_status["last_run_at"]       = get_clock().now()
             _retrain_status["since_last_retrain"] = 0
             return result
         except Exception as exc:
@@ -207,7 +208,7 @@ def _run_retrain() -> Dict[str, Any]:
             return err
         finally:
             _retrain_status["running"] = False
-            _retrain_status["last_result"]["duration_s"] = round(time.time() - t_start, 2)
+            _retrain_status["last_result"]["duration_s"] = round(get_clock().now() - t_start, 2)
 
 
 def _do_retrain() -> Dict[str, Any]:
@@ -294,7 +295,7 @@ def _do_retrain() -> Dict[str, Any]:
         "model":         clf,
         "feature_names": FEATURE_NAMES,
         "label_names":   LABEL_NAMES,
-        "trained_at":    time.time(),
+        "trained_at":    get_clock().now(),
         "samples":       len(X),
         "feedback_used": len(X_fb),
     }, tmp_path)

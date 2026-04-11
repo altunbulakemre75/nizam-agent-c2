@@ -68,6 +68,8 @@ from ai import nonlethal as ai_nonlethal
 from ai import drift as ai_drift
 from ai import retrainer as ai_retrainer
 from ai import bda as ai_bda
+from ai import registry as ai_registry
+from ai.registry import TacticalContext as _TacticalContext
 from cop.otel import init_tracing, span as otel_span
 from cop import sync as cop_sync
 from cop import circuit_breaker as cop_cb
@@ -262,6 +264,7 @@ from cop.state import (
     AI_DRIFT_STATUS,
     AI_ML_PREDICTIONS,
     AI_ML_PREV_TRACKS,
+    AI_PLUGIN_RESULTS,
     AI_ANOMALY_MAX,
     CLIENTS,
     CLIENTS_LOCK,
@@ -1477,6 +1480,12 @@ def _ai_run_tactical_compute(
     from concurrent.futures import ThreadPoolExecutor, as_completed
     _timings: Dict[str, float] = {}
 
+    # ── Inject context for plugin analyzers ─────────────────────────
+    ai_registry.set_context(_TacticalContext(
+        tracks=tracks_snap, threats=threats_snap,
+        assets=assets_snap, zones=zones_snap,
+    ))
+
     # ── Timed wrapper ────────────────────────────────────────────────
     def _timed(name, fn, *a, **kw):
         t0 = _t.monotonic()
@@ -1562,6 +1571,16 @@ def _ai_run_tactical_compute(
                            zones=zones_snap, assets=assets_snap,
                            coord_attacks=coord_attacks)
 
+    # ── Plugin analyzers (registry) — run after core modules ────────
+    # Any module that called ai_registry.register() (without editing
+    # server.py) gets executed here in declaration order. The current
+    # TacticalContext snapshot is available via ai_registry.get_context().
+    plugin_results = ai_registry.run_all(stage="tactical.analyze")
+    if plugin_results:
+        _timings["plugins"] = round(
+            sum(v.get("elapsed_ms", 0) for v in plugin_results.values()), 2
+        )
+
     return {
         "swarm_anomalies":   list(_results.get("swarm_anomalies", [])),
         "recommendations":   list(_results.get("recommendations", [])),
@@ -1572,6 +1591,7 @@ def _ai_run_tactical_compute(
         "enriched_threats":  enriched_threats,
         "roe_advisories":    list(roe_advs),
         "ew_alerts":         ew_alerts_flat,
+        "plugin_results":    plugin_results,
         "_timings_ms":       _timings,
     }
 
@@ -1646,6 +1666,11 @@ async def _ai_tactical_background_task() -> None:
             AI_ML_PREDICTIONS.update(result["ml_predictions"])
             AI_ML_PREV_TRACKS.clear()
             AI_ML_PREV_TRACKS.update({k: dict(v) for k, v in tracks_snap.items()})
+
+        # ── Plugin analyzer results ───────────────────────────────────────────
+        if result.get("plugin_results"):
+            AI_PLUGIN_RESULTS.clear()
+            AI_PLUGIN_RESULTS.update(result["plugin_results"])
 
         # Stamp confidence onto live STATE["threats"] so /api/threats and
         # WebSocket clients see the up-to-date score without a full re-ingest.

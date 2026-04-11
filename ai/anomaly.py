@@ -13,9 +13,10 @@ Swarm-level anomalies:
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from shared.clock import get_clock
 
 import numpy as np
 from ai._fast_math import pairwise_distances, heading_diffs
@@ -80,7 +81,7 @@ def check_track(track_id: str, lat: float, lon: float,
     Check a single track update for anomalies.
     Returns list of anomaly dicts (may be empty).
     """
-    now = ts or time.time()
+    now = ts or get_clock().now()
     anomalies: List[Dict[str, Any]] = []
 
     st = _stats.get(track_id)
@@ -237,7 +238,7 @@ def detect_swarms(tracks: Dict[str, Dict]) -> List[Dict[str, Any]]:
                           f"within {SWARM_MAX_DIST_M}m",
                 "lat": round(avg_lat, 6),
                 "lon": round(avg_lon, 6),
-                "time": time.time(),
+                "time": get_clock().now(),
             })
 
     # Decision lineage: every track in a swarm gets a record pointing at the

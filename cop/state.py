@@ -59,6 +59,7 @@ EFFECTOR_OUTCOMES: List[Dict] = []                # recent engagement outcomes (
 AI_DRIFT_STATUS: Dict[str, Any] = {}              # latest model drift status
 AI_ML_PREDICTIONS: Dict[str, Dict] = {}           # ML threat predictions per track
 AI_ML_PREV_TRACKS: Dict[str, Dict] = {}           # previous frame tracks for acceleration calc
+AI_PLUGIN_RESULTS: Dict[str, Any] = {}            # results from ai.registry plugin analyzers
 AI_ANOMALY_MAX = 100
 
 
@@ -129,5 +130,6 @@ def reset_state() -> None:
     AI_DRIFT_STATUS.clear()
     AI_ML_PREDICTIONS.clear()
     AI_ML_PREV_TRACKS.clear()
+    AI_PLUGIN_RESULTS.clear()
     TRACK_CLAIMS.clear()
     _track_histories.clear()

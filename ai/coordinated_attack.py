@@ -13,8 +13,9 @@ before the attack materialises.
 from __future__ import annotations
 
 import math
-import time
 from typing import Any, Dict, List, Set, Tuple
+
+from shared.clock import get_clock
 
 import numpy as np
 from ai._fast_math import (
@@ -95,7 +96,7 @@ _cooldowns: Dict[str, float] = {}
 
 def _should_emit(key: str) -> bool:
     last = _cooldowns.get(key, 0.0)
-    now = time.time()
+    now = get_clock().now()
     if now - last < COOLDOWN_S:
         return False
     _cooldowns[key] = now
@@ -223,7 +224,7 @@ def detect_coordinated_attacks(
         return []
 
     warnings: List[Dict[str, Any]] = []
-    now = time.time()
+    now = get_clock().now()
 
     # Filter to HIGH/MEDIUM threat tracks — avoids processing LOW-threat
     # decoys through the expensive convergence/zone/asset loops.
