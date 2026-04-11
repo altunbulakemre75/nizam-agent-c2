@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cop.helpers import utc_now_iso
-from cop.state import STATE, STATE_LOCK
+from cop.state import STATE, STATE_LOCK, make_snapshot_payload
 from cop.ws_broadcast import broadcast, append_event_tail
 
 # Full AI pipeline — same functions the /ingest handler calls. Without
@@ -47,6 +47,12 @@ from ai import drift as ai_drift
 from ai import anomaly as ai_anomaly
 from ai import coordinated_attack as ai_coord
 from ai import roe as ai_roe
+
+# Replay recorder — each scenario run produces its own JSONL in recordings/,
+# which is what ai.ml_threat.extract_training_data() consumes for retraining.
+# Without this hook the recordings directory only grows from /ingest events,
+# so scenario-generated data never ends up in the training set.
+from replay import recorder as replay_recorder
 
 SCENARIOS_DIR = Path(__file__).parent.parent.parent / "scenarios"
 
@@ -171,6 +177,15 @@ async def _run(scenario: Dict[str, Any]) -> None:
     except Exception:
         pass  # analyzer reset is best-effort — don't block the scenario
 
+    # Begin a scenario-tagged recording. This replaces any "live" recording
+    # that was started at server boot; each scenario gets its own JSONL so
+    # ml_threat retraining can ingest fresh per-scenario data.
+    try:
+        replay_recorder.start(scenario.get("name", "unknown"),
+                              min_interval=max(0.5, dt))
+    except Exception:
+        pass  # recorder is best-effort — demo must not fail on disk errors
+
     # Close-in threshold: below this range the entity teleports back to its
     # spawn position and resumes its original heading. This creates a looping
     # "continuous approach" that keeps threat-level and icon color stable for
@@ -260,6 +275,14 @@ async def _run(scenario: Dict[str, Any]) -> None:
             # tick is fine; it'll run on its own cadence.
             _schedule_ai_tactical()
 
+            # Persist the full snapshot to the replay recording so this tick
+            # becomes a training sample. capture_frame() honours its own
+            # min_interval, so calling it every tick is safe.
+            try:
+                replay_recorder.capture_frame(make_snapshot_payload)
+            except Exception:
+                pass
+
             _state["current_tick"] = tick + 1
             await asyncio.sleep(dt)
 
@@ -267,6 +290,10 @@ async def _run(scenario: Dict[str, Any]) -> None:
         _state["running"] = False
         try:
             ai_aar.end_session()
+        except Exception:
+            pass
+        try:
+            replay_recorder.stop()
         except Exception:
             pass
 
