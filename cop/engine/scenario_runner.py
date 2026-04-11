@@ -137,6 +137,14 @@ async def _run(scenario: Dict[str, Any]) -> None:
         "entity_count": len(entities),
     })
 
+    # Demo-friendly behaviour: when an inbound entity reaches the origin
+    # (range < minimum), flip its heading by 180° so it flies outward
+    # instead of getting pinned at (origin, origin). This keeps the map
+    # visually alive for the full scenario duration — tracks approach,
+    # cross over, and fly out the other side. Same bounce, opposite azimuth.
+    _MIN_RANGE_M = 120.0
+    bounced: set[str] = set()
+
     try:
         for tick in range(total_ticks):
             if _stop_event is not None and _stop_event.is_set():
@@ -152,6 +160,16 @@ async def _run(scenario: Dict[str, Any]) -> None:
                 if ent["range_m"] > 1e-6:
                     omega_deg = math.degrees(v_tan / ent["range_m"]) * dt
                     ent["az_deg"] = ((ent["az_deg"] + omega_deg + 540.0) % 360.0) - 180.0
+
+                # Closed-in check — flip the heading outward once, then
+                # nudge range up so we don't re-trigger next tick.
+                if ent["range_m"] <= _MIN_RANGE_M and ent["id"] not in bounced:
+                    ent["heading_deg"] = (ent["heading_deg"] + 180.0) % 360.0
+                    # Also swing the azimuth to the opposite side so the
+                    # track visibly crosses the origin rather than rewinding.
+                    ent["az_deg"] = ((ent["az_deg"] + 180.0 + 540.0) % 360.0) - 180.0
+                    ent["range_m"] = _MIN_RANGE_M + 10.0
+                    bounced.add(ent["id"])
 
                 lat, lon = _polar_to_latlon(origin_lat, origin_lon,
                                             ent["range_m"], ent["az_deg"])
