@@ -1342,37 +1342,19 @@ async function hardReset(){
 }
 
 /* ── WebSocket ────────────────────────────────────────────── */
-let _wsDelay = 500;  // current reconnect delay (ms); resets to 500 on success
-const _WS_DELAY_MAX = 30000;
-const _WS_DELAY_BASE = 500;
-
-function connectWS(){
-  const proto=location.protocol==="https:"?"wss":"ws";
-  const url=`${proto}://${location.host}/ws?operator_id=${encodeURIComponent(MY_OPERATOR_ID)}`;
-  setStatus(`WS: connecting…`);
-  let ws;
-  try{ws=new WebSocket(url);}
-  catch(e){
-    setStatus(`WS: failed — retry in ${(_wsDelay/1000).toFixed(1)}s`);
-    setTimeout(connectWS, _wsDelay);
-    _wsDelay = Math.min(_wsDelay * 2, _WS_DELAY_MAX);
-    return;
-  }
-  UI.ws=ws;
-  ws.onopen=()=>{
-    UI.wsConnected=true;
-    _wsDelay=_WS_DELAY_BASE;   // reset backoff on successful connect
-    setStatus(`WS: connected (live) · ${MY_OPERATOR_ID}`);
-  };
-  ws.onclose=()=>{
-    UI.wsConnected=false;
-    const delaySec=(_wsDelay/1000).toFixed(1);
-    setStatus(`WS: closed — retry in ${delaySec}s`);
-    setTimeout(connectWS, _wsDelay);
-    _wsDelay = Math.min(_wsDelay * 2, _WS_DELAY_MAX);
-  };
-  ws.onerror=()=>{};
-  ws.onmessage=msg=>{const ev=safeJsonParse(msg.data);if(ev)CopEngine.onEvent(ev);};
+/* Back-off, reconnect, and message parsing → modules/ws-client.js */
+function connectWS() {
+  const { wsClient } = window.NIZAM;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const url   = `${proto}://${location.host}/ws?operator_id=${encodeURIComponent(MY_OPERATOR_ID)}`;
+  wsClient.connect(
+    url,
+    ev  => CopEngine.onEvent(ev),
+    txt => setStatus(txt === "WS: connected"
+      ? `WS: connected (live) \u00b7 ${MY_OPERATOR_ID}`
+      : txt),
+    ok  => { UI.wsConnected = ok; },
+  );
 }
 
 /* ── Zone draw panel ─────────────────────────────────────── */
