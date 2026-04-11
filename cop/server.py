@@ -136,6 +136,9 @@ async def lifespan(_app: FastAPI):
         log.info("[cop] OpenTelemetry tracing enabled → %s",
                  os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317"))
 
+    # 4) Pre-warm ML model so the first tactical cycle has zero cold-start disk I/O
+    await asyncio.get_running_loop().run_in_executor(None, ai_ml.reload_from_disk)
+
     # 5) Start AAR session
     ai_aar.start_session()
 
@@ -2503,7 +2506,7 @@ async def api_ai_ml_train():
     """Re-train ML model from recordings."""
     try:
         result = ai_ml.train()
-        ai_ml.reset()  # force reload of new model
+        ai_ml.reload_from_disk()  # hot-swap — no cold-reload spike on next cycle
         return JSONResponse({"ok": True, "result": result})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)

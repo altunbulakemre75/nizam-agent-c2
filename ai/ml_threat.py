@@ -516,6 +516,34 @@ def get_model_info() -> Dict[str, Any]:
     }
 
 
+def hot_swap(model, meta: dict) -> None:
+    """Atomically replace the in-memory model from a background thread.
+
+    Call this after retraining so the tactical inference path never has to
+    perform disk I/O mid-cycle (eliminates the joblib.load p99 spike).
+    """
+    global _model, _model_meta
+    _model = model
+    _model_meta = meta
+
+
+def reload_from_disk() -> bool:
+    """Load model from disk and hot-swap into memory. Safe to call from any thread.
+
+    Used by retrainer and the manual /api/ai/train endpoint so the caller
+    doesn't need to touch private globals.
+    """
+    if not MODEL_PATH.exists():
+        return False
+    try:
+        import joblib
+        data = joblib.load(MODEL_PATH)
+        hot_swap(data["model"], data)
+        return True
+    except Exception:
+        return False
+
+
 def reset():
     global _model, _model_meta
     _model = None

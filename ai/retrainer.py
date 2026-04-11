@@ -300,13 +300,21 @@ def _do_retrain() -> Dict[str, Any]:
     }, tmp_path)
     tmp_path.replace(MODEL_PATH)
 
-    # Force reload of global model in ml_threat
+    # Hot-swap: load new model in this background thread so the tactical
+    # inference path never waits on disk I/O (eliminates p99 spike).
     try:
         import ai.ml_threat as _ml
-        _ml._model      = None
-        _ml._model_meta = None
+        import joblib as _jl
+        new_data = _jl.load(MODEL_PATH)
+        _ml.hot_swap(new_data["model"], new_data)
     except Exception:
-        pass
+        # Fallback: nullify so next inference reloads from disk
+        try:
+            import ai.ml_threat as _ml
+            _ml._model = None
+            _ml._model_meta = None
+        except Exception:
+            pass
 
     return {
         "status":        "success",
