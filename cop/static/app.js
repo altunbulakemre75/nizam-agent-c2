@@ -1,24 +1,36 @@
 /* ==========================================================
-   NIZAM COP — cop/static/app.js  (Phase 5)
+   NIZAM COP — cop/static/app.js  (Phase 5 + Phase B refactor)
    Phase 1: tracks, threats, zones, zone-breach alerts
    Phase 2: trail polylines, intent badges, EO sensor, ML scoring
    Phase 3: asset management, autonomous task queue, mission waypoints
    Phase 5: AI decision support (predictions, anomalies, tactical, LLM chat)
+   Phase B: incremental extraction to /static/modules/*.js
+            (utils, constants, store — loaded in index.html before this file)
    ========================================================== */
 
-/* ── Utilities ──────────────────────────────────────────── */
-function $(sel) { return document.querySelector(sel); }
-function el(tag, attrs = {}, children = []) {
-  const n = document.createElement(tag);
-  Object.entries(attrs).forEach(([k, v]) => {
-    if (k === "style") Object.assign(n.style, v);
-    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
-    else if (v !== undefined && v !== null) n.setAttribute(k, String(v));
-  });
-  children.forEach(c => n.appendChild(typeof c === "string" ? document.createTextNode(c) : c));
-  return n;
-}
-function safeJsonParse(s) { try { return JSON.parse(s); } catch { return null; } }
+/* ── Shared modules (loaded before us via index.html) ────── */
+const { utils: _U, constants: _K, store: _STORE } = window.NIZAM;
+const $              = _U.$;
+const el             = _U.el;
+const safeJsonParse  = _U.safeJsonParse;
+const escHtml        = _U.escHtml;
+const _esc           = _U.escText;
+const _fmtMs         = _U.fmtMs;
+const _fmtNum        = _U.fmtNum;
+const fmtTime        = _U.fmtTime;
+
+const THREAT_COLORS     = _K.THREAT_COLORS;
+const INTENT_META       = _K.INTENT_META;
+const ROE_COLORS        = _K.ROE_COLORS;
+const ROE_LABELS        = _K.ROE_LABELS;
+const CONF_GRADE_COLORS = _K.CONF_GRADE_COLORS;
+const ACTION_COLORS     = _K.ACTION_COLORS;
+const ACTION_BG         = _K.ACTION_BG;
+const STATUS_COLORS     = _K.STATUS_COLORS;
+const OUTCOME_COLORS    = _K.OUTCOME_COLORS;
+const ANOMALY_COLORS    = _K.ANOMALY_COLORS;
+const _OP_COLORS        = _K.OP_COLORS;
+const _altColor         = _K.altitudeColor;
 
 /* ── Global state ───────────────────────────────────────── */
 // Multi-operator: my identity + shared state
@@ -379,24 +391,10 @@ const _TTS = (function() {
 })();
 
 /* ── Altitude colour mode ───────────────────────────────── */
+// _altColor moved to modules/constants.js (altitudeColor).
 let _ALT_MODE = false;
-function _altColor(alt_m) {
-  const a = Math.max(0, Number(alt_m) || 0);
-  if (a < 300)  return "#27ae60"; // green  – low
-  if (a < 1500) return "#f1c40f"; // yellow – medium
-  if (a < 3000) return "#e67e22"; // orange – high
-  if (a < 6000) return "#e74c3c"; // red    – very high
-  return "#9b59b6";               // purple – extreme
-}
 
-/* ── Threat / intent colours ────────────────────────────── */
-const THREAT_COLORS = { HIGH:"#e74c3c", MEDIUM:"#f39c12", LOW:"#27ae60" };
-const INTENT_META = {
-  attack:        {color:"#e74c3c", icon:"!", label:"ATTACK"},
-  reconnaissance:{color:"#9b59b6", icon:"@", label:"RECON"},
-  loitering:     {color:"#e67e22", icon:"O", label:"LOITER"},
-  unknown:       {color:"#95a5a6", icon:"?", label:"UNKNOWN"},
-};
+/* THREAT_COLORS, INTENT_META → modules/constants.js */
 
 function makeThreatIcon(level, intent, overrideColor) {
   const c = overrideColor ?? THREAT_COLORS[level] ?? "#2980b9";
@@ -1119,14 +1117,7 @@ function mountTaskPanel() {
   RIGHT_TABS.tasks.appendChild(taskPanelEl);
 }
 
-const ACTION_COLORS = {
-  ENGAGE:"var(--danger)", OBSERVE:"var(--warn)", EVADE:"var(--accent)",
-  JAM:"#f1c40f", SPOOF:"#1abc9c", EW_SUPPRESS:"#9b59b6",
-};
-const ACTION_BG = {
-  ENGAGE:"rgba(240,64,64,0.1)", OBSERVE:"rgba(240,128,48,0.1)", EVADE:"rgba(79,127,255,0.1)",
-  JAM:"rgba(241,196,15,0.1)", SPOOF:"rgba(26,188,156,0.1)", EW_SUPPRESS:"rgba(155,89,182,0.1)",
-};
+/* ACTION_COLORS, ACTION_BG → modules/constants.js */
 
 function _renderTaskPanel() {
   if(!taskPanelEl) return;
@@ -1674,14 +1665,7 @@ function renderMLPanel(preds) {
 
 let roePanelEl = null;
 
-const ROE_COLORS = {
-  WEAPONS_FREE:"#e74c3c", WEAPONS_TIGHT:"#e67e22", WEAPONS_HOLD:"#f39c12",
-  WARN:"#9b59b6", TRACK_ONLY:"#3498db", HOLD_FIRE:"#27ae60",
-};
-const ROE_LABELS = {
-  WEAPONS_FREE:"SERBEST", WEAPONS_TIGHT:"KOSITLI", WEAPONS_HOLD:"SAVUNMA",
-  WARN:"UYAR", TRACK_ONLY:"IZLE", HOLD_FIRE:"ATES ETME",
-};
+/* ROE_COLORS, ROE_LABELS → modules/constants.js */
 
 function mountROEPanel() {
   roePanelEl = el("div", { id:"roe-panel", class:"nz-card", style:{
@@ -1736,7 +1720,7 @@ function renderROEPanel(advisories) {
 
 /* ── AI: Confidence Scores panel ──────────────────────── */
 let confPanelEl = null;
-const CONF_GRADE_COLORS = { HIGH:"#27ae60", MEDIUM:"#f39c12", LOW:"#e74c3c" };
+/* CONF_GRADE_COLORS → modules/constants.js */
 
 function mountConfidencePanel() {
   confPanelEl = el("div", { id:"conf-panel", class:"nz-card", style:{
@@ -1884,12 +1868,7 @@ let anomalyPanelEl = null;
 const anomalyLog = [];
 const MAX_ANOMALY_LOG = 30;
 
-const ANOMALY_COLORS = {
-  CRITICAL: "#e74c3c",
-  HIGH:     "#e67e22",
-  MEDIUM:   "#f1c40f",
-  LOW:      "#95a5a6",
-};
+/* ANOMALY_COLORS → modules/constants.js */
 
 function mountAnomalyPanel() {
   const wrap = el("div", { style: { width:"100%" } });
@@ -1970,8 +1949,7 @@ function pushAnomalies(anomalies) {
 let metricsPanelEl = null;
 let metricsTimer  = null;
 
-function _fmtMs(v)  { return (v == null ? "—" : (+v).toFixed(0) + " ms"); }
-function _fmtNum(v) { return (v == null ? "—" : (+v).toLocaleString()); }
+/* _fmtMs, _fmtNum → modules/utils.js (fmtMs, fmtNum) */
 
 function _metricsBar(label, val, max, color) {
   const pct = Math.max(0, Math.min(100, (val / max) * 100));
@@ -2324,9 +2302,7 @@ function renderChatMessages(area) {
   area.scrollTop = area.scrollHeight;
 }
 
-function escHtml(s) {
-  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-}
+/* escHtml → modules/utils.js */
 
 /* ── AI: toggle chat button (floating) ─────────────────── */
 function mountChatToggle() { /* replaced by AI sidebar tab */ }
@@ -2564,16 +2540,13 @@ async function openLineage(trackId) {
   }
 }
 
-function _esc(s) {
-  const d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML;
-}
+/* _esc → modules/utils.js (escText) */
 
 /* ── Multi-operator ─────────────────────────────────────── */
 
 let operatorPanelEl = null;
 
-// Assign stable colors to operator IDs
-const _OP_COLORS = ["#4fc3f7","#a5d6a7","#ffcc80","#ef9a9a","#ce93d8","#80cbc4","#fff176"];
+/* _OP_COLORS → modules/constants.js (OP_COLORS) */
 const _opColorCache = {};
 function _opColor(opId) {
   if (!_opColorCache[opId]) {
@@ -3301,12 +3274,7 @@ function pushBFTWarning(payload) {
 let _effStatusPanelEl = null;
 const _outcomeLog = [];   // rolling outcome log (max 20)
 
-const STATUS_COLORS = {
-  READY:"#27ae60", ENGAGED:"#f39c12", COOLDOWN:"#e67e22", OFFLINE:"#7f8c8d",
-};
-const OUTCOME_COLORS = {
-  hit:"#27ae60", miss:"#e74c3c", partial:"#f39c12", suppressed:"#9b59b6",
-};
+/* STATUS_COLORS, OUTCOME_COLORS → modules/constants.js */
 
 function mountEffectorStatusPanel() {
   _effStatusPanelEl = el("div", {id:"eff-status-panel", class:"nz-card", style:{
@@ -4714,12 +4682,7 @@ function updateReplayUI() {
   }
 }
 
-function fmtTime(s) {
-  if (!s || s < 0) return "00:00";
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
-}
+/* fmtTime → modules/utils.js */
 
 /* ── Auth: JWT login + RBAC ──────────────────────────────── */
 
