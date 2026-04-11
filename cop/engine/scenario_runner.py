@@ -33,6 +33,12 @@ from cop.helpers import utc_now_iso
 from cop.state import STATE, STATE_LOCK
 from cop.ws_broadcast import broadcast, append_event_tail
 
+# Full AI pipeline — same functions the /ingest handler calls. Without
+# these the right-side panels (ML, ROE, coord-attack, anomalies, auto-
+# generated tasks) stay empty because nothing triggered them.
+from cop.engine.ai_pipeline import process_track as _process_track
+from cop.engine.ai_pipeline import schedule_ai_tactical as _schedule_ai_tactical
+
 SCENARIOS_DIR = Path(__file__).parent.parent.parent / "scenarios"
 
 # Default origin (Istanbul Bosphorus area — matches existing scenario fixtures).
@@ -180,9 +186,23 @@ async def _run(scenario: Dict[str, Any]) -> None:
                     STATE["threats"][ent["id"]] = threat_payload
                     append_event_tail({"event_type": "cop.track",  "payload": track_payload})
                     append_event_tail({"event_type": "cop.threat", "payload": threat_payload})
+                    # Fire the full per-track AI pipeline so the right-side
+                    # panels light up: Kalman, trajectory, anomaly.
+                    _process_track(ent["id"], track_payload["lat"],
+                                   track_payload["lon"], intent)
+                    # Auto-task generation — operator task queue comes from here.
+                    # Imported lazily to break the import cycle (ingest.py
+                    # already imports from cop.engine.scenario_runner's siblings).
+                    from cop.routers.ingest import _auto_task
+                    await _auto_task(ent["id"], threat_payload)
 
                 await broadcast({"event_type": "cop.track",  "payload": track_payload})
                 await broadcast({"event_type": "cop.threat", "payload": threat_payload})
+
+            # Tactical analysis — swarm detect, coord attack, ML threat,
+            # ROE, confidence. Rate-limited internally so calling it every
+            # tick is fine; it'll run on its own cadence.
+            _schedule_ai_tactical()
 
             _state["current_tick"] = tick + 1
             await asyncio.sleep(dt)
