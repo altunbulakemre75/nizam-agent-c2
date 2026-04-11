@@ -59,7 +59,6 @@ from ai import roe as ai_roe
 from ai import ml_threat as ai_ml
 from ai import confidence as ai_confidence
 from ai import lineage as ai_lineage
-from ai import explain as ai_explain
 from ai import trajectory as ai_trajectory
 from ai import track_fsm
 from ai import deconfliction as ai_deconfliction
@@ -81,26 +80,21 @@ from replay import recorder as replay_recorder
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
-    from db.session import AsyncSessionLocal, engine, get_db
+    from db.session import AsyncSessionLocal, engine
     from db.models import (
-        AlertRecord, AssetRecord, TaskRecord,
-        TrackEvent, ThreatEvent, WaypointRecord, ZoneRecord,
+        AssetRecord, TaskRecord, WaypointRecord, ZoneRecord,
     )
     from db.init_db import init_db
-    from auth.deps import AUTH_ENABLED, require_operator, require_admin, require_viewer
+    from auth.deps import AUTH_ENABLED, require_operator, require_viewer
     from auth.router import router as auth_router
     _DB_AVAILABLE = True
 except ImportError:
     _DB_AVAILABLE = False
     AUTH_ENABLED  = False
-    def get_db():   yield None
-    def get_current_user(): return None
     def require_operator(): return lambda: None
-    def require_admin():    return lambda: None
     def require_viewer():   return lambda: None
 
 from cop import audit as cop_audit
-from cop import analytics as cop_analytics
 from cop import webhooks as cop_webhooks
 from cop.ratelimit import RateLimitMiddleware
 
@@ -218,6 +212,7 @@ from cop.routers.assets import router as assets_router
 from cop.routers.waypoints import router as waypoints_router
 from cop.routers.analytics import router as analytics_router
 from cop.routers.fusion import router as fusion_router
+from cop.routers.ai_reads import router as ai_reads_router
 app.include_router(weather_router)
 app.include_router(bda_router)
 app.include_router(scenarios_router)
@@ -229,6 +224,7 @@ app.include_router(assets_router)
 app.include_router(waypoints_router)
 app.include_router(analytics_router)
 app.include_router(fusion_router)
+app.include_router(ai_reads_router)
 
 # Rate limiting middleware (write endpoints only)
 app.add_middleware(RateLimitMiddleware)
@@ -1954,184 +1950,7 @@ def _schedule_ai_tactical() -> bool:
 
 # ── Phase 5: AI API endpoints ───────────────────────────────
 
-@app.get("/api/ai/predictions")
-async def api_ai_predictions(track_id: Optional[str] = Query(None)):
-    """Get Kalman predicted future positions for tracks."""
-    if track_id:
-        return JSONResponse({
-            "track_id": track_id,
-            "predictions": AI_PREDICTIONS.get(track_id, []),
-        })
-    return JSONResponse({"predictions": {k: v for k, v in AI_PREDICTIONS.items()}})
-
-
-@app.get("/api/ai/trajectories")
-async def api_ai_trajectories(track_id: Optional[str] = Query(None)):
-    """Get LSTM trajectory predictions for tracks."""
-    stats = ai_trajectory.stats()
-    if track_id:
-        return JSONResponse({
-            "track_id":   track_id,
-            "trajectory": AI_TRAJECTORIES.get(track_id, []),
-            "model":      stats,
-        })
-    return JSONResponse({
-        "count":       len(AI_TRAJECTORIES),
-        "model":       stats,
-        "trajectories": AI_TRAJECTORIES,
-    })
-
-
-@app.get("/api/ai/anomalies")
-async def api_ai_anomalies(limit: int = Query(50, le=200)):
-    """Get recent anomalies."""
-    return JSONResponse({
-        "count": len(AI_ANOMALIES),
-        "anomalies": AI_ANOMALIES[-limit:],
-    })
-
-
-@app.get("/api/ai/recommendations")
-async def api_ai_recommendations():
-    """Get current tactical recommendations."""
-    return JSONResponse({
-        "count": len(AI_RECOMMENDATIONS),
-        "recommendations": AI_RECOMMENDATIONS,
-    })
-
-
-@app.get("/api/ai/lineage/{track_id}")
-async def api_ai_lineage(track_id: str):
-    """Return the full decision lineage chain for a track."""
-    chain = ai_lineage.get_chain(track_id)
-    summary = ai_lineage.get_summary(track_id)
-    return JSONResponse({"track_id": track_id, "summary": summary, "chain": chain})
-
-
-@app.get("/api/ai/explain/{track_id}")
-async def api_ai_explain(track_id: str):
-    """Operator-facing explanation: why is this track the threat level it is?
-
-    Returns the top contributing features with Turkish labels + severity coding
-    and a one-sentence summary, plus the last 5 lineage records for the track.
-    """
-    ml_pred = AI_ML_PREDICTIONS.get(str(track_id))
-    track = STATE["tracks"].get(str(track_id))
-    result = ai_explain.explain_track(track_id, ml_prediction=ml_pred, track=track)
-    chain = ai_lineage.get_chain(track_id)
-    result["lineage_tail"] = chain[-5:] if chain else []
-    result["lineage_count"] = len(chain)
-    return JSONResponse(result)
-
-
-@app.get("/api/ai/lineage")
-async def api_ai_lineage_all():
-    """Return lineage stats and all tracked IDs."""
-    stats = ai_lineage.stats()
-    track_ids = ai_lineage.get_all_track_ids()
-    return JSONResponse({"stats": stats, "track_ids": track_ids})
-
-
-@app.get("/api/ai/briefing")
-async def api_ai_briefing():
-    """Get AI-generated situation briefing."""
-    result = await ai_llm.get_briefing(
-        tracks=STATE["tracks"],
-        threats=STATE["threats"],
-        assets=STATE["assets"],
-        zones=STATE["zones"],
-        anomalies=AI_ANOMALIES,
-        recommendations=AI_RECOMMENDATIONS,
-    )
-    return JSONResponse(result)
-
-
-@app.post("/api/ai/chat")
-async def api_ai_chat(req: Request):
-    """Operator chat with AI advisor."""
-    body = await req.json()
-    question = body.get("question", "")
-    if not question:
-        return JSONResponse({"ok": False, "error": "question required"}, status_code=400)
-    result = await ai_llm.chat(
-        question=question,
-        tracks=STATE["tracks"],
-        threats=STATE["threats"],
-        assets=STATE["assets"],
-        zones=STATE["zones"],
-        anomalies=AI_ANOMALIES,
-        recommendations=AI_RECOMMENDATIONS,
-        session_id=body.get("session_id", "default"),
-    )
-    return JSONResponse(result)
-
-
-@app.post("/api/ai/command")
-async def api_ai_command(req: Request):
-    """Parse natural-language command via LLM."""
-    body = await req.json()
-    command = body.get("command", "")
-    if not command:
-        return JSONResponse({"ok": False, "error": "command required"}, status_code=400)
-    result = await ai_llm.parse_command(
-        command=command,
-        tracks=STATE["tracks"],
-        assets=STATE["assets"],
-    )
-    return JSONResponse(result)
-
-
-@app.get("/api/ai/pred_breaches")
-async def api_ai_pred_breaches():
-    """Get predictive zone breach warnings."""
-    return JSONResponse({
-        "count": len(AI_PRED_BREACHES),
-        "breaches": AI_PRED_BREACHES,
-    })
-
-
-@app.get("/api/ai/uncertainty")
-async def api_ai_uncertainty(track_id: Optional[str] = Query(None)):
-    """Get uncertainty cone data for predicted trajectories."""
-    if track_id:
-        return JSONResponse({
-            "track_id": track_id,
-            "cone": AI_UNCERTAINTY_CONES.get(track_id, []),
-        })
-    return JSONResponse({"cones": AI_UNCERTAINTY_CONES})
-
-
-@app.get("/api/ai/coordinated")
-async def api_ai_coordinated():
-    """Get coordinated attack warnings."""
-    return JSONResponse({
-        "count": len(AI_COORD_ATTACKS),
-        "attacks": AI_COORD_ATTACKS,
-    })
-
-
-@app.get("/api/ai/timeline")
-async def api_ai_timeline(track_id: Optional[str] = Query(None)):
-    """Get threat timeline history for a track or all tracks."""
-    if track_id:
-        return JSONResponse({
-            "track_id": track_id,
-            "timeline": ai_timeline.get_timeline(track_id),
-        })
-    return JSONResponse({
-        "tracks": ai_timeline.get_active_track_ids(),
-        "timelines": ai_timeline.get_all_timelines(),
-    })
-
-
-@app.get("/api/ai/roe")
-async def api_ai_roe():
-    """Get current ROE engagement advisories."""
-    return JSONResponse({
-        "count": len(AI_ROE_ADVISORIES),
-        "advisories": AI_ROE_ADVISORIES,
-        "escalation_pending": ai_escalation.get_pending(),
-    })
+# AI read-only endpoints → cop/routers/ai_reads.py
 
 
 @app.post("/api/roe/{track_id}/ack")
@@ -2150,47 +1969,7 @@ async def api_roe_ack(track_id: str, req: Request,
     return JSONResponse({"ok": True, "track_id": track_id, "acknowledged": acked})
 
 
-@app.get("/api/ai/aar")
-async def api_ai_aar():
-    """Generate and return After-Action Report."""
-    report = ai_aar.generate_report(
-        tracks=STATE["tracks"],
-        threats=STATE["threats"],
-        zones=STATE["zones"],
-        assets=STATE["assets"],
-        tasks=STATE["tasks"],
-        timelines=ai_timeline.get_all_timelines(),
-    )
-    report["bda"] = {
-        "summary": ai_bda.summary(),
-        "records": ai_bda.get_all()[-20:],
-        "pending": ai_bda.get_pending(),
-    }
-    return JSONResponse(report)
-
-
-@app.get("/api/ai/ml")
-async def api_ai_ml(track_id: Optional[str] = Query(None)):
-    """Get ML threat predictions."""
-    if track_id:
-        pred = AI_ML_PREDICTIONS.get(track_id)
-        return JSONResponse({"track_id": track_id, "prediction": pred})
-    return JSONResponse({
-        "count": len(AI_ML_PREDICTIONS),
-        "predictions": AI_ML_PREDICTIONS,
-        "model": ai_ml.get_model_info(),
-    })
-
-
-@app.post("/api/ai/ml/train")
-async def api_ai_ml_train():
-    """Re-train ML model from recordings."""
-    try:
-        result = ai_ml.train()
-        ai_ml.reload_from_disk()  # hot-swap — no cold-reload spike on next cycle
-        return JSONResponse({"ok": True, "result": result})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+# ai/aar, ai/ml, ai/ml/train → cop/routers/ai_reads.py
 
 
 @app.get("/api/handover")
@@ -2573,43 +2352,12 @@ async def api_kill_chain():
     })
 
 
-# ── Multi-effector assignment ──────────────────────────────────────────────────
-
-@app.get("/api/ai/assignment", tags=["ai"])
-async def api_assignment():
-    """
-    Latest optimal effector→threat assignment (Hungarian algorithm).
-
-    Returns the current assignment computed by the tactical engine:
-    - assignments: list of {threat_id, effector_id, effector_name, cost, dist_km, engagement}
-    - unassigned_threats: threats with ROE advisory but no available effector
-    - unassigned_effectors: effectors with no threat assigned
-    - stats: summary counts
-    """
-    return JSONResponse({**AI_ASSIGNMENT, "server_time": _utc_now_iso()})
-
-
-@app.get("/api/ai/bft", tags=["ai"])
-async def api_bft():
-    """
-    Latest Blue Force / fratricide warnings.
-
-    Returns tracks where a WEAPONS_FREE engagement was downgraded to
-    WEAPONS_HOLD because a friendly asset lay within the engagement corridor.
-    """
-    return JSONResponse({
-        "warnings":    list(AI_BFT_WARNINGS),
-        "count":       len(AI_BFT_WARNINGS),
-        "server_time": _utc_now_iso(),
-    })
-
+# AI assignment / BFT / drift → cop/routers/ai_reads.py
+# AI retrain (POST) still in cop/routers/ai_mutations.py (next extraction)
 
 @app.post("/api/ai/retrain", tags=["ai"])
 async def api_retrain(_=Depends(require_operator())):
-    """
-    Manually trigger model retraining using accumulated operator feedback.
-    Runs asynchronously in a background thread; returns immediately.
-    """
+    """Manually trigger model retraining using accumulated operator feedback."""
     result = ai_retrainer.trigger(blocking=False)
     return JSONResponse({**result, "server_time": _utc_now_iso()})
 
@@ -2618,20 +2366,6 @@ async def api_retrain(_=Depends(require_operator())):
 async def api_retrain_status():
     """Current retraining status and feedback buffer stats."""
     return JSONResponse({**ai_retrainer.status(), "server_time": _utc_now_iso()})
-
-
-# Weather endpoints → cop/routers/weather.py
-
-
-@app.get("/api/ai/drift", tags=["ai"])
-async def api_drift():
-    """
-    Current model drift status.
-
-    Returns PSI vs. baseline, grade distribution, ML score stats,
-    and approximate false-positive rate from operator feedback.
-    """
-    return JSONResponse({**AI_DRIFT_STATUS, "server_time": _utc_now_iso()})
 
 
 # ── Effector Telemetry ─────────────────────────────────────────────────────────
