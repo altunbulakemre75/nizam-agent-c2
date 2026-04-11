@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -11,6 +11,35 @@
   <link rel="stylesheet" href="/static/nizam.css" />
 </head>
 <body>
+
+  <!-- ── Boot overlay ───────────────────────────────────────────────────
+       Shown immediately on page load. Hidden once the operator clicks
+       "Launch COP". Probes the backend in the background so operators
+       see the system state before they enter the live picture.
+       ────────────────────────────────────────────────────────────────── -->
+  <div id="boot-overlay">
+    <div class="boot-card">
+      <div class="boot-logo">NIZAM<span>COP</span></div>
+      <div class="boot-tagline">Unified C2 for border &amp; critical perimeter defense</div>
+
+      <div class="boot-status">
+        <div class="boot-status-row">
+          <span class="boot-dot" id="boot-dot-api"></span>
+          <span class="boot-status-label">Backend</span>
+          <span class="boot-status-value" id="boot-val-api">checking…</span>
+        </div>
+        <div class="boot-status-row">
+          <span class="boot-dot" id="boot-dot-ws"></span>
+          <span class="boot-status-label">WebSocket</span>
+          <span class="boot-status-value" id="boot-val-ws">idle</span>
+        </div>
+      </div>
+
+      <button id="boot-launch-btn" type="button">Launch COP</button>
+
+      <div class="boot-footer">v1.1.0 · ESC to skip</div>
+    </div>
+  </div>
 
   <div id="map"></div>
 
@@ -26,6 +55,67 @@
 
   <!-- NIZAM COP UI -->
   <script src="/static/app.js"></script>
+
+  <!-- ── Boot overlay controller (inline so it runs before app.js
+       finishes wiring everything; the overlay must feel instant.) ────── -->
+  <script>
+    (function () {
+      var overlay = document.getElementById("boot-overlay");
+      var dotApi  = document.getElementById("boot-dot-api");
+      var dotWs   = document.getElementById("boot-dot-ws");
+      var valApi  = document.getElementById("boot-val-api");
+      var valWs   = document.getElementById("boot-val-ws");
+      var btn     = document.getElementById("boot-launch-btn");
+
+      function setDot(el, state) {
+        // state: "ok" | "warn" | "err" | "idle"
+        el.className = "boot-dot boot-dot-" + state;
+      }
+
+      // Backend probe — a 200 from /api/metrics confirms HTTP server is up.
+      // WebSocket is served by the same process so we infer its status from
+      // the same probe (avoids broadcasting a noisy BOOT-PROBE operator
+      // join/leave to every other connected client).
+      function setWs(state, label) {
+        setDot(dotWs, state);
+        valWs.textContent = label;
+      }
+
+      fetch("/api/metrics", { cache: "no-store" })
+        .then(function (r) {
+          if (r.ok) {
+            setDot(dotApi, "ok");
+            valApi.textContent = "online";
+            // WebSocket constructor available + backend up → WS will work.
+            if (typeof WebSocket === "function") {
+              setWs("ok", "available");
+            } else {
+              setWs("err", "not supported");
+            }
+          } else {
+            setDot(dotApi, "warn");
+            valApi.textContent = "HTTP " + r.status;
+            setWs("warn", "uncertain");
+          }
+        })
+        .catch(function () {
+          setDot(dotApi, "err");
+          valApi.textContent = "unreachable";
+          setWs("err", "unreachable");
+        });
+
+      function dismiss() {
+        overlay.classList.add("boot-overlay-fading");
+        setTimeout(function () { overlay.remove(); }, 320);
+      }
+
+      btn.addEventListener("click", dismiss);
+      // ESC to skip — useful when the boot panel is in the way of e2e tests.
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") dismiss();
+      });
+    })();
+  </script>
 
 </body>
 </html>

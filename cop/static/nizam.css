@@ -660,3 +660,114 @@ a, button, [role="button"], .nz-btn, .nz-tab-btn, .leaflet-interactive {
     transform: translateX(-50%);
   }
 }
+
+/* ── Boot overlay ──────────────────────────────────────────────────────
+   Full-screen first-impression panel. Lives in HTML directly so it
+   renders before app.js boots.
+   ──────────────────────────────────────────────────────────────────── */
+#boot-overlay {
+  position: fixed; inset: 0; z-index: 100000;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(79, 127, 255, 0.10), transparent 60%),
+    var(--bg-0);
+  font-family: var(--font);
+  color: var(--text-1);
+  opacity: 1;
+  transition: opacity 0.32s ease-out;
+}
+#boot-overlay.boot-overlay-fading { opacity: 0; pointer-events: none; }
+
+.boot-card {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 22px;
+  padding: 48px 56px;
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  border: 1px solid var(--border-hi);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  min-width: 380px;
+}
+
+.boot-logo {
+  font-family: var(--font);
+  font-size: 38px; font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-1);
+  display: flex; align-items: baseline; gap: 10px;
+}
+.boot-logo span {
+  font-size: 18px; font-weight: 500;
+  color: var(--accent); letter-spacing: 0.18em;
+}
+
+.boot-tagline {
+  font-size: 12px;
+  color: var(--text-2);
+  text-align: center;
+  max-width: 320px;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+
+.boot-status {
+  width: 100%;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 16px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.boot-status-row {
+  display: flex; align-items: center; gap: 10px;
+}
+.boot-status-label {
+  flex: 1;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.boot-status-value {
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.boot-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-3);
+  box-shadow: 0 0 6px transparent;
+  flex-shrink: 0;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.boot-dot-idle { background: var(--text-3); }
+.boot-dot-ok   { background: var(--ok);    box-shadow: 0 0 8px rgba(48,192,96,0.6); }
+.boot-dot-warn { background: var(--warn);  box-shadow: 0 0 8px rgba(240,128,48,0.6); }
+.boot-dot-err  { background: var(--danger); box-shadow: 0 0 8px rgba(240,64,64,0.6); }
+
+#boot-launch-btn {
+  width: 100%;
+  padding: 12px 20px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--r);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+}
+#boot-launch-btn:hover  { background: #5f8fff; }
+#boot-launch-btn:active { transform: translateY(1px); }
+
+.boot-footer {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
