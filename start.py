@@ -94,6 +94,22 @@ def run_orchestrator(host: str, port: int) -> None:
 # Pipeline subprocess (delegates to run_pipeline.py)
 # ---------------------------------------------------------------------------
 
+def run_adsb_adapter(args: argparse.Namespace, cop_url: str) -> subprocess.Popen:
+    """Launch adapters/adsb_adapter.py — posts directly to COP via HTTP."""
+    cmd = [
+        sys.executable, str(ROOT / "adapters" / "adsb_adapter.py"),
+        "--source",   args.adsb_source,
+        "--lat",      str(args.adsb_lat),
+        "--lon",      str(args.adsb_lon),
+        "--radius_km", str(args.adsb_radius_km),
+        "--interval", str(args.adsb_interval),
+        "--cop_url",  cop_url,
+    ]
+    if args.mqtt_api_key:          # reuse the same ingest key if auth is on
+        cmd += ["--api_key", args.mqtt_api_key]
+    return subprocess.Popen(cmd, stderr=sys.stderr)
+
+
 def run_mqtt_adapter(args: argparse.Namespace, cop_url: str) -> subprocess.Popen:
     """Launch adapters/mqtt_adapter.py — posts directly to COP via HTTP."""
     cmd = [
@@ -154,6 +170,19 @@ def main() -> None:
                     help="MQTT topic to subscribe (repeatable; default: nizam/tracks)")
     ap.add_argument("--mqtt_api_key", default="",
                     help="X-API-Key value for COP /api/ingest (when AUTH is enabled)")
+    # ADS-B adapter (optional real aircraft feed)
+    ap.add_argument("--adsb_source",
+                    choices=["opensky", "adsbfi", "airplaneslive", "dump1090"],
+                    default=None,
+                    help="Enable ADS-B adapter with this source (e.g. adsbfi)")
+    ap.add_argument("--adsb_lat",      type=float, default=41.015,
+                    help="ADS-B bounding-box centre latitude")
+    ap.add_argument("--adsb_lon",      type=float, default=28.979,
+                    help="ADS-B bounding-box centre longitude")
+    ap.add_argument("--adsb_radius_km", type=float, default=200.0,
+                    help="ADS-B bounding-box radius in km")
+    ap.add_argument("--adsb_interval", type=float, default=10.0,
+                    help="ADS-B poll interval in seconds (default 10)")
     args = ap.parse_args()
 
     ui_url   = f"http://127.0.0.1:{args.cop_port}"
@@ -211,7 +240,17 @@ def main() -> None:
         )
         mqtt_proc = run_mqtt_adapter(args, ui_url)
 
-    # -- 5) Wait / handle Ctrl+C --------------------------------------------
+    # -- 5) ADS-B adapter (optional) ----------------------------------------
+    adsb_proc = None
+    if args.adsb_source:
+        print(
+            f"[start] Starting ADS-B adapter  source={args.adsb_source}"
+            f"  radius={args.adsb_radius_km}km  interval={args.adsb_interval}s",
+            file=sys.stderr,
+        )
+        adsb_proc = run_adsb_adapter(args, ui_url)
+
+    # -- 6) Wait / handle Ctrl+C --------------------------------------------
     try:
         pipeline.wait()
     except KeyboardInterrupt:
@@ -222,11 +261,12 @@ def main() -> None:
         except subprocess.TimeoutExpired:
             pipeline.kill()
     finally:
-        if mqtt_proc is not None:
-            try:
-                mqtt_proc.terminate()
-            except Exception:
-                pass
+        for proc in (mqtt_proc, adsb_proc):
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
 
     print("[start] Done.", file=sys.stderr)
 

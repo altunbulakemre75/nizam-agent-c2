@@ -27,9 +27,12 @@ Tactical implications surfaced to operators:
 """
 from __future__ import annotations
 
+import json
 import math
 import random
+import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +58,118 @@ _CACHE_TTL_S = 300.0   # simulate new obs every 5 minutes
 # ── Random seed for repeatable weather patterns ───────────────────────────────
 
 _rng = random.Random(42)
+
+
+# ── Open-Meteo live weather ───────────────────────────────────────────────────
+
+_WMO_TO_WX: dict = {
+    45: "FG", 48: "FG",
+    51: "-RA", 53: "RA",  55: "+RA",
+    56: "-RA", 57: "+RA",
+    61: "-RA", 63: "RA",  65: "+RA",
+    71: "SN",  73: "SN",  75: "+SN",  77: "SN",
+    80: "-RA", 81: "RA",  82: "+RA",
+    85: "SN",  86: "+SN",
+    95: "TSRA", 96: "TSRA", 99: "TSRA",
+}
+
+
+def _wmo_to_wx(code: int) -> str:
+    return _WMO_TO_WX.get(code, "")
+
+
+def _cloud_to_ceiling(cloud_cover: int, wx: str) -> int | None:
+    if wx == "FG":
+        return 200
+    if cloud_cover >= 75:
+        return 2500
+    if cloud_cover >= 50:
+        return 5000
+    if cloud_cover >= 25:
+        return 8000
+    return None
+
+
+def _fetch_open_meteo(station: dict) -> dict | None:
+    """Call Open-Meteo forecast API (no key required). Returns raw fields or None on failure."""
+    lat = station["lat"]
+    lon = station["lon"]
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        "&current=temperature_2m,dew_point_2m,wind_speed_10m,"
+        "wind_direction_10m,wind_gusts_10m,weather_code,"
+        "visibility,cloud_cover,pressure_msl"
+        "&wind_speed_unit=kn&timeformat=unixtime"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "NIZAM-weather/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        c = data.get("current", {})
+        if not c:
+            return None
+        wind_kt  = float(c.get("wind_speed_10m")  or 0)
+        gust_raw = float(c.get("wind_gusts_10m")  or 0)
+        qnh_raw  = c.get("pressure_msl")
+        return {
+            "temp_c":       c.get("temperature_2m"),
+            "dew_c":        c.get("dew_point_2m"),
+            "wind_dir":     int(c.get("wind_direction_10m") or 0),
+            "wind_kt":      wind_kt,
+            "gust_kt":      round(gust_raw, 1) if gust_raw > wind_kt + 2 else None,
+            "visibility_m": min(9999, int(c.get("visibility") or 9999)),
+            "cloud_cover":  int(c.get("cloud_cover") or 0),
+            "wx_code":      int(c.get("weather_code") or 0),
+            "qnh":          int(round(float(qnh_raw))) if qnh_raw else None,
+        }
+    except Exception as exc:
+        print(f"[weather] Open-Meteo error ({station['id']}): {exc}", file=sys.stderr)
+        return None
+
+
+def _build_obs_from_live(station: dict, live: dict, ts: str) -> dict:
+    """Build a full obs dict from Open-Meteo live data."""
+    sid      = station["id"]
+    lat      = station["lat"]
+    lon      = station["lon"]
+    temp     = float(live["temp_c"]   or 18.0)
+    dew      = float(live.get("dew_c") or (temp - 8))
+    wind_dir = int(live["wind_dir"])
+    wind_kt  = float(live["wind_kt"])
+    gust_kt  = live.get("gust_kt")
+    vis      = live["visibility_m"]
+    wx       = _wmo_to_wx(live["wx_code"])
+    ceiling  = _cloud_to_ceiling(live["cloud_cover"], wx)
+    qnh      = live.get("qnh") or _qnh(temp, lat)
+
+    vis_str = f"{vis:04d}" if vis < 9999 else "9999"
+    cloud   = f"BKN{ceiling // 100:03d}" if ceiling else "CAVOK"
+    wx_str  = wx + " " if wx else ""
+    gust_str = f"G{int(gust_kt)}" if gust_kt else ""
+    metar = (
+        f"METAR {sid} {ts} "
+        f"{wind_dir:03d}{int(wind_kt):02d}{gust_str}KT "
+        f"{vis_str} {wx_str}{cloud} "
+        f"{int(temp):+03d}/{int(dew):+03d} Q{qnh}"
+    )
+    return {
+        "station":      sid,
+        "name":         station["name"],
+        "lat":          lat,
+        "lon":          lon,
+        "temp_c":       round(temp, 1),
+        "dew_c":        round(dew, 1),
+        "wind_dir":     wind_dir,
+        "wind_kt":      round(wind_kt, 1),
+        "gust_kt":      gust_kt,
+        "visibility_m": vis,
+        "ceiling_ft":   ceiling,
+        "wx":           wx,
+        "metar":        metar,
+        "updated_at":   datetime.now(timezone.utc).isoformat(),
+        "source":       "live",
+    }
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -131,13 +246,25 @@ def tactical_warnings(observations: List[Dict[str, Any]]) -> List[Dict[str, Any]
 # ── Simulation engine ─────────────────────────────────────────────────────────
 
 def _refresh() -> None:
-    """Generate a fresh set of simulated weather observations."""
+    """Fetch live weather from Open-Meteo; fall back to simulation per station."""
     ts = datetime.now(timezone.utc).strftime("%d%H%MZ")
+    live_count = 0
     for st in _STATIONS:
-        sid = st["id"]
+        sid  = st["id"]
         prev = _obs_cache.get(sid, {})
-        obs  = _simulate_obs(st, prev, ts)
+        live = _fetch_open_meteo(st)
+        if live:
+            obs = _build_obs_from_live(st, live, ts)
+            live_count += 1
+        else:
+            obs = _simulate_obs(st, prev, ts)
         _obs_cache[sid] = obs
+    sim_count = len(_STATIONS) - live_count
+    print(
+        f"[weather] refreshed {len(_STATIONS)} stations "
+        f"({live_count} live, {sim_count} simulated)",
+        file=sys.stderr,
+    )
 
 
 def _simulate_obs(station: Dict, prev: Dict, ts: str) -> Dict[str, Any]:
