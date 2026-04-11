@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import urllib.request
-from pathlib import Path
 
 # Load .env early so LLM_PROVIDER / OLLAMA_URL are available before ai modules import
 try:
@@ -77,10 +76,8 @@ from ai import retrainer as ai_retrainer
 from ai import bda as ai_bda
 from cop.otel import init_tracing, span as otel_span
 from cop import sync as cop_sync
-from cop import weather as cop_weather
 from cop import circuit_breaker as cop_cb
 from replay import recorder as replay_recorder
-from replay import player as replay_player
 
 # ── Optional DB / Auth imports ───────────────────────────────────────────────
 try:
@@ -208,6 +205,20 @@ app = FastAPI(
 
 if DB_ENABLED and _DB_AVAILABLE:
     app.include_router(auth_router)
+
+# Extracted domain routers (cop/routers/)
+from cop.routers.weather import router as weather_router
+from cop.routers.bda import router as bda_router
+from cop.routers.scenarios import router as scenarios_router
+from cop.routers.audit import router as audit_router
+from cop.routers.webhooks import router as webhooks_router
+from cop.routers.replay import router as replay_router
+app.include_router(weather_router)
+app.include_router(bda_router)
+app.include_router(scenarios_router)
+app.include_router(audit_router)
+app.include_router(webhooks_router)
+app.include_router(replay_router)
 
 # Rate limiting middleware (write endpoints only)
 app.add_middleware(RateLimitMiddleware)
@@ -2780,102 +2791,7 @@ async def api_ai_status():
     })
 
 
-# ── Replay API endpoints ─────────────────────────────────────
-
-@app.get("/api/replay/recordings")
-async def api_replay_list():
-    """List all available recordings."""
-    recordings = replay_player.list_recordings()
-    return JSONResponse({"recordings": recordings})
-
-
-@app.post("/api/replay/load")
-async def api_replay_load(req: Request):
-    """Load a recording for playback."""
-    body = await req.json()
-    filename = body.get("filename")
-    if not filename:
-        return JSONResponse({"ok": False, "error": "filename required"}, status_code=400)
-    try:
-        player = replay_player.get_player()
-        info = player.load(filename)
-        return JSONResponse({"ok": True, "info": info})
-    except (FileNotFoundError, ValueError) as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
-
-
-@app.post("/api/replay/play")
-async def api_replay_play(req: Request):
-    """Start or resume playback."""
-    body = await req.json() if req.headers.get("content-length", "0") != "0" else {}
-    speed = float(body.get("speed", 1.0))
-    player = replay_player.get_player()
-    player.play(speed=speed)
-    return JSONResponse({"ok": True, "info": player.get_info()})
-
-
-@app.post("/api/replay/pause")
-async def api_replay_pause():
-    """Pause playback."""
-    player = replay_player.get_player()
-    player.pause()
-    return JSONResponse({"ok": True, "info": player.get_info()})
-
-
-@app.post("/api/replay/stop")
-async def api_replay_stop():
-    """Stop playback and unload recording."""
-    player = replay_player.get_player()
-    player.stop()
-    return JSONResponse({"ok": True, "info": player.get_info()})
-
-
-@app.post("/api/replay/seek")
-async def api_replay_seek(req: Request):
-    """Seek to a specific time."""
-    body = await req.json()
-    elapsed_s = float(body.get("elapsed_s", 0))
-    player = replay_player.get_player()
-    player.seek(elapsed_s)
-    return JSONResponse({"ok": True, "info": player.get_info()})
-
-
-@app.post("/api/replay/speed")
-async def api_replay_speed(req: Request):
-    """Change playback speed."""
-    body = await req.json()
-    speed = float(body.get("speed", 1.0))
-    player = replay_player.get_player()
-    player.set_speed(speed)
-    return JSONResponse({"ok": True, "info": player.get_info()})
-
-
-@app.get("/api/replay/frame")
-async def api_replay_frame(t: Optional[float] = Query(None)):
-    """Get the current (or specified) replay frame."""
-    player = replay_player.get_player()
-    if player.state == "IDLE":
-        return JSONResponse({"ok": False, "error": "no recording loaded"}, status_code=400)
-    if t is not None:
-        frame = player.get_frame_at(t)
-    else:
-        frame = player.get_current_frame()
-    info = player.get_info()
-    return JSONResponse({
-        "ok": True,
-        "info": info,
-        "frame": frame.get("state") if frame else None,
-    })
-
-
-@app.get("/api/replay/status")
-async def api_replay_status():
-    """Get current replay status."""
-    player = replay_player.get_player()
-    return JSONResponse({
-        "player": player.get_info(),
-        "recorder": replay_recorder.get_status(),
-    })
+# Replay endpoints → cop/routers/replay.py
 
 
 # ── Analytics endpoints (Phase 4) ────────────────────────────
@@ -2955,164 +2871,10 @@ async def api_analytics_alerts(limit: int = Query(100, le=5000)):
     })
 
 
-# ── Scenario CRUD ─────────────────────────────────────────────
-
-_SCENARIOS_DIR = Path(__file__).parent.parent / "scenarios"
-
-@app.get("/api/scenarios", tags=["system"])
-async def api_scenarios_list():
-    """List all available scenario files."""
-    _SCENARIOS_DIR.mkdir(exist_ok=True)
-    scenarios = []
-    for f in sorted(_SCENARIOS_DIR.glob("*.json")):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            scenarios.append({
-                "name":        f.stem,
-                "description": data.get("description", ""),
-                "duration_s":  data.get("duration_s", 300),
-                "rate_hz":     data.get("rate_hz", 1.0),
-                "entity_count": len(data.get("entities", [])),
-            })
-        except Exception:
-            scenarios.append({"name": f.stem, "description": "", "duration_s": 300,
-                              "rate_hz": 1.0, "entity_count": 0})
-    return JSONResponse({"scenarios": scenarios})
+# Scenario endpoints → cop/routers/scenarios.py
 
 
-@app.get("/api/scenarios/{name}", tags=["system"])
-async def api_scenario_get(name: str):
-    """Get a specific scenario by name."""
-    safe = name.replace("/", "").replace("\\", "").replace("..", "")
-    path = _SCENARIOS_DIR / f"{safe}.json"
-    if not path.exists():
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
-
-
-@app.post("/api/scenarios", tags=["system"])
-async def api_scenario_save(req: Request, _=Depends(require_operator())):
-    """Save (create or overwrite) a scenario file."""
-    try:
-        body = await req.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
-    name = body.get("name", "").strip().replace("/", "").replace("\\", "").replace("..", "")
-    if not name:
-        return JSONResponse({"ok": False, "error": "name required"}, status_code=400)
-    _SCENARIOS_DIR.mkdir(exist_ok=True)
-    path = _SCENARIOS_DIR / f"{name}.json"
-    path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
-    return JSONResponse({"ok": True, "name": name})
-
-
-@app.delete("/api/scenarios/{name}", tags=["system"])
-async def api_scenario_delete(name: str, _=Depends(require_operator())):
-    """Delete a scenario file."""
-    safe = name.replace("/", "").replace("\\", "").replace("..", "")
-    path = _SCENARIOS_DIR / f"{safe}.json"
-    if not path.exists():
-        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-    path.unlink()
-    return JSONResponse({"ok": True})
-
-
-# ── Audit log ──────────────────────────────────────────────────────────────────
-
-@app.get("/api/audit", tags=["system"])
-async def api_audit(
-    limit:         int = Query(100, ge=1, le=1000),
-    offset:        int = Query(0, ge=0),
-    username:      Optional[str] = Query(None),
-    action:        Optional[str] = Query(None),
-    resource_type: Optional[str] = Query(None),
-    _=Depends(require_admin()),
-    db=Depends(get_db),
-):
-    """Admin-only: paginated audit log with optional filters."""
-    if db is None:
-        return JSONResponse({"records": [], "total": 0, "note": "DB not configured"})
-
-    from sqlalchemy import select, func
-    from db.models import AuditLog
-
-    stmt = select(AuditLog).order_by(AuditLog.time.desc())
-    if username:
-        stmt = stmt.where(AuditLog.username == username)
-    if action:
-        stmt = stmt.where(AuditLog.action == action)
-    if resource_type:
-        stmt = stmt.where(AuditLog.resource_type == resource_type)
-
-    count_stmt = select(func.count()).select_from(stmt.subquery())
-    total = (await db.execute(count_stmt)).scalar() or 0
-
-    stmt = stmt.offset(offset).limit(limit)
-    rows = (await db.execute(stmt)).scalars().all()
-
-    records = [
-        {
-            "time":          r.time.isoformat() if r.time else None,
-            "username":      r.username,
-            "role":          r.role,
-            "action":        r.action,
-            "resource_type": r.resource_type,
-            "resource_id":   r.resource_id,
-            "detail":        r.detail,
-            "ip":            r.ip,
-            "success":       bool(r.success),
-            "prev_hash":     r.prev_hash,
-            "entry_hash":    r.entry_hash,
-        }
-        for r in rows
-    ]
-    return JSONResponse({"records": records, "total": total, "offset": offset, "limit": limit})
-
-
-@app.get("/api/audit/verify", tags=["system"])
-async def api_audit_verify(
-    _=Depends(require_admin()),
-    db=Depends(get_db),
-):
-    """
-    Admin-only: replay the audit hash chain in time order and report whether
-    the chain is intact. Use this to prove to an auditor that the log has not
-    been silently mutated.
-    """
-    if db is None:
-        return JSONResponse({"ok": False, "error": "DB not configured"}, status_code=503)
-
-    from sqlalchemy import select
-    from db.models import AuditLog
-
-    rows = (await db.execute(
-        select(AuditLog).order_by(AuditLog.time.asc(), AuditLog.id.asc())
-    )).scalars().all()
-
-    records = [
-        {
-            "time":          r.time,
-            "username":      r.username,
-            "role":          r.role,
-            "action":        r.action,
-            "resource_type": r.resource_type,
-            "resource_id":   r.resource_id,
-            "detail":        r.detail,
-            "ip":            r.ip,
-            "success":       bool(r.success),
-            "prev_hash":     r.prev_hash,
-            "entry_hash":    r.entry_hash,
-        }
-        for r in rows
-    ]
-
-    ok, bad_index, message = cop_audit.verify_chain(records)
-    return JSONResponse({
-        "ok":          ok,
-        "message":     message,
-        "total":       len(records),
-        "first_bad":   bad_index,
-    })
+# Audit endpoints → cop/routers/audit.py
 
 
 # ── Kill Chain ──────────────────────────────────────────────────────────────────
@@ -3233,26 +2995,7 @@ async def api_retrain_status():
     return JSONResponse({**ai_retrainer.status(), "server_time": _utc_now_iso()})
 
 
-@app.get("/api/weather", tags=["weather"])
-async def api_weather(refresh: bool = False):
-    """Current weather observations for all stations in the AO."""
-    obs  = cop_weather.get_observations(force_refresh=refresh)
-    warn = cop_weather.tactical_warnings(obs)
-    return JSONResponse({
-        "observations": obs,
-        "warnings":     warn,
-        "count":        len(obs),
-        "server_time":  _utc_now_iso(),
-    })
-
-
-@app.get("/api/weather/{station_id}", tags=["weather"])
-async def api_weather_station(station_id: str):
-    """Single-station weather observation."""
-    obs = cop_weather.get_station(station_id.upper())
-    if not obs:
-        return JSONResponse({"ok": False, "error": "station not found"}, status_code=404)
-    return JSONResponse({**obs, "server_time": _utc_now_iso()})
+# Weather endpoints → cop/routers/weather.py
 
 
 @app.get("/api/ai/drift", tags=["ai"])
@@ -3333,15 +3076,7 @@ async def api_effector_telemetry(
     return JSONResponse({"ok": True, "effector_id": effector_id, "status": status})
 
 
-@app.get("/api/bda", tags=["bda"])
-async def api_bda():
-    """Battle Damage Assessment records — finalized outcomes and pending miss checks."""
-    return JSONResponse({
-        "records":     ai_bda.get_all(),
-        "pending":     ai_bda.get_pending(),
-        "summary":     ai_bda.summary(),
-        "server_time": _utc_now_iso(),
-    })
+# BDA endpoint → cop/routers/bda.py
 
 
 @app.get("/api/effectors/telemetry", tags=["effectors"])
@@ -3420,42 +3155,7 @@ async def api_fusion_tracks(_=Depends(require_viewer())):
     })
 
 
-@app.get("/api/webhooks", tags=["system"])
-async def api_webhooks_list(_=Depends(require_operator())):
-    """List registered webhook URLs."""
-    return JSONResponse({"webhooks": cop_webhooks.list_webhooks()})
-
-
-@app.post("/api/webhooks", tags=["system"])
-async def api_webhooks_register(req: Request, current_user=Depends(require_operator())):
-    """Register a new webhook URL."""
-    body = await req.json()
-    url = (body.get("url") or "").strip()
-    if not url.startswith("http"):
-        return JSONResponse({"ok": False, "error": "url must start with http(s)"}, status_code=400)
-    added = cop_webhooks.register(url)
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "anonymous"),
-        role=getattr(current_user, "role", ""),
-        action="REGISTER_WEBHOOK", resource_type="webhook", resource_id=url,
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": True, "added": added, "url": url})
-
-
-@app.delete("/api/webhooks", tags=["system"])
-async def api_webhooks_remove(req: Request, current_user=Depends(require_operator())):
-    """Remove a registered webhook URL."""
-    body = await req.json()
-    url = (body.get("url") or "").strip()
-    removed = cop_webhooks.unregister(url)
-    asyncio.create_task(cop_audit.log_action(
-        username=getattr(current_user, "username", "anonymous"),
-        role=getattr(current_user, "role", ""),
-        action="REMOVE_WEBHOOK", resource_type="webhook", resource_id=url,
-        ip=req.client.host if req.client else "",
-    ))
-    return JSONResponse({"ok": removed})
+# Webhook endpoints → cop/routers/webhooks.py
 
 
 # ── WebSocket ─────────────────────────────────────────────────
