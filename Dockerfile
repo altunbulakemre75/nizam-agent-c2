@@ -7,6 +7,10 @@ FROM python:3.11-slim AS builder
 WORKDIR /build
 
 COPY requirements.txt .
+# Install torch CPU-only first (saves ~700MB vs default CUDA wheels)
+RUN pip install --no-cache-dir --prefix=/install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.2.2
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
