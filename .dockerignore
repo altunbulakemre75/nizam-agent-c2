@@ -34,3 +34,13 @@ logs/
 *.jsonl
 .agent/
 .claude/
+
+# Large dirs — recordings are 6GB+, must NEVER go into build context
+recordings/
+venv/
+.venv/
+node_modules/
+*.egg-info
+.mypy_cache
+test-results/
+playwright-report/
