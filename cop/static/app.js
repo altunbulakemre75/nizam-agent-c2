@@ -70,8 +70,8 @@ function initMap() {
   }
   if (typeof window.L === "undefined") throw new Error("Leaflet not loaded");
   UI.map = L.map("map", { zoomControl: true }).setView([41.015, 28.979], 10);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19, attribution: "&copy; OpenStreetMap"
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 19, attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
   }).addTo(UI.map);
 }
 
@@ -5452,8 +5452,8 @@ function mountRightTabContainer() {
   const activeTabId = { v: "threats" };
 
   const container = el("div", { id: "right-sidebar", style: {
-    position: "fixed", top: "52px", right: "12px", zIndex: "9998",
-    width: "300px", maxHeight: "calc(100vh - 64px)",
+    position: "fixed", top: "60px", right: "16px", zIndex: "9998",
+    width: "380px", maxHeight: "calc(100vh - 76px)",
     display: "flex", flexDirection: "column",
     pointerEvents: "none",
   }});
@@ -5509,7 +5509,7 @@ function mountCoordBar() {
 
   // Tile layers
   const TILES = {
-    OSM: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom:19, attribution:"&copy; OSM" }),
+    OSM: L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom:19, attribution:"&copy; CARTO" }),
     SAT: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom:19, attribution:"&copy; Esri" }),
   };
   let currentTile = "OSM";
