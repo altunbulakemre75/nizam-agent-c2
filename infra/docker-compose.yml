@@ -1,0 +1,202 @@
+version: "3.9"
+
+# NIZAM Counter-UAS — Faz 0 Infrastructure
+# Usage: docker compose -f infra/docker-compose.yml up -d
+# Ports:
+#   PostgreSQL  : 5432
+#   NATS        : 4222 (client), 8222 (monitoring), 6222 (cluster)
+#   Redpanda    : 9092 (kafka), 9644 (admin), 8081 (schema registry)
+#   Grafana     : 3000
+#   Prometheus  : 9090
+#   Loki        : 3100
+#   Tempo       : 3200 (http), 4317 (otlp-grpc), 4318 (otlp-http)
+#   Portainer   : 9443
+
+networks:
+  nizam:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  nats_data:
+  redpanda_data:
+  grafana_data:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+
+services:
+
+  # ── PostgreSQL 16 + pgvector ───────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nizam-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nizam}
+      POSTGRES_USER: ${POSTGRES_USER:-nizam}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nizam_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - nizam
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nizam}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── NATS JetStream (Edge Bus) ──────────────────────────────────
+  nats:
+    image: nats:2.10-alpine
+    container_name: nizam-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222", "--name", "nizam-edge"]
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring
+      - "6222:6222"   # cluster
+    volumes:
+      - nats_data:/data
+    networks:
+      - nizam
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redpanda (Ana Bus — Kafka API, JVM yok) ────────────────────
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: nizam-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --mode dev-container
+      - --smp 1
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"  # kafka (external)
+      - "18081:18081"  # schema registry (external)
+      - "18082:18082"  # pandaproxy (external)
+      - "9644:9644"    # admin
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - nizam
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Redpanda Console ──────────────────────────────────────────
+  redpanda-console:
+    image: redpandadata/console:latest
+    container_name: nizam-redpanda-console
+    restart: unless-stopped
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+    entrypoint: /bin/sh
+    command: -c 'echo "kafka:\n  brokers: [\"redpanda:9092\"]" > /tmp/config.yml && /app/console'
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redpanda
+    networks:
+      - nizam
+
+  # ── Prometheus ─────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nizam-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - nizam
+
+  # ── Loki (Log Aggregation) ─────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: nizam-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+    networks:
+      - nizam
+
+  # ── Tempo (Distributed Tracing) ───────────────────────────────
+  tempo:
+    image: grafana/tempo:latest
+    container_name: nizam-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"   # tempo http
+      - "4317:4317"   # otlp grpc
+      - "4318:4318"   # otlp http
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/tmp/tempo
+    networks:
+      - nizam
+
+  # ── Grafana ────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: nizam-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-nizam_dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - nizam
+
+  # ── Portainer (Docker Management UI) ──────────────────────────
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: nizam-portainer
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/portainer_data:/data
+    networks:
+      - nizam
