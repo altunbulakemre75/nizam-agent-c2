@@ -1,3 +1,6 @@
+# Vendor repos (89 reference repos, ~3GB — local only, use clone_vendors.sh)
+vendor/
+
 # Python
 __pycache__/
 *.pyc
