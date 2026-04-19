@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: nizam-default
+    orgId: 1
+    folder: NIZAM
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

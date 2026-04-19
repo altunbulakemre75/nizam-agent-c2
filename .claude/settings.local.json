@@ -27,7 +27,8 @@
       "Bash(claude status:*)",
       "Bash(claude whoami:*)",
       "Bash(claude auth:*)",
-      "Bash(claude config:*)"
+      "Bash(claude config:*)",
+      "Bash(code \"/c/Users/altun/Desktop/Yeni klasör/namless\")"
     ]
   }
 }

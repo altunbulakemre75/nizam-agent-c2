@@ -25,6 +25,7 @@ volumes:
   prometheus_data:
   loki_data:
   tempo_data:
+  fts_data:
 
 services:
 
@@ -186,6 +187,21 @@ services:
       - prometheus
       - loki
       - tempo
+    networks:
+      - nizam
+
+  # ── FreeTAKServer (ATAK mesh için CoT sunucusu) ───────────────
+  freetakserver:
+    image: rooyca/fts-server:latest
+    container_name: nizam-fts
+    restart: unless-stopped
+    ports:
+      - "8087:8087"   # CoT TCP (plaintext dev)
+      - "8089:8089"   # CoT TLS (prod için)
+      - "8443:8443"   # FTS Web UI
+      - "19023:19023" # API
+    volumes:
+      - fts_data:/opt/FTSData
     networks:
       - nizam
 

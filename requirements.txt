@@ -46,3 +46,33 @@ opentelemetry-instrumentation-fastapi>=0.46b0,<1.0.0
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
+pytest-asyncio>=0.23.0
+
+# ── NIZAM Counter-UAS Servisleri (Faz 1+) ────────────────────────
+
+# Faz 1 — Kamera tespiti
+ultralytics>=8.3.0,<9.0.0
+
+# Messaging (Faz 1, 2, 3, 4 için gerekli)
+nats-py>=2.6.0,<3.0.0
+
+# Faz 3 — Füzyon
+filterpy>=1.4.5,<2.0.0
+scipy>=1.11.0
+
+# Faz 5 — CoT/TAK
+pytak>=6.0.0
+lxml>=4.9.0
+
+# Faz 6 — Karar (YAML ROE)
+pyyaml>=6.0.0
+
+# Prometheus
+prometheus-client>=0.19.0
+
+# Optional LLM stack (Faz 6 LangGraph advisor) — install with:
+#   pip install "langgraph>=0.2.0" "anthropic>=0.40.0" "llama-index>=0.12.0"
+# Şimdilik requirements dışı — NIZAM_DECISION_LLM_ENABLED=true iken gerekli.
+
+# Faz 7 — MAVSDK (opsiyonel, yoksa mock mode)
+# mavsdk>=2.0.0  # sadece PX4 SITL / gerçek donanım varsa
