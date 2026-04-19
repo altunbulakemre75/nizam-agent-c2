@@ -108,9 +108,9 @@ services:
     container_name: nizam-redpanda-console
     restart: unless-stopped
     environment:
-      CONFIG_FILEPATH: /tmp/config.yml
-    entrypoint: /bin/sh
-    command: -c 'echo "kafka:\n  brokers: [\"redpanda:9092\"]" > /tmp/config.yml && /app/console'
+      CONFIG_FILEPATH: /etc/redpanda-console/config.yaml
+    volumes:
+      - ./redpanda-console/config.yaml:/etc/redpanda-console/config.yaml:ro
     ports:
       - "10080:8080"
     depends_on:
@@ -161,7 +161,8 @@ services:
       - "6318:4318"   # otlp http
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo.yaml:ro
-      - tempo_data:/tmp/tempo
+      - tempo_data:/var/tempo
+    user: "0:0"
     networks:
       - nizam
 
