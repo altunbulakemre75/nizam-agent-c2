@@ -1,0 +1,52 @@
+# NIZAM Default Rules of Engagement — DEMO/DEVELOPMENT ONLY
+#
+# Üretim deploymentinde bu dosya MUTLAKA saha/komutanlık tarafından
+# güncellenmeli. Üretim güvenlik sertifikaları ve operatör onayı olmadan
+# ENGAGE kuralı etkinleştirilmemelidir.
+
+rules:
+  - rule_id: ROE-1
+    description: "Düşük tehdit — sadece kayıt"
+    when_threat_level: low
+    requires_operator_approval: false
+    action: log
+    enabled: true
+
+  - rule_id: ROE-2
+    description: "Orta tehdit — operatör uyarısı"
+    when_threat_level: medium
+    requires_operator_approval: false
+    action: alert
+    enabled: true
+
+  - rule_id: ROE-3
+    description: "Yüksek tehdit + korumalı bölge — handoff"
+    when_threat_level: high
+    when_inside_zone: true
+    requires_operator_approval: true
+    action: handoff
+    enabled: true
+
+  - rule_id: ROE-4
+    description: "Yüksek tehdit (korumalı bölge dışı) — alert"
+    when_threat_level: high
+    when_inside_zone: false
+    requires_operator_approval: false
+    action: alert
+    enabled: true
+
+  - rule_id: ROE-5
+    description: "Kritik tehdit + korumalı bölge — engage (operatör onayı şart)"
+    when_threat_level: critical
+    when_inside_zone: true
+    requires_operator_approval: true
+    action: engage
+    enabled: false  # Üretim dışı — varsayılan devre dışı
+
+  - rule_id: ROE-6
+    description: "Kritik tehdit (bölge dışı) — handoff"
+    when_threat_level: critical
+    when_inside_zone: false
+    requires_operator_approval: true
+    action: handoff
+    enabled: true
