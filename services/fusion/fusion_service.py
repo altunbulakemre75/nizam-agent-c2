@@ -185,8 +185,15 @@ class FusionService:
         import nats
 
         self._nc = await nats.connect(self.nats_url)
-        await self._nc.subscribe("nizam.raw.rf.odid.>", cb=lambda m: self._on_odid(m.data))
-        await self._nc.subscribe("nizam.raw.camera.>", cb=lambda m: self._on_camera(m.data))
+
+        async def odid_cb(msg):
+            await self._on_odid(msg.data)
+
+        async def camera_cb(msg):
+            await self._on_camera(msg.data)
+
+        await self._nc.subscribe("nizam.raw.rf.odid.>", cb=odid_cb)
+        await self._nc.subscribe("nizam.raw.camera.>", cb=camera_cb)
         log.info("Fusion service listening on NATS %s", self.nats_url)
         await self._tick_loop()
 

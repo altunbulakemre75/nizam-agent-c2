@@ -191,10 +191,13 @@ services:
       - nizam
 
   # ── FreeTAKServer (ATAK mesh için CoT sunucusu) ───────────────
+  # NOT: Resmi FTS image public registry'de yok — pilot öncesi kendi build.
+  # Dev için şimdilik devre dışı (profiles ile gizlendi).
   freetakserver:
-    image: rooyca/fts-server:latest
+    image: fts.civtak.org/freetakteam/freetakserver:latest
     container_name: nizam-fts
     restart: unless-stopped
+    profiles: ["tak"]    # `docker compose --profile tak up -d` ile başlatılır
     ports:
       - "8087:8087"   # CoT TCP (plaintext dev)
       - "8089:8089"   # CoT TLS (prod için)
