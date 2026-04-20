@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, AsyncIterator
 
@@ -119,12 +120,38 @@ async def metrics() -> Response:
     return Response(generate_latest(), media_type="text/plain; version=0.0.4")
 
 
+def _auth_required() -> bool:
+    """NIZAM_WS_AUTH_DISABLED=true → dev modu. Üretimde true VERİLMEMELİ."""
+    return os.getenv("NIZAM_WS_AUTH_DISABLED", "false").lower() != "true"
+
+
 @app.websocket("/ws/tracks")
-async def ws_tracks(ws: WebSocket) -> None:
+async def ws_tracks(ws: WebSocket, token: str | None = None) -> None:
+    """JWT auth: ?token=<JWT> query param veya Authorization header.
+
+    NIZAM_JWT_SECRET set edilmeli. Token invalid/expired → 4401 close.
+    """
+    if _auth_required():
+        from shared.auth import AuthError, verify_token
+
+        raw = token
+        if not raw:
+            header = ws.headers.get("authorization", "")
+            if header.lower().startswith("bearer "):
+                raw = header[7:]
+        if not raw:
+            await ws.close(code=4401, reason="missing token")
+            return
+        try:
+            verify_token(raw)
+        except AuthError as exc:
+            await ws.close(code=4401, reason=f"auth: {exc}")
+            return
+
     await hub.connect(ws)
     try:
         while True:
-            await ws.receive_text()  # istemciden ping/keep-alive
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     finally:

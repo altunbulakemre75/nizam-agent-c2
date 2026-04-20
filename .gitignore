@@ -7,6 +7,10 @@ infra/certs/
 *.p12
 *.pem
 
+# NATS nkey seed'leri — asla git'e girmesin
+infra/nats/*.nk
+infra/nats/.env
+
 # Python
 __pycache__/
 *.pyc

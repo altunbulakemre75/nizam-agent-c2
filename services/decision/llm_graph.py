@@ -100,24 +100,40 @@ async def reason(state: GraphState) -> GraphState:
     if not _is_llm_enabled():
         return state
 
-    track = state.track
+    from services.decision.sanitize import UnsafeContent, safe_free_text, sanitize_track_for_llm
+
     assessment = state.assessment
     assert assessment is not None
 
-    roe_text = "\n".join(
-        f"- [{r['rule_id'] or r['source']}] {r['excerpt']}"
-        for r in state.roe_context[:2]
-    ) or "(no doctrine retrieved)"
+    # PROMPT INJECTION DEFENSE — attacker uas_id/class_name alanlarına payload koyamaz
+    try:
+        t = sanitize_track_for_llm(state.track)
+    except UnsafeContent as exc:
+        log.warning("Track sanitize başarısız (injection): %s — LLM atlanıyor", exc)
+        return state
+
+    roe_lines = []
+    for r in state.roe_context[:2]:
+        try:
+            excerpt = safe_free_text(r.get("excerpt", ""), max_len=200, reject_injection=False)
+            rule_id = (r.get("rule_id") or r.get("source") or "")[:40]
+            if excerpt:
+                roe_lines.append(f"- [{rule_id}] {excerpt}")
+        except Exception:
+            continue
+    roe_text = "\n".join(roe_lines) or "(no doctrine retrieved)"
+
+    rule_reasoning = safe_free_text(assessment.reasoning, max_len=300, reject_injection=False)
 
     prompt = (
         f"Counter-UAS track advisor. You are NOT the decision-maker — rule engine is.\n"
-        f"Track id={track.get('track_id')} conf={track.get('confidence', 0):.2f}\n"
-        f"Pos ENU x={track.get('x', 0):.0f} y={track.get('y', 0):.0f} z={track.get('z', 0):.0f}\n"
-        f"Velocity vx={track.get('vx', 0):.1f} vy={track.get('vy', 0):.1f}\n"
-        f"UAS ID: {track.get('uas_id') or 'unknown'}  Sources: {track.get('sources', [])}\n\n"
+        f"Track id={t['track_id']} conf={t['confidence']:.2f}\n"
+        f"Pos ENU x={t['x']:.0f} y={t['y']:.0f} z={t['z']:.0f}\n"
+        f"Velocity vx={t['vx']:.1f} vy={t['vy']:.1f}\n"
+        f"UAS ID: {t['uas_id']}  Class: {t['class_name']}  Sources: {t['sources']}\n\n"
         f"Rule engine pre-assessment:\n"
         f"  threat_level={assessment.threat_level.value} score={assessment.score:.2f}\n"
-        f"  reasoning={assessment.reasoning}\n"
+        f"  reasoning={rule_reasoning}\n"
         f"  proposed_action={state.rule_action.value if state.rule_action else 'log'}\n\n"
         f"Relevant doctrine:\n{roe_text}\n\n"
         f"Submit your independent advisor recommendation. Valid actions: "

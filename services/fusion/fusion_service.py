@@ -29,6 +29,7 @@ from services.fusion.track_manager import TrackManager
 from services.schemas.track import Measurement, SensorType
 from shared.geo import enu_to_latlon as _geo_enu_to_latlon
 from shared.geo import latlon_to_enu as _geo_latlon_to_enu
+from shared.rate_limit import QueueCircuitBreaker, SlidingWindowLimiter
 
 if TYPE_CHECKING:
     import nats
@@ -146,19 +147,34 @@ class FusionService:
         ref_lat: float = DEFAULT_REF[0],
         ref_lon: float = DEFAULT_REF[1],
         tick_dt: float = 0.1,
+        max_events_per_sec_per_sensor: int = 500,
+        queue_maxsize: int = 10_000,
     ) -> None:
         self.nats_url = nats_url
         self.ref_lat = ref_lat
         self.ref_lon = ref_lon
         self.tick_dt = tick_dt
         self.manager = TrackManager()
-        self._queue: asyncio.Queue[Measurement] = asyncio.Queue(maxsize=10_000)
+        self._queue: asyncio.Queue[Measurement] = asyncio.Queue(maxsize=queue_maxsize)
         self._nc = None
+        self._subs: list = []
+        # DoS savunması
+        self._rate_limiter = SlidingWindowLimiter(max_events_per_sec_per_sensor)
+        self._breaker = QueueCircuitBreaker(self._queue, component_name="fusion")
+
+    async def _accept(self, sensor_id: str, is_critical: bool = False) -> bool:
+        """Rate limit + circuit breaker kontrolü. False → drop."""
+        if not await self._rate_limiter.allow(sensor_id):
+            return False
+        return self._breaker.allow(sensor_id, is_critical=is_critical)
 
     async def _on_odid(self, raw: bytes) -> None:
         try:
             msg = json.loads(raw.decode())
         except json.JSONDecodeError:
+            return
+        sensor_id = msg.get("sensor_id", "rf-unknown")
+        if not await self._accept(sensor_id, is_critical=True):  # RF/ODID yüksek güven
             return
         meas = odid_to_measurement(msg, self.ref_lat, self.ref_lon)
         if meas is not None:
@@ -170,7 +186,9 @@ class FusionService:
             msg = json.loads(raw.decode())
         except json.JSONDecodeError:
             return
-        # Üretim: sensor_id → calibration lookup. Şimdilik ref point'ten 0 bearing.
+        sensor_id = msg.get("sensor_id", "cam-unknown")
+        if not await self._accept(sensor_id):
+            return
         for meas in camera_to_measurements(
             msg, self.ref_lat, self.ref_lon,
             sensor_lat=self.ref_lat, sensor_lon=self.ref_lon, bearing_deg=0.0,
@@ -184,12 +202,15 @@ class FusionService:
             msg = json.loads(raw.decode())
         except json.JSONDecodeError:
             return
+        sensor_id = msg.get("sensor_id", "cop-sim")
+        if not await self._accept(sensor_id):
+            return
         e, n = latlon_to_enu(
             float(msg["latitude"]), float(msg["longitude"]),
             self.ref_lat, self.ref_lon,
         )
         meas = Measurement(
-            sensor_id=msg.get("sensor_id", "cop-sim"),
+            sensor_id=sensor_id,
             sensor_type=SensorType.RADAR,
             timestamp_iso=msg["timestamp_iso"],
             x=e, y=n, z=float(msg.get("altitude", 100.0)),
@@ -243,15 +264,31 @@ class FusionService:
         async def sim_cop_cb(msg):
             await self._on_sim_cop(msg.data)
 
-        await self._nc.subscribe("nizam.raw.rf.odid.>", cb=odid_cb)
-        await self._nc.subscribe("nizam.raw.camera.>", cb=camera_cb)
-        await self._nc.subscribe("nizam.raw.sim.cop", cb=sim_cop_cb)
+        self._subs = [
+            await self._nc.subscribe("nizam.raw.rf.odid.>", cb=odid_cb),
+            await self._nc.subscribe("nizam.raw.camera.>", cb=camera_cb),
+            await self._nc.subscribe("nizam.raw.sim.cop", cb=sim_cop_cb),
+        ]
         log.info("Fusion service listening on NATS %s", self.nats_url)
 
         try:
             await self._tick_loop(shutdown)
         finally:
             log.info("Fusion service shutting down...")
+            # Önce subscriber'ları durdur — yeni mesaj gelmesin
+            for sub in self._subs:
+                try:
+                    await sub.unsubscribe()
+                except Exception as exc:
+                    log.debug("unsubscribe hata: %s", exc)
+            # Kuyruktaki son batch'i işle
+            if not self._queue.empty():
+                last_batch = []
+                while not self._queue.empty():
+                    last_batch.append(self._queue.get_nowait())
+                self.manager.step(last_batch, dt=self.tick_dt)
+                log.info("Son drain: %d ölçüm işlendi", len(last_batch))
+            # NATS connection drain — pending publish'ler flush
             await self._nc.drain()
 
 

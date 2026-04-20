@@ -51,6 +51,12 @@ services:
       retries: 5
 
   # ── NATS JetStream (Edge Bus) ──────────────────────────────────
+  # DEV: auth kapalı (config yok). PROD: nats-server.conf mount edilmeli.
+  # Prod geçişi için aşağıdaki 3 satırı yorumdan çıkar + scripts/gen_nats_keys.sh
+  # çalıştır:
+  #   command: ["-c", "/etc/nats/nats-server.conf", "-js", "-m", "8222"]
+  #   volumes: ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro + nats_data:/data
+  #   env_file: ./nats/.env
   nats:
     image: nats:2.10-alpine
     container_name: nizam-nats
