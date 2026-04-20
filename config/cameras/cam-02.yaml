@@ -1,0 +1,14 @@
+# NIZAM Kamera Kalibrasyon — cam-02 (2. kamera multi-sensor test için)
+
+sensor_id: cam-02
+description: "İkinci USB webcam — güney bakışı"
+
+# Konum (cam-01'den biraz ayrı)
+latitude: 39.9340
+longitude: 32.8610
+altitude_m: 900.0
+
+heading_deg: 180.0           # güneye bakıyor
+fov_h_deg: 60.0
+fov_v_deg: 40.0
+nominal_range_m: 250.0

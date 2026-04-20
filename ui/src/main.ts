@@ -3,6 +3,7 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import { TrackRenderer } from "./track_renderer";
 import { DeckOverlay } from "./deck_overlay";
 import { ViewshedPanel } from "./viewshed_panel";
+import { OperatorPanel } from "./operator_panel";
 
 // Cesium offline mode — Ion token boş bırakıldı, OSM base layer kullanılır.
 Ion.defaultAccessToken = "";
@@ -36,6 +37,14 @@ viewer.camera.flyTo({
 const renderer = new TrackRenderer(viewer);
 const deckOverlay = new DeckOverlay();
 const viewshed = new ViewshedPanel(viewer);
+const operatorPanel = new OperatorPanel(viewer, (trackId) => {
+  // ENGAGE onay → gateway'e POST
+  fetch("/api/approve_engage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ track_id: trackId }),
+  }).catch((e) => console.warn("approve failed:", e));
+});
 
 // Kamera hareketinde deck.gl sync et
 viewer.scene.postRender.addEventListener(() => {
@@ -73,12 +82,19 @@ function connect(): void {
       if (msg.type === "track") {
         renderer.upsert(msg.track);
         deckOverlay.update(msg.track);
+        operatorPanel.updateTrack(msg.track);
       } else if (msg.type === "snapshot") {
         renderer.replaceAll(msg.tracks);
-        (msg.tracks || []).forEach((t: any) => deckOverlay.update(t));
+        (msg.tracks || []).forEach((t: any) => {
+          deckOverlay.update(t);
+          operatorPanel.updateTrack(t);
+        });
       } else if (msg.type === "remove") {
         renderer.remove(msg.track_id);
         deckOverlay.remove(msg.track_id);
+        operatorPanel.removeTrack(msg.track_id);
+      } else if (msg.type === "decision") {
+        operatorPanel.updateDecision(msg.decision);
       }
     } catch {
       /* yoksay */

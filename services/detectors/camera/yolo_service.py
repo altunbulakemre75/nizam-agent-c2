@@ -167,8 +167,15 @@ def main() -> None:
     parser.add_argument("--source", default="0", help="Kamera indeksi veya video dosyası")
     parser.add_argument("--sensor-id", default="cam-01", help="Sensör kimliği")
     parser.add_argument("--nats", default="nats://localhost:4222", help="NATS URL")
-    parser.add_argument("--model", default="yolov8n.pt", help="YOLO model dosyası")
+    parser.add_argument(
+        "--model", default="yolov8n.pt",
+        help="YOLO model — .pt (PyTorch), .onnx (ONNX Runtime), .engine (TensorRT)",
+    )
     parser.add_argument("--metrics-port", type=int, default=8001, help="Prometheus port")
+    parser.add_argument(
+        "--device", default=None,
+        help="torch device — 'cpu', 'cuda:0', veya None (auto). TensorRT için cuda zorunlu.",
+    )
     args = parser.parse_args()
 
     start_http_server(args.metrics_port)
