@@ -33,11 +33,14 @@ _publish_total = Counter("nizam_bridge_cop_publish_total", "NATS'e yayınlanan m
 
 
 async def pull_cop_tracks(client: httpx.AsyncClient, cop_url: str) -> list[dict]:
-    """COP'un reads router'ından tüm aktif track'leri çek."""
+    """COP /api/tracks endpoint'inden aktif track listesini çek."""
     try:
-        r = await client.get(f"{cop_url}/api/reads", timeout=2.0)
+        r = await client.get(f"{cop_url}/api/tracks", timeout=2.0)
         r.raise_for_status()
         data = r.json()
+        # API ya {tracks:[...]} ya da düz list dönebilir
+        if isinstance(data, list):
+            return data
         return data.get("tracks", [])
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("COP poll hatası: %s", exc)

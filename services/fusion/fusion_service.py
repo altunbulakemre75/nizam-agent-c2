@@ -27,6 +27,8 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 from services.fusion.track_manager import TrackManager
 from services.schemas.track import Measurement, SensorType
+from shared.geo import enu_to_latlon as _geo_enu_to_latlon
+from shared.geo import latlon_to_enu as _geo_latlon_to_enu
 
 if TYPE_CHECKING:
     import nats
@@ -34,10 +36,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Default sensor → origin ENU reference point (Ankara).
-# Production: her sensör kendi lat/lon+heading'ini kayıt eder.
 DEFAULT_REF = (39.9334, 32.8597)
-_EARTH_R = 6378137.0
 
 _meas_total = Counter(
     "nizam_fusion_measurements_total",
@@ -49,18 +48,18 @@ _tick_ms = Histogram("nizam_fusion_tick_ms", "Tick süresi (ms)", buckets=[1, 5,
 
 
 def latlon_to_enu(lat: float, lon: float, ref_lat: float, ref_lon: float) -> tuple[float, float]:
-    """Küçük sahada (~10 km) düz-Earth lat/lon → ENU (east, north metre)."""
-    d_lat = math.radians(lat - ref_lat)
-    d_lon = math.radians(lon - ref_lon)
-    east = d_lon * _EARTH_R * math.cos(math.radians(ref_lat))
-    north = d_lat * _EARTH_R
-    return east, north
+    """Lat/lon → ENU (east, north metre).
+
+    pyproj varsa tam küresel geometri; yoksa düz-Earth fallback. shared.geo
+    her iki yolu da yönetir — fusion service bu detayı bilmek zorunda değil.
+    """
+    e, n, _ = _geo_latlon_to_enu(lat, lon, ref_lat, ref_lon)
+    return e, n
 
 
 def enu_to_latlon(east: float, north: float, ref_lat: float, ref_lon: float) -> tuple[float, float]:
-    d_lat = math.degrees(north / _EARTH_R)
-    d_lon = math.degrees(east / (_EARTH_R * math.cos(math.radians(ref_lat))))
-    return ref_lat + d_lat, ref_lon + d_lon
+    lat, lon, _ = _geo_enu_to_latlon(east, north, ref_lat, ref_lon)
+    return lat, lon
 
 
 def odid_to_measurement(msg: dict, ref_lat: float, ref_lon: float) -> Measurement | None:
@@ -201,8 +200,8 @@ class FusionService:
         await self._queue.put(meas)
         _meas_total.labels(sensor_type=meas.sensor_type.value).inc()
 
-    async def _tick_loop(self) -> None:
-        while True:
+    async def _tick_loop(self, shutdown: asyncio.Event) -> None:
+        while not shutdown.is_set():
             t0 = time.monotonic()
             batch: list[Measurement] = []
             while not self._queue.empty():
@@ -213,7 +212,6 @@ class FusionService:
 
             if self._nc is not None:
                 for track in tracks:
-                    # ENU → lat/lon dönüşümü payload'a eklenir
                     lat, lon = enu_to_latlon(track.x, track.y, self.ref_lat, self.ref_lon)
                     payload = track.model_dump()
                     payload["latitude"] = lat
@@ -225,11 +223,15 @@ class FusionService:
 
             dt_ms = (time.monotonic() - t0) * 1000.0
             _tick_ms.observe(dt_ms)
-            await asyncio.sleep(self.tick_dt)
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=self.tick_dt)
+            except asyncio.TimeoutError:
+                continue
 
-    async def run(self) -> None:
+    async def run(self, shutdown: asyncio.Event | None = None) -> None:
         import nats
 
+        shutdown = shutdown or asyncio.Event()
         self._nc = await nats.connect(self.nats_url)
 
         async def odid_cb(msg):
@@ -245,7 +247,12 @@ class FusionService:
         await self._nc.subscribe("nizam.raw.camera.>", cb=camera_cb)
         await self._nc.subscribe("nizam.raw.sim.cop", cb=sim_cop_cb)
         log.info("Fusion service listening on NATS %s", self.nats_url)
-        await self._tick_loop()
+
+        try:
+            await self._tick_loop(shutdown)
+        finally:
+            log.info("Fusion service shutting down...")
+            await self._nc.drain()
 
 
 def main() -> None:
@@ -257,11 +264,13 @@ def main() -> None:
     parser.add_argument("--metrics-port", type=int, default=8003)
     args = parser.parse_args()
 
+    from shared.lifecycle import run_with_shutdown
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     start_http_server(args.metrics_port)
 
     service = FusionService(args.nats, args.ref_lat, args.ref_lon, args.tick_dt)
-    asyncio.run(service.run())
+    asyncio.run(run_with_shutdown(service.run))
 
 
 if __name__ == "__main__":

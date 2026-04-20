@@ -1,6 +1,8 @@
 import { Ion, Viewer, Cartesian3, Math as CesiumMath, Color } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import { TrackRenderer } from "./track_renderer";
+import { DeckOverlay } from "./deck_overlay";
+import { ViewshedPanel } from "./viewshed_panel";
 
 // Cesium offline mode — Ion token boş bırakıldı, OSM base layer kullanılır.
 Ion.defaultAccessToken = "";
@@ -30,7 +32,23 @@ viewer.camera.flyTo({
   duration: 0,
 });
 
+// Render katmanları
 const renderer = new TrackRenderer(viewer);
+const deckOverlay = new DeckOverlay();
+const viewshed = new ViewshedPanel(viewer);
+
+// Kamera hareketinde deck.gl sync et
+viewer.scene.postRender.addEventListener(() => {
+  const camera = viewer.camera;
+  const pos = camera.positionCartographic;
+  deckOverlay.syncView(
+    CesiumMath.toDegrees(pos.longitude),
+    CesiumMath.toDegrees(pos.latitude),
+    Math.max(1, 18 - Math.log2(Math.max(pos.height, 1))),
+    CesiumMath.toDegrees(camera.pitch) + 90,
+    CesiumMath.toDegrees(camera.heading),
+  );
+});
 
 // WebSocket — tracks
 const statusEl = document.getElementById("status")!;
@@ -54,10 +72,13 @@ function connect(): void {
       const msg = JSON.parse(ev.data);
       if (msg.type === "track") {
         renderer.upsert(msg.track);
+        deckOverlay.update(msg.track);
       } else if (msg.type === "snapshot") {
         renderer.replaceAll(msg.tracks);
+        (msg.tracks || []).forEach((t: any) => deckOverlay.update(t));
       } else if (msg.type === "remove") {
         renderer.remove(msg.track_id);
+        deckOverlay.remove(msg.track_id);
       }
     } catch {
       /* yoksay */
@@ -66,3 +87,15 @@ function connect(): void {
 }
 
 connect();
+
+// Demo: Ankara merkezde örnek bir sensör kapsama alanı (viewshed panel UI'ından
+// etkileşimli olarak sensor eklenebilir)
+viewshed.addSensor({
+  id: "cam-01",
+  latitude: 39.9334,
+  longitude: 32.8597,
+  altitude_m: 900,
+  heading_deg: 0,
+  fov_h_deg: 60,
+  range_m: 5000,
+});

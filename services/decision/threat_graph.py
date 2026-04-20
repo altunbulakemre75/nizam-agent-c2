@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from services.decision.guardrails import FriendlyZone, apply_guardrails
 from services.decision.roe import evaluate_roe
 from services.decision.rules import assess_threat
 from services.decision.schemas import (
@@ -28,8 +29,19 @@ def decide(
     roe_rules: list[ROERule],
     inside_protected_zone: bool = False,
     heading_toward_zone: bool = False,
+    friendly_zones: list[FriendlyZone] | None = None,
+    apply_guards: bool = False,
 ) -> tuple[ThreatAssessment, Decision]:
-    """Tek track için tehdit değerlendir + ROE uygula → Decision."""
+    """Tek track için tehdit değerlendir + ROE uygula → Decision.
+
+    Akış:
+        1. Rule engine skoru üretir (ThreatAssessment)
+        2. ROE action atar
+        3. (apply_guards=True ise) Guardrail'ler son aksiyon üstünde downgrade uygular
+
+    Not: llm_graph.run_graph() zaten guardrails çağırır; bu fonksiyon izole
+    rule-engine path için. Production full-pipeline için run_graph kullan.
+    """
     assessment = assess_threat(
         track,
         inside_protected_zone=inside_protected_zone,
@@ -59,4 +71,8 @@ def decide(
         requires_operator_approval=approval,
         timestamp_iso=datetime.now(timezone.utc).isoformat(),
     )
+
+    if apply_guards:
+        decision = apply_guardrails(decision, track, friendly_zones=friendly_zones)
+
     return assessment, decision

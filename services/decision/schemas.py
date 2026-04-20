@@ -61,6 +61,12 @@ class Decision(BaseModel):
     requires_operator_approval: bool = True  # ENGAGE için varsayılan True
     timestamp_iso: str
 
+    # Audit trail — LLM output'u kısaltılmadan sakla
+    llm_raw_response: dict | None = None      # Claude tool_use input (ham)
+    llm_provider: str | None = None           # "anthropic" | "ollama"
+    llm_model: str | None = None              # model adı
+    guardrails_triggered: list[str] = Field(default_factory=list)
+
 
 class ROERule(BaseModel):
     """Tek bir ROE (Rules of Engagement) kuralı."""

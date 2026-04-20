@@ -1,0 +1,15 @@
+# Dost bölgeler — örnek. Üretimde komuta tarafından düzenlenir.
+# Bu bölgelerdeki track'ler için guardrails ENGAGE/HANDOFF'u ALERT'e düşürür.
+
+zones:
+  - zone_id: NIZAM-OP-01
+    name: NIZAM operatör merkezi
+    center_lat: 39.9334
+    center_lon: 32.8597
+    radius_m: 500
+
+  - zone_id: NIZAM-DRONE-LANDING
+    name: Kendi intercept drone iniş sahası
+    center_lat: 39.9400
+    center_lon: 32.8650
+    radius_m: 200
