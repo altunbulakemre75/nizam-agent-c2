@@ -1,6 +1,12 @@
 # Vendor repos (89 reference repos, ~3GB — local only, use clone_vendors.sh)
 vendor/
 
+# mTLS cert'leri — asla git'e girmesin
+infra/certs/
+*.key
+*.p12
+*.pem
+
 # Python
 __pycache__/
 *.pyc

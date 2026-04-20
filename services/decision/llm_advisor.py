@@ -47,27 +47,92 @@ def is_llm_enabled() -> bool:
 async def query_llm_advisor(
     track: dict, assessment: ThreatAssessment
 ) -> LLMDecisionDict | None:
-    """Claude API (veya Ollama fallback) ile tehdit danışman sorgusu.
+    """Claude API ile tehdit danışman sorgusu — structured output.
 
-    Henüz paketler yoksa None döner — rule engine tek başına karar verir.
+    Anthropic kurulu değilse None döner.
+    ROE RAG entegrasyonu: varsa doktrin bağlamı prompt'a eklenir.
     """
     if not is_llm_enabled():
         return None
     try:
-        import anthropic  # noqa: F401, PLC0415
+        from anthropic import AsyncAnthropic  # noqa: PLC0415
     except ImportError:
         log.warning("anthropic paketi yok — LLM advisor atlanıyor")
         return None
 
-    # TODO: gerçek LangGraph state machine entegrasyonu (Faz 6 tam).
-    # Şu an placeholder — rule engine'in verdiği seviyeyi aynen onaylar.
-    return LLMDecisionDict(
-        threat_level=assessment.threat_level.value,
-        action=Action.LOG.value,
-        confidence=0.5,
-        reasoning="LLM advisor placeholder — gerçek entegrasyon Faz 6 tam sürümünde.",
-        roe_reference="",
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        log.warning("ANTHROPIC_API_KEY set değil — LLM advisor atlanıyor")
+        return None
+
+    # Opsiyonel: ROE RAG bağlamı
+    roe_context = ""
+    try:
+        from services.knowledge.roe_rag import ROERAG  # noqa: PLC0415
+
+        rag = ROERAG()
+        roe_results = rag.query(
+            f"threat level {assessment.threat_level.value} "
+            f"{'inside zone' if assessment.inside_protected_zone else 'outside zone'}"
+        )
+        if roe_results:
+            roe_context = "\n\nRelevant doctrine:\n" + "\n".join(
+                f"- [{r.rule_id or r.source}] {r.excerpt}" for r in roe_results[:2]
+            )
+    except Exception as exc:
+        log.debug("ROE RAG sorgusu başarısız: %s", exc)
+
+    # Structured output — Claude tool use
+    tools = [{
+        "name": "submit_assessment",
+        "description": "Submit threat assessment with ROE-compliant action recommendation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "threat_level": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+                "action": {"type": "string", "enum": ["log", "alert", "handoff"]},  # ENGAGE YASAK
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "reasoning": {"type": "string", "maxLength": 300},
+                "roe_reference": {"type": "string"},
+            },
+            "required": ["threat_level", "action", "confidence", "reasoning"],
+        },
+    }]
+
+    prompt = (
+        f"Counter-UAS track assessment.\n"
+        f"Track: id={track.get('track_id')} conf={track.get('confidence', 0):.2f}\n"
+        f"Position: x={track.get('x', 0):.0f} y={track.get('y', 0):.0f} z={track.get('z', 0):.0f}\n"
+        f"Velocity: vx={track.get('vx', 0):.1f} vy={track.get('vy', 0):.1f}\n"
+        f"Sources: {track.get('sources', [])}\n"
+        f"UAS ID: {track.get('uas_id') or 'unknown'}\n\n"
+        f"Rule engine pre-assessment:\n"
+        f"  threat_level={assessment.threat_level.value}\n"
+        f"  score={assessment.score:.2f}\n"
+        f"  reasoning={assessment.reasoning}\n"
+        f"{roe_context}\n\n"
+        "You are an advisor, not the decision maker. Submit your independent "
+        "assessment via submit_assessment tool. NEVER recommend ENGAGE — only "
+        "LOG, ALERT, or HANDOFF. Operators and rule engine control ENGAGE."
     )
+
+    client = AsyncAnthropic(api_key=api_key)
+    try:
+        msg = await client.messages.create(
+            model=os.getenv("NIZAM_LLM_MODEL", "claude-sonnet-4-6"),
+            max_tokens=512,
+            tools=tools,
+            tool_choice={"type": "tool", "name": "submit_assessment"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as exc:
+        log.warning("Claude API çağrısı başarısız: %s", exc)
+        return None
+
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "submit_assessment":
+            return LLMDecisionDict(**block.input)
+    return None
 
 
 def reconcile(rule_decision: Decision, llm_hint: LLMDecisionDict | None) -> Decision:

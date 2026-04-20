@@ -1,0 +1,51 @@
+groups:
+  - name: nizam-slo
+    interval: 30s
+    rules:
+      # Faz 1 — kamera
+      - alert: NizamCameraFpsLow
+        expr: nizam_camera_fps < 5
+        for: 1m
+        labels: {severity: warning, service: camera}
+        annotations:
+          summary: "Kamera FPS düşük ({{ $labels.sensor_id }})"
+          description: "Son 1 dakika ortalama FPS < 5 — GPU/CPU yetersiz olabilir."
+
+      - alert: NizamCameraInferenceSlow
+        expr: histogram_quantile(0.95, sum(rate(nizam_camera_inference_ms_bucket[5m])) by (le)) > 500
+        for: 5m
+        labels: {severity: warning, service: camera}
+        annotations:
+          summary: "YOLO p95 inference > 500ms"
+
+      # Faz 3 — füzyon
+      - alert: NizamFusionNoTracks
+        expr: nizam_fusion_active_tracks == 0 and rate(nizam_fusion_measurements_total[5m]) > 1
+        for: 5m
+        labels: {severity: warning, service: fusion}
+        annotations:
+          summary: "Ölçüm var ama track oluşmuyor — association broken?"
+
+      - alert: NizamFusionTickSlow
+        expr: histogram_quantile(0.95, sum(rate(nizam_fusion_tick_ms_bucket[5m])) by (le)) > 100
+        for: 5m
+        labels: {severity: critical, service: fusion}
+        annotations:
+          summary: "Füzyon tick p95 > 100ms (SLO: 100ms)"
+
+      # Faz 4 — gateway
+      - alert: NizamGatewayNoClients
+        expr: nizam_gw_ws_clients == 0
+        for: 10m
+        labels: {severity: info, service: gateway}
+        annotations:
+          summary: "WebSocket gateway'e hiç istemci bağlı değil (10dk+)"
+
+      # Faz 5 — TAK
+      - alert: NizamNoDetectionsAnywhere
+        expr: rate(nizam_camera_detections_total[5m]) == 0
+              and rate(nizam_rf_odid_messages_total[5m]) == 0
+        for: 5m
+        labels: {severity: warning, service: multi}
+        annotations:
+          summary: "Hiçbir sensörden 5dk boyunca tespit gelmedi"

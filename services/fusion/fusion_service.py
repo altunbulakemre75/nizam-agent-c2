@@ -84,29 +84,53 @@ def odid_to_measurement(msg: dict, ref_lat: float, ref_lon: float) -> Measuremen
 
 def camera_to_measurements(
     msg: dict, ref_lat: float, ref_lon: float,
-    sensor_lat: float, sensor_lon: float,
+    sensor_lat: float | None = None, sensor_lon: float | None = None,
     bearing_deg: float = 0.0,
 ) -> list[Measurement]:
     """Kamera tespitlerini ölçümlere çevir.
 
-    Basitleştirme: bbox merkezinden bearing + nominal range ile ENU konumu
-    türetilir. Üretimde her kameranın kalibrasyonu gerekli (intrinsics +
-    extrinsics + DEM). Bu dev-placeholder.
+    Kalibrasyon dosyası varsa (`config/cameras/{sensor_id}.yaml`) bbox
+    → lat/lon projeksiyonu yapılır. Yoksa sabit nominal range fallback.
     """
+    from services.detectors.camera.calibration import (
+        load_calibration, project_bbox_to_position,
+    )
+
     measurements: list[Measurement] = []
-    sensor_e, sensor_n = latlon_to_enu(sensor_lat, sensor_lon, ref_lat, ref_lon)
+    sensor_id = msg["sensor_id"]
+    frame_w = int(msg.get("frame_width", 640))
+    frame_h = int(msg.get("frame_height", 480))
+
+    calib = load_calibration(sensor_id)
+
     for det in msg.get("detections", []):
-        nominal_range_m = 250.0  # camera'dan ~250m'de drone varsayımı
-        bearing_rad = math.radians(bearing_deg)
-        x = sensor_e + nominal_range_m * math.sin(bearing_rad)
-        y = sensor_n + nominal_range_m * math.cos(bearing_rad)
+        bbox = det.get("bbox", {})
+        try:
+            lat, lon, alt = project_bbox_to_position(
+                float(bbox["x1"]), float(bbox["y1"]),
+                float(bbox["x2"]), float(bbox["y2"]),
+                frame_w, frame_h, calib,
+            )
+            e, n = latlon_to_enu(lat, lon, ref_lat, ref_lon)
+            z = alt
+        except (KeyError, TypeError, ValueError):
+            # Fallback: sabit nominal range ekseninde
+            sensor_e, sensor_n = latlon_to_enu(
+                sensor_lat or calib.latitude, sensor_lon or calib.longitude,
+                ref_lat, ref_lon,
+            )
+            bearing_rad = math.radians(bearing_deg)
+            e = sensor_e + calib.nominal_range_m * math.sin(bearing_rad)
+            n = sensor_n + calib.nominal_range_m * math.cos(bearing_rad)
+            z = calib.altitude_m
+
         measurements.append(
             Measurement(
-                sensor_id=msg["sensor_id"],
+                sensor_id=sensor_id,
                 sensor_type=SensorType.CAMERA,
                 timestamp_iso=msg["timestamp_iso"],
-                x=x, y=y, z=100.0,
-                sigma_x=30.0, sigma_y=30.0, sigma_z=50.0,  # kamera menzil belirsiz
+                x=e, y=n, z=z,
+                sigma_x=30.0, sigma_y=30.0, sigma_z=50.0,
                 class_name=det.get("class_name"),
                 class_conf=det.get("conf"),
             )
@@ -155,6 +179,28 @@ class FusionService:
             await self._queue.put(meas)
             _meas_total.labels(sensor_type=meas.sensor_type.value).inc()
 
+    async def _on_sim_cop(self, raw: bytes) -> None:
+        """COP simulator bridge'den gelen track'ler. Direkt lat/lon taşır."""
+        try:
+            msg = json.loads(raw.decode())
+        except json.JSONDecodeError:
+            return
+        e, n = latlon_to_enu(
+            float(msg["latitude"]), float(msg["longitude"]),
+            self.ref_lat, self.ref_lon,
+        )
+        meas = Measurement(
+            sensor_id=msg.get("sensor_id", "cop-sim"),
+            sensor_type=SensorType.RADAR,
+            timestamp_iso=msg["timestamp_iso"],
+            x=e, y=n, z=float(msg.get("altitude", 100.0)),
+            sigma_x=5.0, sigma_y=5.0, sigma_z=10.0,
+            class_name=msg.get("class_name"),
+            class_conf=float(msg.get("confidence", 0.7)),
+        )
+        await self._queue.put(meas)
+        _meas_total.labels(sensor_type=meas.sensor_type.value).inc()
+
     async def _tick_loop(self) -> None:
         while True:
             t0 = time.monotonic()
@@ -192,8 +238,12 @@ class FusionService:
         async def camera_cb(msg):
             await self._on_camera(msg.data)
 
+        async def sim_cop_cb(msg):
+            await self._on_sim_cop(msg.data)
+
         await self._nc.subscribe("nizam.raw.rf.odid.>", cb=odid_cb)
         await self._nc.subscribe("nizam.raw.camera.>", cb=camera_cb)
+        await self._nc.subscribe("nizam.raw.sim.cop", cb=sim_cop_cb)
         log.info("Fusion service listening on NATS %s", self.nats_url)
         await self._tick_loop()
 

@@ -1,0 +1,25 @@
+# NIZAM Kamera Kalibrasyon — Örnek (cam-01)
+# Her kurulumda gerçek GPS + pusula ile güncelle.
+
+sensor_id: cam-01
+description: "Demo laptop webcam (Ankara default)"
+
+# Konum (WGS84)
+latitude: 39.9334
+longitude: 32.8597
+altitude_m: 900.0            # deniz seviyesinden metre
+
+# Yönelim
+heading_deg: 0.0             # true north clockwise (0=N, 90=E, 180=S)
+
+# Görüş alanı (laptop webcam tipik değerler)
+fov_h_deg: 60.0
+fov_v_deg: 40.0
+
+# Nominal hedef menzili (DEM/stereo yoksa fallback)
+nominal_range_m: 250.0
+
+# OpenCV kalibrasyonu (opsiyonel — chessboard ile ölç)
+# focal_length_px: 800.0
+# principal_cx: 320.0
+# principal_cy: 240.0

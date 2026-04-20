@@ -1,0 +1,53 @@
+# NIZAM Counter-UAS v2 Servisleri — Multi-service Dockerfile
+# Her servis aynı image'dan farklı CMD ile çalışır (mikroservis pattern).
+#
+# Build:
+#   docker build -f Dockerfile.services -t nizam/services:latest .
+# Run (örnek):
+#   docker run --network host nizam/services:latest \
+#     python -m services.fusion.fusion_service --nats nats://localhost:6222
+
+FROM python:3.11-slim AS builder
+WORKDIR /build
+
+COPY requirements.txt .
+# CPU-only torch (ultralytics için) — CUDA pulled gerekmiyor
+RUN pip install --no-cache-dir --prefix=/install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.2.2
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+FROM python:3.11-slim AS runtime
+
+# Non-root user
+RUN useradd -m -u 1001 nizam
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+
+# Application code — sadece services + shared + ai (ortak lib)
+COPY services /app/services
+COPY shared /app/shared
+COPY ai /app/ai
+COPY replay /app/replay
+COPY config /app/config
+
+# Fusion ve diğer servislerin modelleri
+RUN mkdir -p /app/ai/models
+
+USER nizam
+
+# Sağlık kontrolü — her servis Prometheus /metrics expose eder
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request, sys; \
+    port=${METRICS_PORT:-8001}; \
+    urllib.request.urlopen(f'http://localhost:{port}/metrics', timeout=3)" \
+  || exit 1
+
+# Default: fusion (override with docker run ... CMD)
+ENV METRICS_PORT=8003
+EXPOSE 8001 8002 8003 8004 8005 8200
+
+CMD ["python", "-m", "services.fusion.fusion_service", "--nats", "nats://nats:4222"]

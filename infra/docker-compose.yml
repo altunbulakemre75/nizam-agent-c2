@@ -119,6 +119,19 @@ services:
     networks:
       - nizam
 
+  # ── NATS Prometheus Exporter ──────────────────────────────────
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    container_name: nizam-nats-exporter
+    restart: unless-stopped
+    command: ["-varz", "-jsz=all", "-connz", "-subz", "http://nats:8222"]
+    ports:
+      - "7777:7777"
+    depends_on:
+      - nats
+    networks:
+      - nizam
+
   # ── Prometheus ─────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:latest
@@ -133,6 +146,7 @@ services:
       - "11090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     networks:
       - nizam
@@ -147,6 +161,20 @@ services:
       - "5100:3100"
     volumes:
       - loki_data:/loki
+    networks:
+      - nizam
+
+  # ── Promtail (Docker log → Loki) ──────────────────────────────
+  promtail:
+    image: grafana/promtail:latest
+    container_name: nizam-promtail
+    restart: unless-stopped
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
     networks:
       - nizam
 
@@ -191,13 +219,15 @@ services:
       - nizam
 
   # ── FreeTAKServer (ATAK mesh için CoT sunucusu) ───────────────
-  # NOT: Resmi FTS image public registry'de yok — pilot öncesi kendi build.
-  # Dev için şimdilik devre dışı (profiles ile gizlendi).
+  # Self-build: `docker compose --profile tak build freetakserver`
+  # Başlat: `docker compose --profile tak up -d`
   freetakserver:
-    image: fts.civtak.org/freetakteam/freetakserver:latest
+    build:
+      context: ./freetakserver
+      dockerfile: Dockerfile
     container_name: nizam-fts
     restart: unless-stopped
-    profiles: ["tak"]    # `docker compose --profile tak up -d` ile başlatılır
+    profiles: ["tak"]
     ports:
       - "8087:8087"   # CoT TCP (plaintext dev)
       - "8089:8089"   # CoT TLS (prod için)
