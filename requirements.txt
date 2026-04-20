@@ -59,6 +59,9 @@ nats-py>=2.6.0,<3.0.0
 # Faz 3 — Füzyon
 filterpy>=1.4.5,<2.0.0
 scipy>=1.11.0
+# pyproj — opsiyonel. Yoksa shared/geo.py düz-Earth fallback'e düşer
+# (multi-site veya >20km saha varsa kurmak önerilir).
+pyproj>=3.6.0
 
 # Faz 5 — CoT/TAK
 pytak>=6.0.0

@@ -66,6 +66,7 @@ class Decision(BaseModel):
     llm_provider: str | None = None           # "anthropic" | "ollama"
     llm_model: str | None = None              # model adı
     guardrails_triggered: list[str] = Field(default_factory=list)
+    guardrail_reasoning: str = ""             # guardrail açıklamaları (reasoning'e kırpılmaz)
 
 
 class ROERule(BaseModel):

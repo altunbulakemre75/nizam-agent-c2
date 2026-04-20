@@ -196,14 +196,14 @@ def apply_guardrails(
     if not triggered_ids:
         return decision
 
-    new_reasoning = f"{decision.reasoning} | guardrails: {'; '.join(reasons)}"
+    # Guardrail açıklamaları ayrı field'da — ana reasoning kırpılmadan korunur
     log.info("guardrails triggered: %s → action %s → %s",
              triggered_ids, decision.action.value, final_action.value)
 
     return decision.model_copy(update={
         "action": final_action,
-        "reasoning": new_reasoning[:500],
         "guardrails_triggered": triggered_ids,
+        "guardrail_reasoning": "; ".join(reasons),   # tam metin, kırpma yok
         "requires_operator_approval":
             decision.requires_operator_approval or final_action == Action.ENGAGE,
     })

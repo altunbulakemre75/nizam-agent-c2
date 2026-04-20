@@ -13,7 +13,7 @@ _EARTH_R_M = 6378137.0
 
 
 try:
-    from pyproj import Proj, Transformer, CRS  # noqa: PLC0415
+    from pyproj import Transformer, CRS   # noqa: PLC0415
     _HAS_PYPROJ = True
 except ImportError:
     _HAS_PYPROJ = False
@@ -21,16 +21,23 @@ except ImportError:
 
 @lru_cache(maxsize=32)
 def _enu_transformer(ref_lat: float, ref_lon: float, ref_alt: float = 0.0):
-    """pyproj ENU transformer — referans noktası etrafında lokal kart."""
+    """pyproj local-tangent-plane transformer.
+
+    `+proj=ortho` orthographic projection: küçük sahada (~100 km yarıçap)
+    east/north'a eşdeğer, proj 7+ ile evrensel destek. +proj=topocentric
+    proj 9.x'te var ama tüm sistemlerde mevcut değil; ortho taşınabilir.
+    """
+    # ref_alt şu anki ortho projeksiyonunda kullanılmıyor; alt farkı
+    # u = alt - ref_alt ile düz çıkartılıyor. (topocentric proj 9.x
+    # geldiğinde buraya inline edilecek.)
+    del ref_alt
     if not _HAS_PYPROJ:
         return None
-    # WGS84 → local topocentric ENU (proj 6.3+ destekler)
-    local_enu = CRS.from_proj4(
-        f"+proj=topocentric +lat_0={ref_lat} +lon_0={ref_lon} +h_0={ref_alt} "
-        f"+ellps=WGS84 +units=m"
+    local = CRS.from_proj4(
+        f"+proj=ortho +lat_0={ref_lat} +lon_0={ref_lon} +ellps=WGS84 +units=m"
     )
     wgs84 = CRS.from_epsg(4326)
-    return Transformer.from_crs(wgs84, local_enu, always_xy=True)
+    return Transformer.from_crs(wgs84, local, always_xy=True)
 
 
 def latlon_to_enu(
@@ -44,8 +51,8 @@ def latlon_to_enu(
     transformer = _enu_transformer(ref_lat, ref_lon, ref_alt)
     if transformer is not None:
         try:
-            e, n, u = transformer.transform(lon, lat, alt)
-            return float(e), float(n), float(u)
+            e, n = transformer.transform(lon, lat)
+            return float(e), float(n), alt - ref_alt
         except Exception:
             pass   # düz-Earth fallback
 
@@ -65,9 +72,8 @@ def enu_to_latlon(
     transformer = _enu_transformer(ref_lat, ref_lon, ref_alt)
     if transformer is not None:
         try:
-            inv = Transformer.from_crs(transformer.target_crs, transformer.source_crs, always_xy=True)
-            lon, lat, alt = inv.transform(east, north, up)
-            return float(lat), float(lon), float(alt)
+            lon, lat = transformer.transform(east, north, direction="INVERSE")
+            return float(lat), float(lon), up + ref_alt
         except Exception:
             pass
 

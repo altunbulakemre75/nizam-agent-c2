@@ -1,12 +1,15 @@
 /**
- * Sensor coverage / viewshed analysis paneli.
+ * SensorCoveragePanel — FOV sektör polygon renderer (saf Cesium).
  *
- * Her sensör için bir pasta dilimi (yatay FOV + range) çizer; Cesium
- * scene.primitives'e eklenmiş Entity olarak görünür. DEM yüksek doğruluk
- * gerektirdiğinde maptalks.analysis.ViewshedAnalysis ile değiştirilebilir
- * — ama browser-side DEM raster gerekir.
+ * ŞU ANKİ DURUM (dürüst):
+ *   Düz-Earth sektör polygon. DEM kullanmıyor. "Drone bu yönde, bu kadar
+ *   uzakta gözükebilir" diyen konik bir alan. Gerçek line-of-sight analizi
+ *   (arazi engelleri, binalar) YAPMAZ.
  *
- * Bu MVP sürümü: düz-Earth sektör + opak renkli polygon.
+ * GELECEK (planlanmış, yapılmamış):
+ *   maptalks.analysis.ViewshedAnalysis (ui/package.json optionalDependencies)
+ *   + DEM raster (örn. OpenTopography SRTM). Bu modülün export adı
+ *   değişmeden implementasyon DEM-aware'e terfi edebilir.
  */
 import type { Viewer } from "cesium";
 import {

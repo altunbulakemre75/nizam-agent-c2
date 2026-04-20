@@ -115,12 +115,15 @@ def test_apply_guardrails_no_upgrade():
     assert result.action == Action.LOG
 
 
-def test_apply_guardrails_preserves_reasoning_and_appends():
+def test_apply_guardrails_preserves_reasoning_separate_field():
+    """Guardrail açıklaması ayrı field — reasoning dokunulmaz."""
     engage = _decision(Action.ENGAGE)
     track = {"confidence": 0.03, "hits": 1, "latitude": 39.9, "longitude": 32.8}
     result = apply_guardrails(engage, track)
-    assert "guardrails:" in result.reasoning
-    assert "rule says X" in result.reasoning  # orijinal korundu
+    # Orijinal reasoning aynen korundu, kırpma yok
+    assert result.reasoning == "rule says X"
+    # Guardrail açıklaması guardrail_reasoning field'ında
+    assert result.guardrail_reasoning
 
 
 def test_apply_guardrails_civilian_pattern_downgrades_engage():

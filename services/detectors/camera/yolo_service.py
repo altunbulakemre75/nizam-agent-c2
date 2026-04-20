@@ -94,16 +94,20 @@ async def publish_event(nc: "nats.aio.client.Client", event: CameraDetectionEven
 
 # ── Ana servis döngüsü ────────────────────────────────────────────
 
-async def run(sensor_id: str, source: str | int, nats_url: str, model_name: str) -> None:
+async def run(
+    sensor_id: str, source: str | int, nats_url: str, model_name: str,
+    shutdown: asyncio.Event | None = None,
+) -> None:
     """Ana döngü — OpenCV ile frame yakala, YOLO ile tespit et, NATS'e yayınla.
 
-    Windows'ta YOLO.track(source=0) takılıyor; OpenCV DSHOW backend daha stabil.
+    shutdown event'i set olduğunda döngü biter, kamera + NATS temiz kapanır.
     """
     import logging as _lg
     import cv2
     import nats
     from ultralytics import YOLO
 
+    shutdown = shutdown or asyncio.Event()
     log_local = _lg.getLogger(__name__)
     _lg.basicConfig(level=_lg.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -125,7 +129,7 @@ async def run(sensor_id: str, source: str | int, nats_url: str, model_name: str)
     fps_ts = time.monotonic()
     fps_count = 0
     try:
-        while True:
+        while not shutdown.is_set():
             ok, frame = cap.read()
             if not ok:
                 await asyncio.sleep(0.01)
@@ -151,11 +155,14 @@ async def run(sensor_id: str, source: str | int, nats_url: str, model_name: str)
                 fps_ts = time.monotonic()
             await asyncio.sleep(0)  # event loop'a nefes ver
     finally:
+        log_local.info("YOLO kapatılıyor... (frame=%d)", frame_id)
         cap.release()
         await nc.drain()
 
 
 def main() -> None:
+    from shared.lifecycle import run_with_shutdown
+
     parser = argparse.ArgumentParser(description="NIZAM YOLO Kamera Servisi")
     parser.add_argument("--source", default="0", help="Kamera indeksi veya video dosyası")
     parser.add_argument("--sensor-id", default="cam-01", help="Sensör kimliği")
@@ -165,7 +172,11 @@ def main() -> None:
     args = parser.parse_args()
 
     start_http_server(args.metrics_port)
-    asyncio.run(run(args.sensor_id, args.source, args.nats, args.model))
+
+    async def _worker(shutdown):
+        await run(args.sensor_id, args.source, args.nats, args.model, shutdown)
+
+    asyncio.run(run_with_shutdown(_worker))
 
 
 if __name__ == "__main__":

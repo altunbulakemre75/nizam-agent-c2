@@ -1,15 +1,19 @@
-"""Karar state machine — rule engine + (opsiyonel) LLM advisor.
+"""Karar katmanı entry-point'leri.
 
-Akış:
-    Track → assess_threat()  → ThreatAssessment
-          → evaluate_roe()   → Action + matched rule
-          → Decision (operatör onayı gerekiyorsa requires_operator_approval=True)
+Tek production path: ``llm_graph.run_graph()`` — async, 5-node pipeline
+(rule → RAG → LLM → guardrail → checkpoint). Bu modül iki shim sağlar:
 
-LangGraph entegrasyonu opsiyonel; deterministic path bu dosyadadır ve
-her zaman son söz sahibidir.
+  - ``decide(track, rules, ...)`` — sync, RULE-ONLY fast path (LLM kapalı).
+    Test ve CLI çağrıları için. ``apply_guards=True`` ile guardrails de
+    ekleyebilir ama LLM advisor çalıştırmaz.
+
+  - ``decide_full(track, rules, ...)`` — sync wrapper over ``run_graph``.
+    Full production pipeline (LLM + RAG + guardrail + checkpoint).
+    Event loop'un içindeysen doğrudan ``await run_graph()`` çağır.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from services.decision.guardrails import FriendlyZone, apply_guardrails
@@ -32,15 +36,10 @@ def decide(
     friendly_zones: list[FriendlyZone] | None = None,
     apply_guards: bool = False,
 ) -> tuple[ThreatAssessment, Decision]:
-    """Tek track için tehdit değerlendir + ROE uygula → Decision.
+    """Sync rule-only karar — LLM advisor ÇALIŞTIRMAZ.
 
-    Akış:
-        1. Rule engine skoru üretir (ThreatAssessment)
-        2. ROE action atar
-        3. (apply_guards=True ise) Guardrail'ler son aksiyon üstünde downgrade uygular
-
-    Not: llm_graph.run_graph() zaten guardrails çağırır; bu fonksiyon izole
-    rule-engine path için. Production full-pipeline için run_graph kullan.
+    Full production pipeline için ``decide_full()`` veya
+    ``await llm_graph.run_graph()``.
     """
     assessment = assess_threat(
         track,
@@ -56,9 +55,8 @@ def decide(
         approval = False
         rule_ref = None
 
-    # ENGAGE her durumda operatör onayı gerekli — override override'ı yok
     if action == Action.ENGAGE:
-        approval = True
+        approval = True  # safety hardening — kural yazarı unutsa bile
 
     decision = Decision(
         track_id=track["track_id"],
@@ -76,3 +74,25 @@ def decide(
         decision = apply_guardrails(decision, track, friendly_zones=friendly_zones)
 
     return assessment, decision
+
+
+def decide_full(
+    track: dict,
+    roe_rules: list[ROERule],
+    inside_protected_zone: bool = False,
+    heading_toward_zone: bool = False,
+    friendly_zones: list[FriendlyZone] | None = None,
+) -> Decision:
+    """Sync wrapper over full LangGraph 5-node production pipeline.
+
+    ``asyncio.run()`` ile çalışır; mevcut bir event loop içindeysen
+    doğrudan ``await llm_graph.run_graph(...)`` kullan.
+    """
+    from services.decision.llm_graph import run_graph
+
+    return asyncio.run(run_graph(
+        track, roe_rules,
+        friendly_zones=friendly_zones,
+        inside_protected_zone=inside_protected_zone,
+        heading_toward_zone=heading_toward_zone,
+    ))
