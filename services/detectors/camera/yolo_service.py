@@ -95,34 +95,64 @@ async def publish_event(nc: "nats.aio.client.Client", event: CameraDetectionEven
 # ── Ana servis döngüsü ────────────────────────────────────────────
 
 async def run(sensor_id: str, source: str | int, nats_url: str, model_name: str) -> None:
+    """Ana döngü — OpenCV ile frame yakala, YOLO ile tespit et, NATS'e yayınla.
+
+    Windows'ta YOLO.track(source=0) takılıyor; OpenCV DSHOW backend daha stabil.
+    """
+    import logging as _lg
+    import cv2
     import nats
     from ultralytics import YOLO
 
+    log_local = _lg.getLogger(__name__)
+    _lg.basicConfig(level=_lg.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    log_local.info("NATS bağlanıyor: %s", nats_url)
     nc = await nats.connect(nats_url)
+    log_local.info("YOLO yükleniyor: %s", model_name)
     model = YOLO(model_name)
 
     cap_source = int(source) if str(source).isdigit() else source
+    log_local.info("Kamera açılıyor: %s", cap_source)
+    cap = cv2.VideoCapture(cap_source, cv2.CAP_DSHOW if isinstance(cap_source, int) else cv2.CAP_ANY)
+    if not cap.isOpened():
+        log_local.error("Kamera açılamadı (source=%s)", cap_source)
+        await nc.drain()
+        return
+    log_local.info("Kamera açık, YOLO tespit başlıyor")
+
     frame_id = 0
     fps_ts = time.monotonic()
     fps_count = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                await asyncio.sleep(0.01)
+                continue
 
-    for result in model.track(source=cap_source, stream=True, verbose=False):
-        t0 = time.monotonic()
-        inf_ms = result.speed.get("inference", 0.0)
-        _inference_ms.observe(inf_ms)
+            t0 = time.monotonic()
+            results = model.predict(frame, verbose=False)
+            inf_ms = (time.monotonic() - t0) * 1000.0
+            _inference_ms.observe(inf_ms)
 
-        event = build_detection_event(result, sensor_id, frame_id, inf_ms)
-        await publish_event(nc, event)
+            for result in results:
+                event = build_detection_event(result, sensor_id, frame_id, inf_ms)
+                await publish_event(nc, event)
 
-        frame_id += 1
-        fps_count += 1
-        elapsed = time.monotonic() - fps_ts
-        if elapsed >= 1.0:
-            _fps.labels(sensor_id=sensor_id).set(fps_count / elapsed)
-            fps_count = 0
-            fps_ts = time.monotonic()
-
-    await nc.drain()
+            frame_id += 1
+            fps_count += 1
+            elapsed = time.monotonic() - fps_ts
+            if elapsed >= 1.0:
+                _fps.labels(sensor_id=sensor_id).set(fps_count / elapsed)
+                if frame_id % 30 == 0:
+                    log_local.info("frame=%d fps=%.1f last_inf=%.1fms", frame_id, fps_count / elapsed, inf_ms)
+                fps_count = 0
+                fps_ts = time.monotonic()
+            await asyncio.sleep(0)  # event loop'a nefes ver
+    finally:
+        cap.release()
+        await nc.drain()
 
 
 def main() -> None:
