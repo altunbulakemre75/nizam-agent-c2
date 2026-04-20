@@ -2,10 +2,10 @@
 
 [![CI](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml/badge.svg)](https://github.com/altunbulakemre75/nizam-cop/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-719%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
+[![Tests](https://img.shields.io/badge/tests-833%20passed-brightgreen)](https://github.com/altunbulakemre75/nizam-cop/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Çok-sensörlü **counter-UAS** (anti-drone) sistemi: pasif drone tespiti, Kalman füzyonu, TAK/CoT protokolü üzerinden taktik dağıtım, deterministic karar katmanı ve opsiyonel otonom intercept.
+Çok-sensörlü **counter-UAS** (anti-drone) sistemi: pasif drone tespiti, Kalman füzyonu, TAK/CoT protokolü üzerinden taktik dağıtım, **savunma-güvenli deterministic karar katmanı** ve opsiyonel otonom intercept.
 
 COP (Common Operating Picture) prototipi olarak başladı (Anduril Lattice / Palantir Gotham ilhamlı), 8-fazlı bir roadmap ile tam sensör-to-effector counter-UAS platformuna dönüştü.
 
@@ -15,15 +15,38 @@ COP (Common Operating Picture) prototipi olarak başladı (Anduril Lattice / Pal
 
 | Katman | Nerede | Ne İşe Yarar |
 |---|---|---|
-| **Sensör** | [`services/detectors/`](services/detectors/) | Kamera YOLO + Remote ID (ASTM F3411) tespit, NATS'e yayın |
-| **Füzyon** | [`services/fusion/`](services/fusion/) | 3D Kalman + Hungarian association + track lifecycle |
-| **Karar** | [`services/decision/`](services/decision/) | Deterministic kural engine + ROE — LLM hallucination'a kapalı |
-| **TAK** | [`services/cot/`](services/cot/) | Track → MIL-STD-2525 CoT XML (ATAK tablet uyumu) |
-| **Otonom** | [`services/autonomy/`](services/autonomy/) | Geofence + intercept planlayıcı + MAVSDK (PX4) köprüsü |
-| **3D UI** | [`ui/`](ui/) | CesiumJS + WebSocket live tracks |
-| **Gateway** | [`services/gateway/`](services/gateway/) | NATS → WebSocket köprüsü |
+| **Sensör** | [`services/detectors/`](services/detectors/) | Kamera YOLO + Remote ID (ASTM F3411) + WiFi OUI tespit, NATS yayın |
+| **Füzyon** | [`services/fusion/`](services/fusion/) | 3D Kalman + IMM + Hungarian + track lifecycle + DoS korumalı |
+| **Karar** | [`services/decision/`](services/decision/) | Kural engine + ROE + guardrails + LLM advisor (opsiyonel) |
+| **TAK** | [`services/cot/`](services/cot/) | Track → MIL-STD-2525 CoT XML + pytak workers |
+| **Otonom** | [`services/autonomy/`](services/autonomy/) | Geofence + intercept planner + MAVSDK bridge |
+| **3D UI** | [`ui/`](ui/) | CesiumJS + deck.gl + sensor coverage panel |
+| **Gateway** | [`services/gateway/`](services/gateway/) | NATS → WebSocket (JWT auth zorunlu) |
+| **Bridge** | [`services/bridge/`](services/bridge/) | COP sim → NATS + JSONL replay publisher |
+| **Knowledge** | [`services/knowledge/`](services/knowledge/) | LlamaIndex ROE RAG + TF-IDF fallback |
 | **COP (v1)** | [`cop/`](cop/) | FastAPI + 25 router + 29 AI analyzer (orijinal prototip) |
-| **Altyapı** | [`infra/`](infra/) | Docker compose: postgres, nats, redpanda, grafana, loki, tempo |
+| **Altyapı** | [`infra/`](infra/) | Docker: postgres + pgvector, nats, redpanda, grafana, loki, tempo, prometheus, portainer, promtail, nats-exporter |
+
+---
+
+## Güvenlik (Savunma Tasarımı)
+
+Bu sistem **deterministic rule-first** mimaridir. LLM hallucination'a karşı katmanlı savunma:
+
+| Katman | Koruma |
+|---|---|
+| **Rule engine** | Her karar kaynağı buradan çıkar. LLM override edemez. |
+| **ROE (Rules of Engagement)** | YAML tabanlı, komutanlık düzenler. `ENGAGE` varsayılan **disabled**. |
+| **Guardrails** | `input_track` (düşük güven) + `friendly_zone` (dost bölge) + `civilian_pattern` (sivil trafik) — her biri sadece **downgrade** yapabilir |
+| **LLM schema** | Claude/Ollama tool schema'sında `enum: ["log","alert","handoff"]` — **ENGAGE yok** |
+| **Prompt injection defense** | Allowlist field extraction + 6 pattern detector (ignore previous, system:, \[INST\], disregard...) |
+| **WebSocket auth** | JWT (HS256) zorunlu, invalid → close(4401) |
+| **NATS auth** | nkey tabanlı pub/sub rol ayrımı (sahte track injection engelleme) |
+| **DoS defense** | Per-sensor 500 ev/s rate limit + %95 hard circuit breaker |
+| **CoT TLS** | mTLS pytak enrollment (üretim zorunlu) |
+| **Audit trail** | Decision schema: `reasoning` (rule) + `guardrail_reasoning` (downgrade) + `llm_raw_response` (ham LLM) + `guardrails_triggered` (hangi guard tetikledi) + PostgreSQL checkpoint |
+
+Detaylı: [`docs/runbooks/secrets.md`](docs/runbooks/secrets.md)
 
 ---
 
@@ -35,45 +58,73 @@ COP (Common Operating Picture) prototipi olarak başladı (Anduril Lattice / Pal
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-Açılan portlar:
+12 konteyner ayağa kalkar. Açılan portlar:
 
 | Servis | Adres | Giriş |
 |---|---|---|
 | Grafana | http://localhost:5000 | admin / nizam_dev |
 | Prometheus | http://localhost:11090 | — |
 | Redpanda Console | http://localhost:10080 | — |
-| Portainer | https://localhost:11443 | ilk açılışta kurulum |
-| NATS | `nats://localhost:6222` | — |
+| Portainer | https://localhost:11443 | setup ilk açılışta |
+| NATS | `nats://localhost:6222` | (prod'da nkey auth) |
 | PostgreSQL | `localhost:7432` | nizam / nizam_dev |
+| NATS Exporter | http://localhost:7777/metrics | — |
 
-### 2. COP Prototipi (v1)
+Üretim öncesi **zorunlu**: secret rotation, NATS auth etkinleştirme — bkz [runbooks](docs/runbooks/).
+
+### 2. Python Bağımlılıklar
+
+```bash
+pip install -r requirements.txt
+# İlk kez: YOLO modeli indir
+python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+```
+
+### 3. COP Prototipi (v1)
 
 ```bash
 python -m uvicorn cop.server:app --reload --port 8100
 ```
 
-→ http://localhost:8100 (2D Leaflet harita, demo senaryolar, AI panelleri)
+→ http://localhost:8100 (2D Leaflet, simülasyon senaryoları, AI panelleri)
 
-### 3. Counter-UAS Servisleri (v2)
+### 4. Counter-UAS Servisleri (v2) — Production Path
 
 ```bash
-# Kamera tespit → NATS
+# Güvenlik env'leri
+export NIZAM_JWT_SECRET=$(openssl rand -base64 48)
+export ANTHROPIC_API_KEY=sk-ant-...        # opsiyonel (LLM advisor)
+export NIZAM_DECISION_LLM_ENABLED=true     # opsiyonel
+
+# Kamera tespit (webcam)
 python -m services.detectors.camera.yolo_service --source 0 --sensor-id cam-01
 
-# Remote ID (Bluetooth/WiFi) tespit
+# Remote ID (mock kaynak, gerçek BT için Linux + dongle)
 python -m services.detectors.rf.odid_service --sensor-id rf-01
 
-# Track Gateway (NATS → WebSocket UI için)
-python -m services.gateway.track_gateway    # :8200
+# WiFi OUI
+python -m services.detectors.rf.wifi_oui_service --sensor-id wifi-01
 
-# 3D CesiumJS UI
-cd ui && npm install && npm run dev          # :5173
+# Füzyon
+python -m services.fusion.fusion_service
+
+# COP → NATS köprüsü (simülasyon verisini pipeline'a bağlar)
+python -m services.bridge.cop_to_nats
+
+# Gateway (WebSocket, JWT gerekli)
+python -m services.gateway.track_gateway
+
+# CoT pipeline (FreeTAKServer varsa)
+python -m services.cot --tak-host localhost --tak-port 8087
+
+# 3D UI
+cd ui && npm install && npm run dev
 ```
 
-### 4. Test
+### 5. Test
 
 ```bash
-python -m pytest tests/ -q    # 719 test, ~45s
+python -m pytest tests/ -q     # 833 test, ~45s
 ```
 
 ---
@@ -82,49 +133,39 @@ python -m pytest tests/ -q    # 719 test, ~45s
 
 ```
                   ┌────────────────────────────────────┐
-                  │  Operatör UI (CesiumJS 3D Globe)   │
-                  │  Leaflet 2D (eski COP)             │
-                  │  ATAK Tabletler (CoT üzerinden)     │
+                  │  Operatör UI (CesiumJS + deck.gl   │
+                  │  + sensor coverage)                │
+                  │  ATAK Tabletler (CoT / mTLS)       │
                   └──────┬─────────────────────────────┘
-                         │ WebSocket / CoT XML
+                         │ WebSocket + JWT
                   ┌──────▼─────────────────────────────┐
-                  │  Gateway + TAK Sender              │
-                  │  (nizam.tracks.active → WS + TCP)  │
+                  │  Gateway (auth zorunlu)            │
+                  │  + TAK Sender (mTLS)               │
                   └──────┬─────────────────────────────┘
                          │
                   ┌──────▼─────────────────────────────┐
-                  │  Karar Katmanı (kural-önce)         │
-                  │  ThreatAssessment → ROE → Decision │
-                  │  (LOG / ALERT / ENGAGE / HANDOFF)  │
+                  │  Karar Katmanı (LangGraph 5-node)  │
+                  │  classify → retrieve_roe → reason  │
+                  │  → guardrail → finalize            │
+                  │  (LLM sanitize + ENGAGE yasak)     │
                   └──────┬─────────────────────────────┘
                          │
                   ┌──────▼─────────────────────────────┐
-                  │  Füzyon Motoru                     │
-                  │  Kalman + Hungarian + Lifecycle    │
+                  │  Füzyon (Kalman + IMM + Hungarian) │
+                  │  + rate limit + circuit breaker    │
                   └──────┬─────────────────────────────┘
-                         │ NATS nizam.raw.*
+                         │ NATS (nkey pub/sub auth)
          ┌───────────────┼─────────────────────────────┐
          │               │                             │
   ┌──────▼───┐  ┌────────▼─────┐  ┌─────────────────┐  │
-  │ Camera   │  │ RF (ODID)    │  │ Radar / AIS /   │  │
-  │ YOLO     │  │ BT + WiFi    │  │ Generic REST    │  │
+  │ Camera   │  │ RF (ODID     │  │ COP Sim →       │  │
+  │ YOLO     │  │  + WiFi OUI) │  │ NATS Bridge     │  │
   └──────────┘  └──────────────┘  └─────────────────┘  │
                                                         │
                       Otonom Kol (opsiyonel):           │
                       Intercept Planner → MAVSDK → PX4 ◄┘
+                      (geofence + operatör onayı)
 ```
-
----
-
-## Güvenlik Tasarım İlkeleri (Savunma Projesi)
-
-1. **LLM asla ENGAGE kararı vermez** — tüm eylemler deterministic rule engine'den çıkar. LLM ilerideki advisor rolünde önerir, kural override edemez.
-2. **Varsayılan ROE'da `ENGAGE` kuralları DEVRE DIŞI** — üretim deployment'ı komutanlığın aktifleştirmesini gerektirir.
-3. **`ENGAGE` her durumda operatör onayı gerektirir** — kural yazarı unutsa bile sistem onayı zorla ekler.
-4. **Geofence ihlal kontrolü** — no-fly zone içine intercept komutu planlanırsa `InterceptRefused` raise edilir.
-5. **CoT TLS dışına çıkmaz** — üretim için pytak mTLS enrollment zorunlu.
-6. **Audit trail** — her karar hangi ROE kuralından geldi + tetikleyici faktörler Decision nesnesinde.
-7. **Public cloud deploy yok** — localhost veya VPN içi özel sunucu.
 
 ---
 
@@ -132,46 +173,71 @@ python -m pytest tests/ -q    # 719 test, ~45s
 
 ```
 nizam-agent-c2/
-├── AGENTS.md                   # AI agent anayasası (oturum başında okunur)
+├── AGENTS.md                   # AI agent anayasası
 ├── CLAUDE.md                   # COP geliştirme notları
 ├── docs/
-│   └── NIZAM_Envanter_ve_Plan.md   # 89 repo + 18-haftalık faz planı
-├── clone_vendors.sh            # vendor/ altına 89 referans repo çek
-├── vendor/                     # 89 OSS repo (read-only, .gitignore)
-├── infra/                      # docker-compose + grafana + prometheus + tempo
-├── config/roe/                 # Rules of Engagement (YAML)
-├── services/                   # Yeni counter-UAS servisleri
-│   ├── detectors/camera/
-│   ├── detectors/rf/
-│   ├── fusion/
-│   ├── gateway/
-│   ├── cot/
-│   ├── decision/
-│   ├── autonomy/
-│   └── schemas/
-├── ui/                         # CesiumJS 3D operatör UI
-├── cop/                        # Orijinal COP prototipi (FastAPI)
-├── ai/                         # 29 AI analyzer (threat, fusion, anomaly, ...)
-├── tests/                      # 719 pytest
-└── shared/                     # clock, RNG, config (test determinizmi)
+│   ├── NIZAM_Envanter_ve_Plan.md   # 89 repo + 18-haftalık plan
+│   ├── roe/                        # ROE doktrin markdown'ları (RAG)
+│   └── runbooks/                   # camera, fusion, infra, secrets,
+│       └── first-run-issues.md     # canlı deploy sorunları
+├── infra/
+│   ├── docker-compose.yml
+│   ├── nats/nats-server.conf       # nkey auth config
+│   ├── prometheus/{prometheus,alerts}.yml
+│   ├── grafana/dashboards/
+│   ├── promtail/config.yml
+│   ├── freetakserver/Dockerfile    # self-build FTS
+│   └── DEPLOY.md
+├── config/
+│   ├── roe/default.yaml            # varsayılan ROE (ENGAGE disabled)
+│   ├── friendly_zones.yaml         # dost bölge listesi
+│   └── cameras/cam-01.yaml         # kamera kalibrasyon
+├── services/
+│   ├── detectors/
+│   │   ├── camera/                 # YOLO + DSHOW + calibration
+│   │   └── rf/                     # ODID parser, WiFi OUI, live listener
+│   ├── fusion/                     # KF + IMM + association + lifecycle + catalog
+│   ├── bridge/                     # COP → NATS, JSONL replay
+│   ├── gateway/                    # WebSocket + JWT auth
+│   ├── cot/                        # CoT builder + workers + validator
+│   ├── decision/                   # rules + ROE + guardrails + LLM advisor + graph
+│   ├── knowledge/                  # LlamaIndex ROE RAG
+│   ├── autonomy/                   # geofence + intercept + MAVSDK
+│   └── schemas/                    # Pydantic modelleri
+├── shared/
+│   ├── auth.py                     # JWT (HS256)
+│   ├── rate_limit.py               # sliding window + circuit breaker
+│   ├── geo.py                      # pyproj ENU + düz-Earth fallback
+│   ├── lifecycle.py                # graceful shutdown
+│   ├── logging_setup.py            # JSON structured logging
+│   ├── clock.py, rng.py            # test determinizmi
+├── scripts/
+│   ├── clone_vendors.sh            # 89 referans repo
+│   ├── gen_tak_certs.sh            # mTLS CA + client cert
+│   └── gen_nats_keys.sh            # NATS nkey üretici
+├── ui/                             # Vite + TS + CesiumJS + deck.gl
+├── cop/                            # v1 COP prototipi (623 test)
+├── ai/                             # 29 AI analyzer
+├── tests/                          # 833 test, ~45s
+└── vendor/                         # 89 referans repo (read-only, .gitignore)
 ```
 
 ---
 
-## 18 Haftalık Plan — Durum
+## 18 Haftalık Plan — Durum (v5)
 
-| Faz | İçerik | Durum |
-|---|---|---|
-| 0 | Altyapı (Docker compose stack) | ✅ |
-| 1 | Tek-sensör tespit MVP (kamera) | ✅ |
-| 2 | RF tespit (OpenDroneID, DJI OcuSync) | ✅ (ODID tamam; DJI GNU Radio donanım ileride) |
-| 3 | Multi-sensor füzyon (Kalman + Hungarian) | ✅ |
-| 4 | 3D operatör UI (CesiumJS) | ✅ |
-| 5 | TAK/CoT dağıtım (pytak uyumlu) | ✅ |
-| 6 | AI Karar Katmanı (kural + opsiyonel LLM advisor) | ✅ (rule engine; LLM advisor ileride) |
-| 7 | Otonom intercept (PX4 + MAVSDK) | ✅ (simülasyon; SITL + Nav2 donanım testi ileride) |
+| Faz | İçerik | Durum | Yüzde |
+|---|---|---|---|
+| 0 | Altyapı (Docker + monitoring + logging) | ✅ | 100% |
+| 1 | Kamera tespit MVP | ✅ | 98% |
+| 2 | RF tespit (ODID parser + WiFi OUI) | ✅ kod | 50% (donanım bekliyor) |
+| 3 | Multi-sensor füzyon (IMM + DoS guard) | ✅ | 97% |
+| 4 | 3D operatör UI | ✅ | 80% |
+| 5 | TAK/CoT dağıtım | ✅ | 95% |
+| 6 | AI Karar Katmanı (LangGraph + guardrails) | ✅ | 95% |
+| 7 | Otonom intercept | ✅ shell | 20% (SITL bekliyor) |
 
-Detaylar: [`docs/NIZAM_Envanter_ve_Plan.md`](docs/NIZAM_Envanter_ve_Plan.md)
+Detay: [`docs/NIZAM_Envanter_ve_Plan.md`](docs/NIZAM_Envanter_ve_Plan.md)
 
 ---
 
@@ -180,14 +246,16 @@ Detaylar: [`docs/NIZAM_Envanter_ve_Plan.md`](docs/NIZAM_Envanter_ve_Plan.md)
 | Alan | Test |
 |---|---|
 | COP (v1) | 623 |
-| Camera detector | 4 |
-| RF ODID (parser + service) | 15 |
-| Fusion (KF + association + lifecycle) | 18 |
-| Gateway (WebSocket hub) | 5 |
-| CoT (builder + bridges) | 16 |
-| Decision (rules + ROE + graph) | 23 |
+| Camera detector + calibration | 10 |
+| RF (ODID parser + service + WiFi OUI) | 24 |
+| Fusion (KF + IMM + association + lifecycle + geo + catalog) | 27 |
+| Gateway (WebSocket + JWT auth) | 9 |
+| CoT (builder + bridges + validator + enrichment) | 20 |
+| Decision (rules + ROE + graph + LLM + guardrails + sanitize) | 49 |
 | Autonomy (geofence + planner + MAVSDK) | 15 |
-| **Toplam** | **719** |
+| Bridge + Knowledge + Integration | 15 |
+| Shared (auth + rate_limit + geo) | 19 |
+| **Toplam** | **833** |
 
 ```bash
 python -m pytest tests/ -q    # ~45s
@@ -195,57 +263,30 @@ python -m pytest tests/ -q    # ~45s
 
 ---
 
-## Kod Satırları
+## Production Checklist
 
-| Bölüm | Satır |
-|---|---|
-| `cop/` (v1 COP) | 6,710 |
-| `ai/` (29 analyzer) | 8,057 |
-| `services/` (yeni v2 counter-UAS) | 1,894 |
-| `shared/` + `replay/` + `scripts/` | 3,758 |
-| `cop/static/` (JS + CSS + HTML) | 7,351 |
-| **Production toplam** | **~27,770** |
-| Testler | 7,683 |
+Pilot/üretim öncesi **zorunlu**:
 
----
-
-## Referans Vendor Repos (89 adet, read-only)
-
-`vendor/` altında 12 teknoloji alanında 89 OSS repo şablon olarak bulunur:
-Computer Vision (YOLO, ByteTrack, OpenCV), Robotics (PX4, MAVSDK, Nav2), AI Agent
-(Claude SDK, LangGraph, LlamaIndex), Local LLM (llama.cpp, Ollama, vLLM),
-Data Streaming (NATS, Redpanda, Flink), Vector DB (FAISS, Qdrant, pgvector),
-Monitoring (Prometheus, Grafana, Tempo), Deployment (Kamal, Portainer),
-Sensor Fusion (filterpy, Sensor-Fusion-3D-MOT, smart_track),
-TAK/CoT (pytak, FreeTAKServer, adsbxcot), 3D GIS (CesiumJS, deck.gl, maptalks),
-SDR/RF (GNU Radio, opendroneid-core-c, SDR++).
-
-İlk kurulum:
-
-```bash
-bash clone_vendors.sh           # ~3.2 GB, 10–30 dk
-bash clone_vendors.sh 10-tak    # sadece bir alan
-```
-
-Kurallar:
-- `vendor/` **read-only** — agent'lar ve geliştiriciler referans olarak okur, değiştirmez
-- Düzeltme gerekiyorsa `services/` içinde wrapper yaz
-- Yeni servis yazarken önce `AGENTS.md` tablosundaki şablon repoya bak
+- [ ] Secret rotation — bkz [`secrets.md`](docs/runbooks/secrets.md)
+- [ ] NATS nkey auth etkinleştirme — [`gen_nats_keys.sh`](scripts/gen_nats_keys.sh)
+- [ ] mTLS cert üretimi — [`gen_tak_certs.sh`](scripts/gen_tak_certs.sh)
+- [ ] `NIZAM_JWT_SECRET` (>=32 karakter) set
+- [ ] PostgreSQL backup stratejisi (pgbackrest)
+- [ ] Prometheus alert sessizleştirme dışarıdan yönetim
+- [ ] ROE yaml komutanlık onayı
+- [ ] Friendly zones listesi doğrulama
+- [ ] Kamera kalibrasyon (per-sensor GPS + intrinsics)
+- [ ] YOLO drone-özel fine-tune (COCO yerine)
+- [ ] Linux deploy (monitor-mode WiFi için)
 
 ---
 
 ## Lisans
 
-MIT — bkz [`LICENSE`](LICENSE)
-
-Referans `vendor/` repolarının her biri kendi lisansına tabidir.
+MIT — bkz [`LICENSE`](LICENSE). Vendor repoları kendi lisanslarına tabi.
 
 ---
 
 ## Katkı
 
-Bu proje savunma sanayi odaklı bir prototip — PR'lar öncelikle güvenlik-kritik
-path'lerde (karar katmanı, geofence, ENGAGE kuralları) yüksek kodlama standardı
-ve test kapsamı gerektirir.
-
-TDD zorunlu (test önce). Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`).
+Savunma projesi. PR'larda özellikle güvenlik-kritik path'ler (karar katmanı, guardrails, geofence, ENGAGE kuralları, LLM sanitize) yüksek test kapsamı + TDD zorunlu. Conventional Commits.
