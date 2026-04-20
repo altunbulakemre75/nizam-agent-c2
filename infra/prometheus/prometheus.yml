@@ -1,5 +1,5 @@
 global:
-  scrape_interval: 15s
+  scrape_interval: 5s
   evaluation_interval: 15s
 
 scrape_configs:
@@ -7,18 +7,40 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
+  # ── Eski COP ───────────────────────────────────────────────────
   - job_name: nizam-cop
     static_configs:
       - targets: ["host.docker.internal:8100"]
     metrics_path: /api/metrics
-    scrape_interval: 5s
 
-  - job_name: nats
+  # ── NIZAM Counter-UAS Servisleri ──────────────────────────────
+  - job_name: nizam-camera
     static_configs:
-      - targets: ["nats:8222"]
+      - targets: ["host.docker.internal:8001"]
+
+  - job_name: nizam-rf
+    static_configs:
+      - targets:
+          - "host.docker.internal:8002"
+          - "host.docker.internal:8004"
+
+  - job_name: nizam-fusion
+    static_configs:
+      - targets: ["host.docker.internal:8003"]
+
+  - job_name: nizam-gateway
+    static_configs:
+      - targets: ["host.docker.internal:8200"]
     metrics_path: /metrics
 
+  # ── Infra ──────────────────────────────────────────────────────
   - job_name: redpanda
     static_configs:
       - targets: ["redpanda:9644"]
     metrics_path: /metrics
+
+  # NATS: varsayılan JSON /varz endpoint'i; Prometheus format için ayrı
+  # exporter (prometheus-nats-exporter) gerekir. Şimdilik kapalı.
+  # - job_name: nats
+  #   static_configs:
+  #     - targets: ["nats-exporter:7777"]
